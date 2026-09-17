@@ -1,11 +1,33 @@
-# <Feature name>
+# `xam` CLI and the initial setup
 
 ## Outcome
 
-Describe the user-visible or system-level result in one short paragraph.
+The `bassia setup` command will initialize a `Bassia` repo and registers existing `git` repositories/components with it.
+
 
 ## Context
 
+I want to initialize an empty `Bassia` repo, in, say, an empty volume `R:\`.
+
+```sh
+R:\> bassia setup
+```
+creates a folder structure
+
+```
+R:\
+|__ .bassia                   <-- meta-repo
+    |__ .git                  <-- meta-repo storage. Prospective alternative: distributed database
+    |__ config.toml         
+    |__ components.toml       <-- monorepo components (= `git` repositories)
+|__ component_1
+    |__ .git
+    |__ ...       
+|__ component_2
+    |__ .git
+    |__ ...
+
+```
 Explain the problem, relevant constraints, and links to dependent feature records or external issues.
 
 ## Acceptance criteria

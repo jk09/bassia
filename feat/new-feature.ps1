@@ -9,7 +9,7 @@ if (-not (Test-Path -LiteralPath $templatePath -PathType Leaf)) {
 }
 
 do {
-	$featureId = "xam-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+	$featureId = "bassia-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
 	$featureDirectory = Join-Path $proposedDirectory $featureId
 } while (Test-Path -LiteralPath $featureDirectory)
 
