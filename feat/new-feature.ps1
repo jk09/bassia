@@ -14,6 +14,6 @@ do {
 } while (Test-Path -LiteralPath $featureDirectory)
 
 $null = New-Item -ItemType Directory -Path $featureDirectory
-Copy-Item -LiteralPath $templatePath -Destination (Join-Path $featureDirectory 'FEAT.md')
+Copy-Item -LiteralPath $templatePath -Destination (Join-Path $featureDirectory 'SPEC.md')
 
 Write-Output $featureDirectory
