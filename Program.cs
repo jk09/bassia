@@ -1,10 +1,19 @@
-﻿using System.ComponentModel;
+﻿namespace Bassia;
+
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
-return await MiniRepoCli.RunAsync(args);
 
-internal static class MiniRepoCli
+static class Program
+{
+	public static async Task<int> Main(string[] args)
+	{
+		return await ProgramCli.RunAsync(args);
+	}
+}
+
+internal static class ProgramCli
 {
 	private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -51,7 +60,7 @@ internal static class MiniRepoCli
 	{
 		if (args.Length != 2 || (args[0] != "-m" && args[0] != "--message") || string.IsNullOrWhiteSpace(args[1]))
 		{
-			Console.Error.WriteLine("Usage: minirepo commit -m \"message\"");
+			Console.Error.WriteLine("Usage: bassia commit -m \"message\"");
 			return 2;
 		}
 
@@ -237,15 +246,15 @@ internal static class MiniRepoCli
 
 	private static int UnknownCommand(string command)
 	{
-		Console.Error.WriteLine($"Unknown command '{command}'. Run 'minirepo --help' for usage.");
+		Console.Error.WriteLine($"Unknown command '{command}'. Run 'bassia --help' for usage.");
 		return 2;
 	}
 
 	private static void PrintHelp()
 	{
-		Console.WriteLine("MiniRepo - a Git-based version control CLI");
+		Console.WriteLine("bassia - a Git-based version control CLI");
 		Console.WriteLine();
-		Console.WriteLine("Usage: minirepo <command>");
+		Console.WriteLine("Usage: bassia <command>");
 		Console.WriteLine();
 		Console.WriteLine("Commands:");
 		Console.WriteLine("  status                 Show the working tree status");
