@@ -2,7 +2,7 @@
 
 ## Outcome
 
-The `bassia setup` command will initialize a `Bassia` repo and registers existing `git` repositories/components with it.
+Initialize a `Bassia` monorepo and add components into it.
 
 
 ## Context
@@ -10,43 +10,51 @@ The `bassia setup` command will initialize a `Bassia` repo and registers existin
 I want to initialize an empty `Bassia` repo, in, say, an empty volume `R:\`.
 
 ```sh
-R:\> bassia setup
+R:\> bassia setup init
+R:\> bassia setup add-component https://github.com/myrepo/component_1.git
+R:\> bassia setup add-component https://github.com/myrepo/component_2.git
+R:\> # populate components
 ```
-creates a folder structure
+creates the following folder structure
 
 ```
 R:\
 |__ .bassia                   <-- meta-repo
     |__ .git                  <-- meta-repo storage. Prospective alternative: distributed database
     |__ config.toml         
-    |__ components.toml       <-- monorepo components (= `git` repositories)
+    |__ components.toml       <-- monorepo components registration
 |__ component_1
-    |__ .git
-    |__ ...       
+    |__ .git                  <-- cloned on-demand as a bare repo, maybe sparsely, when a project is worked on
 |__ component_2
     |__ .git
+|__ .workspace                <-- workspace for agents, `git`  worktrees of components
     |__ ...
 
 ```
-Explain the problem, relevant constraints, and links to dependent feature records or external issues.
+
+- `bassia setup init` called in an empty folder creates the `.bassia` meta-repo folder. 
+- Preferable location of a `Bassia` monorepo is an empty Windows *Dev Drive volume* for better performance and isolation.
 
 ## Acceptance criteria
 
-- [ ] State observable behavior that can be verified.
-- [ ] Include failure behavior and compatibility expectations where relevant.
+- [ ] Able to initialize an empty `Bassia` monorepo in an empty folder or volume
+- [ ] Able to clone repos (e.g. from `GitHub`) and add them as `Bassia`  monorepo components. Bare repos are cloned.
+- [ ] On success or failure AI-parsable messages are printed (e.g. in JSON format)
 
 ## Approach
 
-Describe the intended boundaries and major implementation steps. Avoid file-by-file instructions that will become stale.
+Use standard approach for command line utilities parameter parsing. Avoid 3rd party libraries for this functionality.
 
 ## Decisions
 
-- Record durable decisions and their rationale as they are made.
+- `bassia setup` provides initialization of a `Bassia` monorepo, and adding components into it.
 
 ## Progress
 
-- [ ] Add only meaningful implementation and validation milestones.
+- [ ] `bassia setup` with basic commands
 
 ## Validation
 
-List the commands or manual checks that prove the acceptance criteria.
+Validate commands
+- `bassia setup init`
+- `bassia add-component https://github.com/jk09/example.git`
