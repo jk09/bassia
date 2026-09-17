@@ -4,7 +4,7 @@ The `feat/` directory is the versioned source of truth for work that spans more 
 
 ## Workflow
 
-1. Create `feat/<short-name>.md` from `feat/template.md` before implementation.
+1. Run `./feat/new-feature.ps1` to create `feat/proposed/xam-<id>/FEAT.md` from `feat/template.md` before implementation.
 2. Keep the record focused on observable behavior and durable decisions. Do not use it as a transcript or scratchpad.
 3. Update its status and checklist in the same commits that change the implementation.
 4. Record material design changes under **Decisions**, including rejected alternatives when they may be reconsidered later.
