@@ -37,9 +37,9 @@ R:\
 
 ## Acceptance criteria
 
-- [ ] Able to initialize an empty `Bassia` monorepo in an empty folder or volume
-- [ ] Able to clone repos (e.g. from `GitHub`) and add them as `Bassia`  monorepo components. Bare repos are cloned.
-- [ ] On success or failure AI-parsable messages are printed (e.g. in JSON format)
+- [x] Able to initialize an empty `Bassia` monorepo in an empty folder or volume
+- [x] Able to clone repos (e.g. from `GitHub`) and add them as `Bassia`  monorepo components. Bare repos are cloned.
+- [x] On success or failure AI-parsable messages are printed (e.g. in JSON format)
 
 ## Approach
 
@@ -51,10 +51,10 @@ Use standard approach for command line utilities parameter parsing. Avoid 3rd pa
 
 ## Progress
 
-- [ ] `bassia setup` with basic commands
+- [x] `bassia setup` with basic commands
 
 ## Validation
 
 Validate commands
 - `bassia setup init`
-- `bassia add-component https://github.com/jk09/example.git`
+- `bassia setup add-component https://github.com/jk09/example.git`

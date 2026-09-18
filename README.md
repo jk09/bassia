@@ -1,6 +1,6 @@
-# MiniRepo
+# `Bassia`
 
-MiniRepo is a small command-line interface built on top of Git. It delegates repository storage, history, branching, and commit behavior to the installed Git executable instead of reimplementing Git internals.
+`Bassia` is a small command-line interface built on top of Git. It delegates repository storage, history, branching, and commit behavior to the installed Git executable instead of reimplementing Git internals.
 
 ## Requirements
 
@@ -17,9 +17,13 @@ dotnet run -- status
 dotnet run -- log
 dotnet run -- branch
 dotnet run -- commit -m "Describe the change"
+dotnet run -- setup init
+dotnet run -- setup add-component https://github.com/myrepo/component_1.git
 ```
 
-MiniRepo passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
+`setup init` initializes a `Bassia` monorepo in the current, empty folder: a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent worktrees. `setup add-component <url>` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`. Both commands print a JSON result on stdout (success) or stderr (failure) for machine consumption.
+
+`Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
 
 ## Build
 

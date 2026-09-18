@@ -9,3 +9,25 @@
 ## Tech stack
 
 The `Bassia` initially consists of a command-line frontend written in .NET which relies on a separately installed `git` to maintain the components and meta-repo. 
+
+## Agentic workflow
+
+Commit the working tree after each agentic run (i.e. once the requested change is complete), using this commit message format:
+
+```
+feat|chore|fix|refactor(<area>): <short summary>
+
+<spec reference>
+
+<agentic run summary>
+```
+
+- Pick the single type that matches the change: 
+    - `feat` for a new capability
+    - `fix` for a bug fix
+    - `refactor` for internal restructuring with no behavior change 
+    - `chore` for everything else (docs, tooling, feature-record bookkeeping).
+- `<area>` names the affected component or area (e.g. `setup`, `cli`, `docs`).
+- `<short summary>` is a one-line summary of the changes
+- `<spec reference>` points to the driving feature record, e.g. `bassia-d3226a2c/SPEC.md`, or `n/a` when there is none.
+- `<agentic run summary>` recaps what the run did and validated. Preferably copy the agentic summary verbatim in Markdown format.
