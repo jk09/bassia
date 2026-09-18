@@ -11,4 +11,9 @@
     <InternalsVisibleTo Include="Bassia.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="PowerArgs" Version="4.0.3" />
+    <PackageReference Include="Tomlyn.Signed" Version="2.10.1" />
+  </ItemGroup>
+
 </Project>
