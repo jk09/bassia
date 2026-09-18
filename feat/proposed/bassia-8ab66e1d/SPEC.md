@@ -52,6 +52,23 @@ R:\
 ```
 The meta-repo's `components.toml` will contain the information
 
+#### Component references
+
+A component can refer to another component (e.g. a `.csproj` referencing a `.csproj` in a nested component). This reference is recorded in `components.toml` as a dependency edge between the two components' logical names. The reference graph formed by all such edges must be acyclic — a component cannot (transitively) depend on itself.
+
+`components.toml` only records the dependency graph and logical-name registry; it does not pin a component to a specific commit-ish. The commit-ish pin is per agentic run, supplied via `-select` and logged in that run's metadata record (see "Select a monorepo state" above). This is a deliberate difference from BitKeeper components, where a component's version is pinned by a delta in the parent product's own ChangeSet history: Bassia keeps `components.toml` free of version state so it doesn't need to be updated every time a component moves, at the cost of not getting an atomic, permanent cross-component version record for `main` "for free" — if that's later needed (e.g. to durably record which component versions were integrated together), it should be a separate lockfile written at integration time, not a change to `components.toml` itself.
+
+#### Materializing nested components: cache + junctions
+
+To populate `.workspace/agentic-run-1/` with nested components efficiently and consistently, components are not cloned directly into the workspace. Instead:
+
+1. Every component selected for the run (including transitive dependencies pulled in via the acyclic reference graph) is cloned and checked out once into a shared cache area (outside `.workspace`, keyed by component + commit-ish).
+2. Inside `.workspace/agentic-run-1/`, each component's nested-component subfolders are created as filesystem junctions (e.g. Windows junctions/`mklink /J`, or symlinks on POSIX) pointing into the cache, rather than as copies or nested clones.
+
+This gives two benefits:
+- Speed: a component checked out once in the cache can be junctioned into many workspaces without re-cloning or copying.
+- Consistency: if `component-1` and `component-2` both nest `component-lib`, both junctions resolve to the very same cache location and commit-ish, so the agentic run always sees one consistent copy of `component-lib`, never two divergent ones.
+
 ## Acceptance criteria
 
 - [ ] State observable behavior that can be verified.
@@ -64,6 +81,8 @@ Describe the intended boundaries and major implementation steps. Avoid file-by-f
 ## Decisions
 
 - Record durable decisions and their rationale as they are made.
+- `components.toml` records only the component dependency graph (acyclic) and logical names, not version pins; commit-ish pins are per agentic run via `-select`, not baked into the meta-repo.
+- Nested components are materialized via a shared cache (one clone+checkout per component/commit-ish) plus filesystem junctions inside `.workspace/agentic-run-*`, rather than per-workspace clones, so shared nested components (e.g. a common `component-lib`) resolve to one consistent copy across all referencing components.
 
 ## Progress
 
