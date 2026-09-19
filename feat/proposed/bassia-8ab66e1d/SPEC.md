@@ -60,13 +60,18 @@ A component can refer to another component (e.g. a `.csproj` referencing a `.csp
 
 ##### Materializing nested components: cache + junctions
 
-To populate `.workspace/agentic-run-1/` with nested components efficiently and consistently, components are not cloned directly into the workspace. Instead:
+Only *nested* components go through the cache; components named explicitly in `-select` do not.
 
-1. Every component selected for the run (including transitive dependencies pulled in via the acyclic reference graph) is cloned and checked out once into a shared cache area (outside `.workspace`, keyed by agentic run id).
-2. Inside `.workspace/agentic-run-1/`, each component's nested-component subfolders are created as filesystem junctions (e.g. Windows junctions/`mklink /J`, or symlinks on POSIX) pointing into the cache, rather than as copies or nested clones.
+- Components explicitly named in `-select` are cloned and checked out directly into `.workspace/agentic-run-1/`, one real checkout per component. This is a normal checkout on a unique branch, since the agent needs to commit to it directly (see "Run the agent" below).
+- Components that are pulled in only transitively — reachable from a selected component via the acyclic reference graph in `components.toml`, but not themselves named in `-select` — are materialized via a shared cache instead:
+
+  1. Each such nested component is cloned and checked out once into a shared cache area (outside `.workspace`, keyed by agentic run id).
+  2. Inside `.workspace/agentic-run-1/`, that nested component appears as a filesystem junction (e.g. Windows junctions/`mklink /J`, or symlinks on POSIX) pointing into the cache, at the subfolder position its referencing component expects — rather than as a copy or a nested clone.
+
+If a component is both explicitly selected and also reachable as a nested dependency of another selected component, the explicit selection wins: it remains a direct checkout in `.workspace/agentic-run-1/`, and any component that nests it gets a junction pointing at that same checkout instead of a separate cache copy.
 
 This gives two benefits:
-- Speed: a component checked out once in the cache can be junctioned into many workspaces without re-cloning or copying.
+- Speed: a nested component checked out once in the cache can be junctioned into many workspaces without re-cloning or copying.
 - Consistency: if `component-1` and `component-2` both nest `component-lib`, both junctions resolve to the very same cache location and commit-ish, so the agentic run always sees one consistent copy of `component-lib`, never two divergent ones.
 
 
@@ -108,7 +113,7 @@ R:\
 |__ .workspace
     |__ .agentic-runs
         |__ .git              <-- bare repo which holds the information about the agentic runs
-    |__ .agentic-run-1
+    |__ agentic-run-1
         |__ component-1       <-- https://github.com/examplename/component-1.git @ tag-1
         |   |__ script1.cs
         |__ component-2       <-- https://github.com/examplename/component-2.git @ tag-2 
@@ -118,8 +123,8 @@ R:\
 The agentic run modifies the files `script1.cs`, `script2.cs`, and commits in both repos local to the agentic run.  Each commit messages will contain the summary of the agentic run, including the tags of the agentic run metadata (see above). Each commit will be tagged with annotated tag. The tag names will uniquely identify that the commits belong together and to a particular agentic run. These commits will involve checked out branches (created uniquely for this agentic run, and tied together by their names), since we obviously need a checkout to have files to operate on. This is not a problem, as there is only a single agentic run editing each component's index, and the plumbing commits without a checkout are not needed for performance. The commit sequence is not transactional, so one commit can succeed and other can fail (NOT for reasons like incorrect merges, which cannot happen in this scenario, just for low level technical repo failures). In this case we may retry, or ultimately abandon the entire agentic run, and discarding the workspace repos.
 
 Once each component's changes are committed and tagged, the respective tags are pushed into local component repos at the top level (the `R:\` volume in the terminology used here), which serve as the sources of truth.
-In other words, the repos `R:\component-1/.git`, `R:\component-2/.git` are updated.
- NO MERGE OR CHECKOUT IS PERFORMED, this will be a separate feature. The top-level components repos are gradually populated by tagged commits , and it can be inferred from the tags and the agentic run metadata in `R:\.workspace/.agentic-runs` which agentic run is responsible for what.
+In other words, the repos `R:\component-1\.git`, `R:\component-2\.git` are updated.
+ NO MERGE OR CHECKOUT IS PERFORMED, this will be a separate feature. The top-level components repos are gradually populated by tagged commits , and it can be inferred from the tags and the agentic run metadata in `R:\.workspace\.agentic-runs` which agentic run is responsible for what.
 
 Consider now the general case, the point 1 and the point 2 also. The assumed monorepo structure will be
 
@@ -130,7 +135,7 @@ R:\
 |__ .workspace
     |__ .agentic-runs
         |__ .git              
-    |__ .agentic-run-1
+    |__ agentic-run-1
         |__ component-1       
         |   |__ script1.cs
             |__ component-2/     <-- junction to a cached folder, the `component-2.git` repo checked out at the tag-2 per `-select` argument
@@ -143,17 +148,27 @@ The `component-1` includes `component-2` as a junctioned subfolder. What if we c
 ## Acceptance criteria
 
 
-- [ ] Initialize a `Bassia` monorepo in the temp folder (called here `R:\` to remain consistent).  The monorepo will have a single component `https://github.com/jk09/example.git`. Run the command `bassia agent -select <example component@HEAD> -run <claude, add C# "hello, world" script, no csproj>`. Verify that at the end there's a tagged commit in `R:\example\.git` with this content.
+- [ ] Initialize a `Bassia` monorepo in the temp folder (called here `R:\` to remain consistent). The monorepo will have a single component, cloned locally to `R:\example` from `https://github.com/jk09/example.git`. Create an annotated tag, e.g. `v0`, on the component's current commit — this is the immutable identifier `-select` requires (see "Select a monorepo state"), not `HEAD` or a branch. Run the command `bassia agent -select <example component@v0> -run <claude, add C# "hello, world" script, no csproj>`. Verify that:
+  - at the end there's a new tagged commit in `R:\example\.git` containing the "hello, world" script;
+  - the `v0` tag itself still points at the original, unmodified commit;
+  - `R:\example` was populated as a direct checkout in `.workspace\agentic-run-1\example` (not a cache + junction), since it was explicitly named in `-select` and has no nested components.
 
 ## Approach
 
-Describe the intended boundaries and major implementation steps. Avoid file-by-file instructions that will become stale.
+- **Selection layer**: parse `-select <component@commit-ish>` pairs against `components.toml`'s logical-name registry; resolve each to a concrete commit and record the literal commit-ish string (expected to be an annotated tag) for later logging. Reject unregistered logical names.
+- **Workspace materialization layer**: given the resolved selection, compute the reference-graph closure from `components.toml`. For each explicitly selected component, clone/checkout directly into `.workspace/agentic-run-*/`. For each component that appears only as a transitive/nested dependency, clone+checkout once into the per-run cache and create a junction at the expected subfolder position. Detect and reject cyclic references before materializing anything.
+- **Agent execution layer**: spawn the `-run` command as a child process rooted at `.workspace/agentic-run-*/`, without altering its working directory expectations.
+- **Run-metadata layer**: before and after the agent runs, write a run-metadata record (model, prompt, `-select` value, timestamps, status) as a commit created via `git` plumbing directly into `.workspace/.agentic-runs` (no checkout of that bare repo), tagged with the `agent/<run-id>/<lineage-index>` convention; each subsequent state change is a new child commit + tag.
+- **Result commit/push layer**: for each modified component (both direct checkouts and cache-backed nested checkouts), commit on a run-unique branch, tag the commit, then push the tag to that component's source-of-truth repo at `R:\<component>`. No merge or checkout is performed at the source-of-truth repo. Treat the multi-component commit/push sequence as non-transactional: on partial failure, support retrying the remaining components or abandoning the run and discarding the workspace/cache without touching sources of truth that already received a tag.
 
 ## Decisions
 
-- Record durable decisions and their rationale as they are made.
 - `components.toml` records only the component dependency graph (acyclic) and logical names, not version pins; commit-ish pins are per agentic run via `-select`, not baked into the meta-repo.
+- The `-select` commit-ish must be an annotated tag (not a branch or `HEAD`), since it is logged as the immutable provenance record for the run; callers are expected to create the tag ahead of time if one doesn't already exist.
+- Only components reachable *transitively* (via the reference graph, not named directly in `-select`) are materialized through the shared cache + junction mechanism. Components named explicitly in `-select` are always direct checkouts in `.workspace/agentic-run-*/`, since the agent commits to them on a real checked-out branch. If a component is both explicitly selected and also referenced by another selected component, the explicit checkout wins and other components junction to it instead of to a separate cache copy.
 - Nested components are materialized via a shared cache (one clone+checkout per component/commit-ish) plus filesystem junctions inside `.workspace/agentic-run-*`, rather than per-workspace clones, so shared nested components (e.g. a common `component-lib`) resolve to one consistent copy across all referencing components.
+- Two distinct commit strategies are used and must not be conflated: agentic-run *metadata* (in `.workspace/.agentic-runs`) is committed via `git` plumbing with no branch checkout, to avoid index-lock contention across many parallel runs; component *content* changes are committed on a normal checked-out, run-unique branch, since editing files requires a working tree and each component's checkout is only ever touched by a single run.
+- Tag names follow `<prefix>/<run-id>/<lineage-index>` (e.g. `agent/agentic-run-1/0`, `agent/agentic-run-1/1`) so that a tag can be mapped back to the run and to its position in that run's history, for both run-metadata tags and component-content tags.
 
 ## Progress
 
@@ -161,4 +176,9 @@ Describe the intended boundaries and major implementation steps. Avoid file-by-f
 
 ## Validation
 
-List the commands or manual checks that prove the acceptance criteria.
+- `git clone https://github.com/jk09/example.git R:\example`, then `git -C R:\example tag -a v0 -m "baseline"` to create the immutable `-select` reference.
+- Run `bassia agent -select "example@v0" -run "claude, add C# \"hello, world\" script, no csproj"`.
+- `git -C R:\example log --oneline --decorate -1` — confirms a new commit exists on top of `v0`, tagged per the `agent/<run-id>/<lineage-index>` convention, containing the new script.
+- `git -C R:\example show v0 --stat` — confirms the `v0` tag still points at the original commit, unaffected by the run.
+- Inspect `.workspace\agentic-run-1\example` — confirms it is a normal directory/checkout, not a reparse point/junction (e.g. `fsutil reparsepoint query` reports it is not a reparse point).
+- `git -C R:\.workspace\.agentic-runs log --all --oneline --decorate` — confirms run-metadata commits and their `agent/agentic-run-1/*` tags exist, and `git -C R:\.workspace\.agentic-runs symbolic-ref -q HEAD` (or checking no branch ref was updated) confirms no checkout occurred in that bare repo during the run.
