@@ -72,31 +72,8 @@ This gives two benefits:
 
 #### 3. Run the agent 
 
-Create a shell process at the folder `.workspace/agentic-run-1/` and run the `<agent command>` (from previously defined `bassia agent -select <component 1 commit-ish>, <component 2 commit-ish> -run <agent command>`). The `<agent command>` may the the Claude Code CLI, Copilot CLI, or similar. The agent run arguments (prompt, model, context, commit-ish used for creation  etc.) will be recorded in the `R:\.bassia` meta-repo folder. The information will allow to monitor the state of the agentic run, and support suspend, resume, and handover of the agentic run. Since there may be many parallel agentic runs, the information will be committed without branch check-out, so as not to impose a `git` index lock. Instead, a commit will be created, tagged with an  annotated tag, and committed into the meta-repo. If the state of the agentic run changes, a new child commit will be created and tagged. Example:
+For the purposes of this section, the entire agentic run folder structure is (expanded from [previous feature section Context](../../done/bassia-d3226a2c/SPEC.md)):
 
-- starting an `agentic-run-1` in the workspace
-- create a `.toml` file with the pertinent information: 
-
-After the agent completes, the changes will be committed. This presents a challenge, considering that:
-1. we have several components (`git` repositories), each with its own history and objects
-2. a checked out component can contain folder junctions to other checked out components, recursively
-
-Consider first the point 1., without the point 2.. Suppose the entire agentic run folder structure is:
-
-```
-R:\
-|__ .bassia
-    |__ ...
-|__ .workspace
-    |__ .agentic-run-1
-        |__ component-1       <-- https://github.com/examplename/component-1.git @ tag-1
-        |   |__ script1.cs
-        |__ component-2       <-- https://github.com/examplename/component-2.git @ tag-2 
-            |__ script2.cs
-```
-The agentic run modifies the files `script1.cs`, `script2.cs`, and commits in both cached repos local to the agentic run. Each commit will contain a reference to the agentic
-
-Regarding the monorepo folder structure in [previous feature section Context](../../done/bassia-d3226a2c/SPEC.md). The top-level component repos will receive the changes of agentic runs. To prevent `git` repo locking, each agentic run will generate in each affected repo in the `.workspace` 
 ```
 R:\
 |__ .bassia                   <-- meta-repo
@@ -109,14 +86,64 @@ R:\
     |__ .git
 |__ .workspace                <-- workspace for agents, `git`  worktrees of components
     |__ ...
+```
+
+Create a shell process in the folder `.workspace/agentic-run-1/` and run the `<agent command>` (from previously defined `bassia agent -select <component 1 commit-ish>, <component 2 commit-ish> -run <agent command>`). The `<agent command>` may the Claude Code CLI, Copilot CLI, or similar. The agent run arguments (prompt, model, context, commit-ish used for creation  etc.) will be recorded in the `R:\.bassia` meta-repo folder. The information will allow to monitor the state of the agentic run, and support suspend, resume, and handover of the agentic run. Since there may be many parallel agentic runs, the information will be committed without branch check-out, so as not to impose a `git` index lock. Instead, a commit will be created, tagged with an  annotated tag, and committed into the meta-repo. If the state of the agentic run changes, a new child commit will be created and tagged. Example:
+
+- starting an `agentic-run-1` in the workspace
+- create an information about the agentic run - model, prompt, monorepo selector (the commit-ish from the `-select` parameter), etc. - and commit it to the `.workspace/.agentic-runs` bare repo.
+- IMPORTANT: DO NOT CHECK OUT a branch in the `.workspace/.agentic-run` bare repo. This will create the aforementioned `git` index lock, and may become a problem when many agents run in parallel. Instead, create a commit using `git` plumbing commands, and tag it with an annotated tag. When a new addition to the agentic run info needs to be committed, e.g. when the agentic run completes, create a child commit in the same manner, and tag it again. The names of the tags are `<prefix>/<unique part same for parent and children>/<lineage part>`, so that we can map the tags to agentic runs. Example: `agent/agentic-run-1/0`, `agent/agentic-run-1/1`. THIS PATTERN WILL BE REPEATED where applicable and parallel commits are needed, such as when committing results of agentic runs.
+
+After the agent completes, the changes will be committed. This presents a challenge, considering that:
+
+1. we have several components (`git` repositories), each with its own history and objects
+2. a checked out component can contain folder junctions to other checked out components, recursively
+
+Consider first the point 1., without the point 2.
 
 ```
+R:\
+|__ .bassia
+    |__ .git
+|__ .workspace
+    |__ .agentic-runs
+        |__ .git              <-- bare repo which holds the information about the agentic runs
+    |__ .agentic-run-1
+        |__ component-1       <-- https://github.com/examplename/component-1.git @ tag-1
+        |   |__ script1.cs
+        |__ component-2       <-- https://github.com/examplename/component-2.git @ tag-2 
+            |__ script2.cs
+```
+
+The agentic run modifies the files `script1.cs`, `script2.cs`, and commits in both repos local to the agentic run.  Each commit messages will contain the summary of the agentic run, including the tags of the agentic run metadata (see above). Each commit will be tagged with annotated tag. The tag names will uniquely identify that the commits belong together and to a particular agentic run. These commits will involve checked out branches (created uniquely for this agentic run, and tied together by their names), since we obviously need a checkout to have files to operate on. This is not a problem, as there is only a single agentic run editing each component's index, and the plumbing commits without a checkout are not needed for performance. The commit sequence is not transactional, so one commit can succeed and other can fail (NOT for reasons like incorrect merges, which cannot happen in this scenario, just for low level technical repo failures). In this case we may retry, or ultimately abandon the entire agentic run, and discarding the workspace repos.
+
+Once each component's changes are committed and tagged, the respective tags are pushed into local component repos at the top level (the `R:\` volume in the terminology used here), which serve as the sources of truth.
+In other words, the repos `R:\component-1/.git`, `R:\component-2/.git` are updated.
+ NO MERGE OR CHECKOUT IS PERFORMED, this will be a separate feature. The top-level components repos are gradually populated by tagged commits , and it can be inferred from the tags and the agentic run metadata in `R:\.workspace/.agentic-runs` which agentic run is responsible for what.
+
+Consider now the general case, the point 1 and the point 2 also. The assumed monorepo structure will be
+
+```
+R:\
+|__ .bassia
+    |__ .git
+|__ .workspace
+    |__ .agentic-runs
+        |__ .git              
+    |__ .agentic-run-1
+        |__ component-1       
+        |   |__ script1.cs
+            |__ component-2/     <-- junction to a cached folder, the `component-2.git` repo checked out at the tag-2 per `-select` argument
+                |__ script2.cs
+```
+
+The `component-1` includes `component-2` as a junctioned subfolder. What if we change both `script1.cs`, `script2.cs` and want to commit? The `component-1` repo only receives the changes from `script1.cs`, and the changes of `script2.cs` are `git`-ignored (dynamically?). The `component-2` repo then receives changes in `script2.cs`, e.g. by performing the commit on the cache which backs up the junctioned folder. As before, we commit without checking out, with tags, and synchronize to the source-of-truth repo at `R:\`.
+
 
 ## Acceptance criteria
 
 
-- [ ] Initialize a `Bassia` monorepo in the temp folder.  The monorepo will have a single component `https://github.com/jk09/example.git`. Run the command `bassia agent -select <example component@HEAD> -run <claude, add C# "hello, world" script, no csproj>`. Verify
-- [ ] Include failure behavior and compatibility expectations where relevant.
+- [ ] Initialize a `Bassia` monorepo in the temp folder (called here `R:\` to remain consistent).  The monorepo will have a single component `https://github.com/jk09/example.git`. Run the command `bassia agent -select <example component@HEAD> -run <claude, add C# "hello, world" script, no csproj>`. Verify that at the end there's a tagged commit in `R:\example\.git` with this content.
 
 ## Approach
 
