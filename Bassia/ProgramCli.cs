@@ -40,7 +40,7 @@ internal static class ProgramCli
 
 		try
 		{
-			var task = await Args.InvokeActionAsync<CliActions>(args);
+			await Args.InvokeActionAsync<CliActions>(args);
 			return exitCode;
 		}
 		catch (UnknownActionArgException)
