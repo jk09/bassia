@@ -150,4 +150,32 @@ public class ProgramCliTests
 		Assert.Equal(1, exitCode);
 		Assert.Contains("is not a Bassia monorepo", error);
 	}
+
+	[Fact]
+	public async Task RunAsync_AddComponentSuccess_CommitsComponentsTomlInMetaRepo()
+	{
+		using var workspace = new TempDirectory();
+		var (initExitCode, _, initError) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init");
+		Assert.True(initExitCode == 0, initError);
+
+		var upstream = Path.Combine(workspace.Path, "upstream");
+		Directory.CreateDirectory(upstream);
+		await TestEnvironment.GitAsync(upstream, "init", "--quiet", "--initial-branch=main");
+		await File.WriteAllTextAsync(Path.Combine(upstream, "README.md"), "# component_1\n");
+		await TestEnvironment.GitAsync(upstream, "add", "--all");
+		await TestEnvironment.GitAsync(upstream, "commit", "--quiet", "-m", "Initial commit");
+
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "add-component", upstream, "component_1");
+		Assert.True(exitCode == 0, error);
+
+		var metaRepoDir = Path.Combine(workspace.Path, ".bassia");
+		var status = await TestEnvironment.GitAsync(metaRepoDir, "status", "--porcelain", "--", "components.toml");
+		Assert.Empty(status);
+
+		var lastCommitMessage = await TestEnvironment.GitAsync(metaRepoDir, "log", "-1", "--format=%s");
+		Assert.Equal("Add component 'component_1' from '" + upstream + "'", lastCommitMessage);
+
+		var committedFiles = await TestEnvironment.GitAsync(metaRepoDir, "show", "--name-only", "--format=", "HEAD");
+		Assert.Contains("components.toml", committedFiles.Split('\n'));
+	}
 }
