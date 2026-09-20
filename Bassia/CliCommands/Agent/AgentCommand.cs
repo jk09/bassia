@@ -139,8 +139,21 @@ internal static class AgentCommand
 		var finalTag = await store.CommitAsync(metadata);
 		var ok = metadata.Status == "completed";
 		return ProgramCli.WriteResult(ok, "agent",
-			ok ? $"Agentic run '{runId}' completed." : $"Agentic run '{runId}' finished with failures; run 'bassia agent retry {runId}' or 'bassia agent abandon {runId}'.",
+			ok ? CompletedMessage(metadata) : $"Agentic run '{runId}' finished with failures; run 'bassia agent retry {runId}' or 'bassia agent abandon {runId}'.",
 			ResultData(metadata, store, [startTag, finalTag]));
+	}
+
+	private static string CompletedMessage(RunMetadata metadata)
+	{
+		if (metadata.Components.Any(component => component.ResultStatus == ResultStatus.Pushed))
+		{
+			return $"Agentic run '{metadata.RunId}' completed.";
+		}
+
+		// A clean run with nothing to commit usually means the agent answered inline instead of editing files
+		// (e.g. it lacked permission to write) or wrote outside every component checkout.
+		return $"Agentic run '{metadata.RunId}' completed, but the agent command changed no component; nothing was committed. " +
+			$"Check that the command may edit files and that it writes inside a component folder of '{metadata.WorkspacePath}'.";
 	}
 
 	private static (string Select, string Command) ParseStartArguments(string[] args)

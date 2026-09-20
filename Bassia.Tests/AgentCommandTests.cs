@@ -88,6 +88,23 @@ public class AgentCommandTests
 	}
 
 	[Fact]
+	public async Task Agent_CommandThatChangesNothing_CompletesButSaysNothingWasCommitted()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("example");
+
+		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "example@v0", "-run", "echo hello");
+
+		Assert.True(exitCode == 0, error);
+		Assert.Contains("\"status\": \"completed\"", output);
+		Assert.Contains("\"resultStatus\": \"unchanged\"", output);
+		Assert.Contains("changed no component; nothing was committed", output);
+
+		var refs = await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "for-each-ref", "--format=%(refname)", "refs/heads/agent/", "refs/tags/agent/");
+		Assert.Equal("", refs);
+	}
+
+	[Fact]
 	public async Task Agent_RecordsMetadataAsTaggedPlumbingCommitsWithoutCheckout()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
