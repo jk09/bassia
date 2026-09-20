@@ -17,7 +17,11 @@ internal static class ProgramCli
 	// bassia's subcommands (commit, add-component, agent) parse their own arguments by hand: their grammars - nested
 	// subcommands, "-run" swallowing the rest of the command line verbatim - don't fit PowerArgs' declarative
 	// argument binding. PowerArgs' action framework is used only to route the first argument to the matching
-	// CliActions method below, which then reads its share of the untouched original arguments from here.
+	// CliActions method below, which then reads its share of the untouched original arguments from here. Only
+	// that first token is ever handed to PowerArgs: giving it the subcommand's own arguments too makes it parse
+	// them against the (parameterless) action method, which throws UnexpectedArgException on inputs its
+	// declarative binder can't make sense of - e.g. a bare token with no preceding flag, which is exactly what a
+	// shell produces when it flattens a comma-separated array argument (`-select 'a', 'b'`) into extra words.
 	private static string[] rawArgs = [];
 	private static int exitCode;
 
@@ -43,7 +47,7 @@ internal static class ProgramCli
 
 		try
 		{
-			await Args.InvokeActionAsync<CliActions>(args);
+			await Args.InvokeActionAsync<CliActions>(args[0]);
 			return exitCode;
 		}
 		catch (UnknownActionArgException)
