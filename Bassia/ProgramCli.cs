@@ -21,6 +21,15 @@ internal static class ProgramCli
 
 	public static async Task<int> RunAsync(string[] args)
 	{
+		var (remainingArgs, workingDirectoryError) = ConsumeWorkingDirectoryOption(args);
+		if (workingDirectoryError is not null)
+		{
+			Console.Error.WriteLine(workingDirectoryError);
+			return 2;
+		}
+
+		args = remainingArgs;
+
 		if (args.Length == 0 || IsHelp(args[0]))
 		{
 			PrintHelp();
@@ -126,6 +135,40 @@ internal static class ProgramCli
 		return result.ExitCode;
 	}
 
+	// Mirrors "git -C <path>": run as if bassia had started in <path>. May repeat; each occurrence resolves
+	// relative to the directory left by the previous one, matching git's chaining behavior.
+	private static (string[] Args, string? Error) ConsumeWorkingDirectoryOption(string[] args)
+	{
+		var index = 0;
+		while (index < args.Length && args[index] == "-C")
+		{
+			if (index + 1 >= args.Length)
+			{
+				return (args, "Usage: bassia -C <path> <command> ...");
+			}
+
+			var path = args[index + 1];
+			try
+			{
+				var target = Path.GetFullPath(path);
+				if (!Directory.Exists(target))
+				{
+					return (args, $"Cannot change to '{path}': No such directory.");
+				}
+
+				Environment.CurrentDirectory = target;
+			}
+			catch (Exception ex) when (ex is ArgumentException or PathTooLongException or NotSupportedException)
+			{
+				return (args, $"Cannot change to '{path}': {ex.Message}");
+			}
+
+			index += 2;
+		}
+
+		return (args[index..], null);
+	}
+
 	private static bool IsHelp(string argument) => argument is "-h" or "--help" or "help";
 
 	private static int UnknownCommand(string command)
@@ -138,7 +181,9 @@ internal static class ProgramCli
 	{
 		Console.WriteLine("bassia - a Git-based version control CLI");
 		Console.WriteLine();
-		Console.WriteLine("Usage: bassia <command>");
+		Console.WriteLine("Usage: bassia [-C <path>] <command>");
+		Console.WriteLine();
+		Console.WriteLine("  -C <path>              Run as if bassia was started in <path> instead of the current directory");
 		Console.WriteLine();
 		Console.WriteLine("Commands:");
 		Console.WriteLine("  status                 Show the working tree status");

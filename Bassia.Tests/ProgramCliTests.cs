@@ -21,7 +21,7 @@ public class ProgramCliTests
 		var (exitCode, output, _) = await TestEnvironment.RunAsync(helpArgument);
 
 		Assert.Equal(0, exitCode);
-		Assert.Contains("Usage: bassia <command>", output);
+		Assert.Contains("Usage: bassia [-C <path>] <command>", output);
 	}
 
 	[Fact]
@@ -93,6 +93,41 @@ public class ProgramCliTests
 		Assert.True(Directory.Exists(Path.Combine(target, ".bassia")));
 		Assert.True(Directory.Exists(Path.Combine(target, ".workspace")));
 		Assert.Contains("\"ok\": true", output);
+	}
+
+	[Fact]
+	public async Task RunAsync_WorkingDirectoryOption_RunsCommandInGivenDirectory()
+	{
+		using var workspace = new TempDirectory();
+		var target = Path.Combine(workspace.Path, "monorepo");
+		Directory.CreateDirectory(target);
+
+		var (exitCode, output, _) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "-C", target, "init");
+
+		Assert.Equal(0, exitCode);
+		Assert.True(Directory.Exists(Path.Combine(target, ".bassia")));
+		Assert.Contains("\"ok\": true", output);
+	}
+
+	[Fact]
+	public async Task RunAsync_WorkingDirectoryOptionWithMissingDirectory_Fails()
+	{
+		using var workspace = new TempDirectory();
+		var missing = Path.Combine(workspace.Path, "does-not-exist");
+
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "-C", missing, "init");
+
+		Assert.Equal(2, exitCode);
+		Assert.Contains("No such directory", error);
+	}
+
+	[Fact]
+	public async Task RunAsync_WorkingDirectoryOptionWithoutPath_ReturnsUsageError()
+	{
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("-C");
+
+		Assert.Equal(2, exitCode);
+		Assert.Contains("Usage: bassia -C <path>", error);
 	}
 
 	[Fact]
