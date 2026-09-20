@@ -1,4 +1,4 @@
-using Bassia.CliCommands;
+using Bassia.CliCommands.Agent;
 
 namespace Bassia.Tests;
 
