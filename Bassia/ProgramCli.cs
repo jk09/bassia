@@ -12,7 +12,7 @@ internal static class ProgramCli
 	// Relaxed escaping keeps quotes and paths in messages readable; the output is still valid JSON.
 	private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
-	// bassia's subcommands (commit, setup, agent) parse their own arguments by hand: their grammars - nested
+	// bassia's subcommands (commit, add-component, agent) parse their own arguments by hand: their grammars - nested
 	// subcommands, "-run" swallowing the rest of the command line verbatim - don't fit PowerArgs' declarative
 	// argument binding. PowerArgs' action framework is used only to route the first argument to the matching
 	// CliActions method below, which then reads its share of the untouched original arguments from here.
@@ -69,8 +69,8 @@ internal static class ProgramCli
 		[ArgActionMethod, ArgDescription("Initialize a Bassia monorepo")]
 		public Task Init() => RecordAsync(InitCommand.RunAsync(SubArgs()));
 
-		[ArgActionMethod, ArgDescription("Register a component")]
-		public Task Setup() => RecordAsync(SetupCommand.RunAsync(SubArgs()));
+		[ArgActionMethod, ArgShortcut("add-component"), ArgDescription("Register a component")]
+		public Task AddComponent() => RecordAsync(AddComponentCommand.RunAsync(SubArgs()));
 
 		[ArgActionMethod, ArgDescription("Materialize selected components and run an agentic command over them")]
 		public Task Agent() => RecordAsync(AgentCommand.RunAsync(SubArgs()));
@@ -146,7 +146,7 @@ internal static class ProgramCli
 		Console.WriteLine("  branch                 List local branches");
 		Console.WriteLine("  commit -m \"message\"  Create a commit");
 		Console.WriteLine("  init [directory]       Initialize a Bassia monorepo (default: the current empty folder)");
-		Console.WriteLine("  setup add-component <url>");
+		Console.WriteLine("  add-component <url> [name]");
 		Console.WriteLine("                         Clone a repo as a bare Bassia monorepo component");
 		Console.WriteLine("  agent -select <component@tag>[,<component@tag>...] [-pin <component@tag>] -run <command>");
 		Console.WriteLine("                         Materialize the selected components in an isolated workspace,");

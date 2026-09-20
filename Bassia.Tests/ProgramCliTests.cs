@@ -43,15 +43,6 @@ public class ProgramCliTests
 	}
 
 	[Fact]
-	public async Task RunAsync_SetupWithoutSubcommand_ReturnsUsageError()
-	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("setup");
-
-		Assert.Equal(1, exitCode);
-		Assert.Contains("Usage: bassia setup", error);
-	}
-
-	[Fact]
 	public async Task RunAsync_InitInEmptyDirectory_CreatesMetaRepoAndWorkspace()
 	{
 		using var workspace = new TempDirectory();
@@ -105,12 +96,21 @@ public class ProgramCliTests
 	}
 
 	[Fact]
-	public async Task RunAsync_SetupAddComponentWithoutInit_Fails()
+	public async Task RunAsync_AddComponentWithoutArguments_ReturnsUsageError()
+	{
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("add-component");
+
+		Assert.Equal(1, exitCode);
+		Assert.Contains("Usage: bassia add-component", error);
+	}
+
+	[Fact]
+	public async Task RunAsync_AddComponentWithoutInit_Fails()
 	{
 		using var workspace = new TempDirectory();
 
 		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(
-			workspace.Path, "setup", "add-component", "https://example.invalid/component_1.git");
+			workspace.Path, "add-component", "https://example.invalid/component_1.git");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("is not a Bassia monorepo", error);

@@ -119,7 +119,7 @@ internal static class TestEnvironment
 
 /// <summary>
 /// A throw-away Bassia monorepo with source repositories for components created on demand. Each component's
-/// upstream lives in <c>&lt;temp&gt;/upstream/&lt;name&gt;</c>; <c>setup add-component</c> clones it as the bare
+/// upstream lives in <c>&lt;temp&gt;/upstream/&lt;name&gt;</c>; <c>add-component</c> clones it as the bare
 /// source-of-truth repo at <c>&lt;temp&gt;/root/&lt;name&gt;/.git</c>, exactly like a GitHub-hosted component.
 /// </summary>
 internal sealed class MonorepoFixture : IAsyncDisposable
@@ -152,7 +152,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 		await TestEnvironment.GitAsync(upstream, "add", "--all");
 		await TestEnvironment.GitAsync(upstream, "commit", "--quiet", "-m", "Initial commit");
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(Root, "setup", "add-component", upstream);
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(Root, "add-component", upstream);
 		Assert.True(exitCode == 0, error);
 		await TestEnvironment.GitAsync(SourceRepo(name), "tag", "-a", tag, "-m", "baseline");
 	}

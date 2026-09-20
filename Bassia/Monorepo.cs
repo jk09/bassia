@@ -90,7 +90,7 @@ internal sealed class Monorepo
 
 	/// <summary>
 	/// Source-of-truth repository of a component: the folder next to the meta-repo, holding either a bare
-	/// <c>.git</c> (as created by <c>setup add-component</c>) or a regular clone. Git resolves both.
+	/// <c>.git</c> (as created by <c>add-component</c>) or a regular clone. Git resolves both.
 	/// </summary>
 	public string SourceRepoDir(string componentName) => Path.Combine(Root, componentName);
 

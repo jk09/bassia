@@ -2,29 +2,14 @@ namespace Bassia;
 
 using Bassia.Git;
 
-/// <summary><c>bassia setup</c>: registers components with the meta-repo.</summary>
-internal static class SetupCommand
+/// <summary><c>bassia add-component</c>: registers a component with the meta-repo.</summary>
+internal static class AddComponentCommand
 {
 	public static async Task<int> RunAsync(string[] args)
 	{
-		if (args.Length == 0)
+		if (args.Length is < 1 or > 2 || string.IsNullOrWhiteSpace(args[0]))
 		{
-			return ProgramCli.WriteResult(false, "setup", "Usage: bassia setup <add-component> [arguments]");
-		}
-
-		var subcommand = args[0].ToLowerInvariant();
-		return subcommand switch
-		{
-			"add-component" => await AddComponentAsync(args[1..]),
-			_ => ProgramCli.WriteResult(false, "setup", $"Unknown setup subcommand '{subcommand}'.")
-		};
-	}
-
-	private static async Task<int> AddComponentAsync(string[] args)
-	{
-		if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
-		{
-			return ProgramCli.WriteResult(false, "setup add-component", "Usage: bassia setup add-component <repository-url>");
+			return ProgramCli.WriteResult(false, "add-component", "Usage: bassia add-component <repository-url> [<name>]");
 		}
 
 		var url = args[0];
@@ -34,17 +19,29 @@ internal static class SetupCommand
 
 		if (!Directory.Exists(metaRepoDir))
 		{
-			return ProgramCli.WriteResult(false, "setup add-component", $"'{root}' is not a Bassia monorepo. Run 'bassia init' first.");
+			return ProgramCli.WriteResult(false, "add-component", $"'{root}' is not a Bassia monorepo. Run 'bassia init' first.");
 		}
 
 		string name;
-		try
+		if (args.Length == 2)
 		{
-			name = DeriveComponentName(url);
+			if (string.IsNullOrWhiteSpace(args[1]))
+			{
+				return ProgramCli.WriteResult(false, "add-component", "Usage: bassia add-component <repository-url> [<name>]");
+			}
+
+			name = args[1];
 		}
-		catch (ArgumentException ex)
+		else
 		{
-			return ProgramCli.WriteResult(false, "setup add-component", ex.Message);
+			try
+			{
+				name = DeriveComponentName(url);
+			}
+			catch (ArgumentException ex)
+			{
+				return ProgramCli.WriteResult(false, "add-component", ex.Message);
+			}
 		}
 
 		var componentDir = Path.Combine(root, name);
@@ -52,7 +49,7 @@ internal static class SetupCommand
 
 		if (Directory.Exists(componentDir))
 		{
-			return ProgramCli.WriteResult(false, "setup add-component", $"Component '{name}' already exists at '{componentDir}'.");
+			return ProgramCli.WriteResult(false, "add-component", $"Component '{name}' already exists at '{componentDir}'.");
 		}
 
 		var git = new GitClient(root);
@@ -64,12 +61,12 @@ internal static class SetupCommand
 				Directory.Delete(componentDir, recursive: true);
 			}
 
-			return ProgramCli.WriteResult(false, "setup add-component", $"git clone failed: {cloneResult.Error.Trim()}");
+			return ProgramCli.WriteResult(false, "add-component", $"git clone failed: {cloneResult.Error.Trim()}");
 		}
 
 		await File.AppendAllTextAsync(componentsTomlPath, $"\n[[component]]\nname = {TomlString(name)}\nurl = {TomlString(url)}\n");
 
-		return ProgramCli.WriteResult(true, "setup add-component", $"Added component '{name}' from '{url}'.", new Dictionary<string, object?>
+		return ProgramCli.WriteResult(true, "add-component", $"Added component '{name}' from '{url}'.", new Dictionary<string, object?>
 		{
 			["name"] = name,
 			["url"] = url,

@@ -253,7 +253,7 @@ internal static class AgentCommand
 		var sourceDir = monorepo.SourceRepoDir(componentName);
 		if (!Directory.Exists(sourceDir))
 		{
-			throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia setup add-component' first.");
+			throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia add-component' first.");
 		}
 
 		var source = GitClient.In(sourceDir);
