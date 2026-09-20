@@ -1,6 +1,7 @@
 namespace Bassia;
 
 using System.Globalization;
+using Bassia.Git;
 using Tomlyn;
 using Tomlyn.Model;
 
