@@ -15,4 +15,20 @@ public class GitClientTests
 		Assert.StartsWith("git version", result.Output.Trim());
 		Assert.Equal("", result.Error);
 	}
+
+	[Fact]
+	public async Task RunOrThrowAsync_FailingCommand_ThrowsGitException()
+	{
+		var directory = Directory.CreateTempSubdirectory("bassia-git-client-tests-");
+		try
+		{
+			var client = GitClient.In(directory.FullName);
+
+			await Assert.ThrowsAsync<GitException>(() => client.RunOrThrowAsync(["log"]));
+		}
+		finally
+		{
+			directory.Delete(recursive: true);
+		}
+	}
 }
