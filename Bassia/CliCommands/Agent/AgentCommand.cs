@@ -172,13 +172,13 @@ internal static class AgentCommand
 		{
 			switch (args[i])
 			{
-				case "-select" or "--select":
+				case "-select":
 					select = string.Join(",", new[] { select, RequireValue(args, ref i) }.Where(value => value is not null));
 					break;
-				case "-pin" or "--pin":
+				case "-pin":
 					pin = string.Join(",", new[] { pin, RequireValue(args, ref i) }.Where(value => value is not null));
 					break;
-				case "-run" or "--run":
+				case "-run":
 					// -run takes the rest of the command line: either one quoted string or the command's own words.
 					var commandArguments = args[(i + 1)..];
 					if (commandArguments.Length == 0)
