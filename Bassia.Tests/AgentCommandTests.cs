@@ -67,11 +67,10 @@ public class AgentCommandTests
 		Assert.Contains("\"status\": \"completed\"", output);
 		Assert.Contains("\"resultStatus\": \"pushed\"", output);
 
-		// A direct checkout in the workspace, not a junction.
-		var checkout = Path.Combine(monorepo.RunDir("agentic-run-1"), "example");
+		// A direct checkout in the run folder, not a junction.
+		var checkout = monorepo.Checkout("agentic-run-1", "example");
 		Assert.True(Directory.Exists(checkout));
 		Assert.False(new DirectoryInfo(checkout).Attributes.HasFlag(FileAttributes.ReparsePoint));
-		Assert.False(Directory.Exists(Path.Combine(monorepo.Cache, "agentic-run-1")));
 
 		// The source of truth received a tagged commit on top of v0 with the script; v0 itself is unchanged.
 		var source = monorepo.SourceRepo("example");
@@ -98,8 +97,10 @@ public class AgentCommandTests
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "x"));
 		Assert.True(exitCode == 0, error);
 
+		// The record lives with the meta-repo, without becoming part of its tree, and outlives the run folder.
 		var runs = monorepo.RunsRepo;
 		Assert.Equal("true", await TestEnvironment.GitAsync(runs, "rev-parse", "--is-bare-repository"));
+		Assert.Equal("", await TestEnvironment.GitAsync(monorepo.MetaRepo, "status", "--porcelain"));
 		Assert.Equal("agent/agentic-run-1/0\nagent/agentic-run-1/1", (await TestEnvironment.GitAsync(runs, "tag", "--list")).Replace("\r", ""));
 		Assert.Equal("", await TestEnvironment.GitAsync(runs, "for-each-ref", "refs/heads"));
 
@@ -117,54 +118,65 @@ public class AgentCommandTests
 	}
 
 	[Fact]
-	public async Task Agent_NestedComponent_IsCachedAndJunctionedAndCommittedSeparately()
+	public async Task Agent_ComponentChain_IsCheckedOutSideBySideAndJunctionedIntoItsReferrers()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
-		await monorepo.AddComponentAsync("app");
-		await monorepo.AddComponentAsync("lib");
-		await monorepo.SetReferencesAsync("app", "lib");
+		await monorepo.AddComponentAsync("a");
+		await monorepo.AddComponentAsync("b");
+		await monorepo.AddComponentAsync("c");
+		await monorepo.SetReferencesAsync("a", ("b", "b_lib"));
+		await monorepo.SetReferencesAsync("b", ("c", "c_lib"));
 
-		var command = TestEnvironment.WriteFileCommand("app/a.txt", "a") + " && " + TestEnvironment.WriteFileCommand("app/lib/l.txt", "l");
-		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "app@v0", "-pin", "lib@v0", "-run", command);
+		// Every component is edited through the path its referrer sees it at.
+		var command = string.Join(" && ",
+			TestEnvironment.WriteFileCommand("a/script1.cs", "1"),
+			TestEnvironment.WriteFileCommand("a/b_lib/script2.cs", "2"),
+			TestEnvironment.WriteFileCommand("a/b_lib/c_lib/script3.cs", "3"));
+		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "a@v0,b@v0,c@v0", "-run", command);
 
 		Assert.True(exitCode == 0, error);
-		Assert.Contains("\"materialization\": \"cache\"", output);
 
-		var appCheckout = Path.Combine(monorepo.RunDir("agentic-run-1"), "app");
-		var libCache = Path.Combine(monorepo.Cache, "agentic-run-1", "lib");
-		var junction = Path.Combine(appCheckout, "lib");
-		Assert.True(Directory.Exists(libCache));
-		Assert.False(Directory.Exists(Path.Combine(monorepo.RunDir("agentic-run-1"), "lib")));
-		Assert.True(new DirectoryInfo(junction).Attributes.HasFlag(FileAttributes.ReparsePoint));
-		Assert.True(File.Exists(Path.Combine(libCache, "l.txt")));
+		// All three are real checkouts side by side; the nested positions are links to those siblings.
+		foreach (var component in new[] { "a", "b", "c" })
+		{
+			Assert.True(Directory.Exists(monorepo.Checkout("agentic-run-1", component)));
+			Assert.False(new DirectoryInfo(monorepo.Checkout("agentic-run-1", component)).Attributes.HasFlag(FileAttributes.ReparsePoint));
+		}
 
-		// Each repo received only its own file.
-		var appFiles = await TestEnvironment.GitAsync(monorepo.SourceRepo("app"), "ls-tree", "--name-only", "-r", "agent/agentic-run-1/0");
-		var libFiles = await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "ls-tree", "--name-only", "-r", "agent/agentic-run-1/0");
-		Assert.Contains("a.txt", appFiles);
-		Assert.DoesNotContain("lib", appFiles);
-		Assert.Contains("l.txt", libFiles);
+		foreach (var junction in new[] { Path.Combine("a", "b_lib"), Path.Combine("b", "c_lib") })
+		{
+			Assert.True(new DirectoryInfo(Path.Combine(monorepo.RunDir("agentic-run-1"), junction)).Attributes.HasFlag(FileAttributes.ReparsePoint));
+		}
+
+		Assert.True(File.Exists(Path.Combine(monorepo.Checkout("agentic-run-1", "b"), "script2.cs")));
+		Assert.True(File.Exists(Path.Combine(monorepo.Checkout("agentic-run-1", "c"), "script3.cs")));
+
+		// Each source of truth received only its own file, on identically named branch and tag.
+		foreach (var (component, file) in new[] { ("a", "script1.cs"), ("b", "script2.cs"), ("c", "script3.cs") })
+		{
+			var source = monorepo.SourceRepo(component);
+			var files = await TestEnvironment.GitAsync(source, "ls-tree", "--name-only", "-r", "agent/agentic-run-1/0");
+			Assert.Equal($"README.md\n{file}", files.Replace("\r", ""));
+			Assert.Equal(
+				await TestEnvironment.GitAsync(source, "rev-parse", "agent/agentic-run-1/0^{commit}"),
+				await TestEnvironment.GitAsync(source, "rev-parse", "agent/agentic-run-1"));
+		}
 	}
 
 	[Fact]
-	public async Task Agent_SelectedComponentThatIsAlsoNested_IsJunctionedToItsDirectCheckout()
+	public async Task Agent_SelectionMissingAReferencedComponent_IsRejectedBeforeMaterializing()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("app");
 		await monorepo.AddComponentAsync("lib");
 		await monorepo.SetReferencesAsync("app", "lib");
 
-		var (exitCode, output, error) = await monorepo.AgentAsync(
-			"-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/lib/l.txt", "l"));
+		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0", "-run", "echo");
 
-		Assert.True(exitCode == 0, error);
-		Assert.DoesNotContain("\"materialization\": \"cache\"", output);
-		var libCheckout = Path.Combine(monorepo.RunDir("agentic-run-1"), "lib");
-		Assert.False(new DirectoryInfo(libCheckout).Attributes.HasFlag(FileAttributes.ReparsePoint));
-		Assert.True(new DirectoryInfo(Path.Combine(monorepo.RunDir("agentic-run-1"), "app", "lib")).Attributes.HasFlag(FileAttributes.ReparsePoint));
-		Assert.False(Directory.Exists(Path.Combine(monorepo.Cache, "agentic-run-1")));
-		Assert.True(File.Exists(Path.Combine(libCheckout, "l.txt")));
-		Assert.Contains("l.txt", await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "ls-tree", "--name-only", "-r", "agent/agentic-run-1/0"));
+		Assert.Equal(1, exitCode);
+		Assert.Contains("-select must cover the full component closure", error);
+		Assert.Contains("'lib' (referenced by 'app')", error);
+		Assert.False(Directory.Exists(monorepo.RunDir("agentic-run-1")));
 	}
 
 	[Fact]
@@ -213,7 +225,7 @@ public class AgentCommandTests
 		}
 
 		var command = TestEnvironment.WriteFileCommand("app/a.txt", "a") + " && " + TestEnvironment.WriteFileCommand("app/lib/l.txt", "l");
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0", "-pin", "lib@v0", "-run", command);
+		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0,lib@v0", "-run", command);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("\"status\": \"partial\"", error);
@@ -233,14 +245,14 @@ public class AgentCommandTests
 	}
 
 	[Fact]
-	public async Task Agent_Abandon_DiscardsWorkspaceAndCacheButKeepsPushedResults()
+	public async Task Agent_Abandon_DiscardsTheRunFolderButKeepsPushedResults()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("app");
 		await monorepo.AddComponentAsync("lib");
 		await monorepo.SetReferencesAsync("app", "lib");
 		var command = TestEnvironment.WriteFileCommand("app/a.txt", "a") + " && " + TestEnvironment.WriteFileCommand("app/lib/l.txt", "l");
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0", "-pin", "lib@v0", "-run", command);
+		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0,lib@v0", "-run", command);
 		Assert.True(exitCode == 0, error);
 
 		var (abandonExitCode, abandonOutput, abandonError) = await monorepo.AgentAsync("abandon", "agentic-run-1");
@@ -248,7 +260,6 @@ public class AgentCommandTests
 		Assert.True(abandonExitCode == 0, abandonError);
 		Assert.Contains("abandoned", abandonOutput);
 		Assert.False(Directory.Exists(monorepo.RunDir("agentic-run-1")));
-		Assert.False(Directory.Exists(Path.Combine(monorepo.Cache, "agentic-run-1")));
 		Assert.Contains("agent/agentic-run-1/0", await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "tag", "--list"));
 		Assert.Contains("status = \"abandoned\"", await TestEnvironment.GitAsync(monorepo.RunsRepo, "show", "agent/agentic-run-1/2:run.toml"));
 

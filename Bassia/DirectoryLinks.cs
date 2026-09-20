@@ -2,7 +2,7 @@ namespace Bassia;
 
 using System.Diagnostics;
 
-/// <summary>Directory links used to nest cached components into checkouts: junctions on Windows, symlinks elsewhere.</summary>
+/// <summary>Directory links used to nest a component's checkout into another's: junctions on Windows, symlinks elsewhere.</summary>
 internal static class DirectoryLinks
 {
 	public static async Task CreateAsync(string linkPath, string targetPath)

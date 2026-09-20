@@ -5,9 +5,6 @@ using Bassia.Git;
 using Tomlyn;
 using Tomlyn.Model;
 
-/// <summary>How a component was materialized in the run: a direct checkout in the workspace, or a cache checkout junctioned in.</summary>
-internal enum Materialization { Checkout, Cache }
-
 /// <summary>Where a component's result stands in the (non-transactional) commit/tag/push sequence.</summary>
 internal enum ResultStatus { Pending, Unchanged, Committed, Pushed, Failed }
 
@@ -16,14 +13,13 @@ internal sealed class ComponentRun
 {
 	public required string Name { get; set; }
 
-	/// <summary>The literal commit-ish given via -select/-pin (an annotated tag), or "HEAD" for unpinned nested components.</summary>
+	/// <summary>The annotated tag given for this component via -select.</summary>
 	public required string CommitIsh { get; set; }
 
 	/// <summary>The concrete commit the commit-ish resolved to when the run was created.</summary>
 	public required string Commit { get; set; }
-	public required Materialization Materialization { get; set; }
 
-	/// <summary>Checkout location (in the workspace or the cache).</summary>
+	/// <summary>Checkout location: <c>&lt;run folder&gt;/&lt;component&gt;</c>.</summary>
 	public required string Path { get; set; }
 	public required string Branch { get; set; }
 
@@ -48,10 +44,10 @@ internal sealed class RunMetadata
 	public required string Created { get; set; }
 	public string? Finished { get; set; }
 	public required string Select { get; set; }
-	public string? Pin { get; set; }
 	public required string Command { get; set; }
+
+	/// <summary>The run folder holding every component's checkout.</summary>
 	public required string WorkspacePath { get; set; }
-	public required string CachePath { get; set; }
 	public int? AgentExitCode { get; set; }
 	public List<ComponentRun> Components { get; } = [];
 
@@ -70,10 +66,8 @@ internal sealed class RunMetadata
 			["created"] = Created,
 			["select"] = Select,
 			["command"] = Command,
-			["workspace"] = WorkspacePath,
-			["cache"] = CachePath
+			["workspace"] = WorkspacePath
 		};
-		if (Pin is not null) table["pin"] = Pin;
 		if (Finished is not null) table["finished"] = Finished;
 		if (AgentExitCode is not null) table["agent_exit_code"] = (long)AgentExitCode.Value;
 
@@ -85,7 +79,6 @@ internal sealed class RunMetadata
 				["name"] = component.Name,
 				["commitish"] = component.CommitIsh,
 				["commit"] = component.Commit,
-				["materialization"] = component.Materialization.ToString().ToLowerInvariant(),
 				["path"] = component.Path,
 				["branch"] = component.Branch,
 				["result_status"] = component.ResultStatus.ToString().ToLowerInvariant()
@@ -122,10 +115,8 @@ internal sealed class RunMetadata
 			Created = Str(table, "created"),
 			Finished = OptStr(table, "finished"),
 			Select = Str(table, "select"),
-			Pin = OptStr(table, "pin"),
 			Command = Str(table, "command"),
 			WorkspacePath = Str(table, "workspace"),
-			CachePath = Str(table, "cache"),
 			AgentExitCode = table.TryGetValue("agent_exit_code", out var exitCode) ? (int)(long)exitCode : null
 		};
 
@@ -138,7 +129,6 @@ internal sealed class RunMetadata
 					Name = Str(componentTable, "name"),
 					CommitIsh = Str(componentTable, "commitish"),
 					Commit = Str(componentTable, "commit"),
-					Materialization = Enum.Parse<Materialization>(Str(componentTable, "materialization"), ignoreCase: true),
 					Path = Str(componentTable, "path"),
 					Branch = Str(componentTable, "branch"),
 					ResultStatus = Enum.Parse<ResultStatus>(Str(componentTable, "result_status"), ignoreCase: true),
