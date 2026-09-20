@@ -41,12 +41,14 @@ internal static class AgentCommand
 {
 	private const string RunIdPrefix = "agentic-run-";
 
-	public static async Task<int> RunAsync(GitClient git, string[] args)
+	public static async Task<int> RunAsync(string[] args)
 	{
 		if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
 		{
 			return ProgramCli.WriteResult(false, "agent", Usage);
 		}
+
+		var git = new GitClient(Environment.CurrentDirectory);
 
 		try
 		{

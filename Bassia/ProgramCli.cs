@@ -11,15 +11,6 @@ internal static class ProgramCli
 	// Relaxed escaping keeps quotes and paths in messages readable; the output is still valid JSON.
 	private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
-	private const string DefaultConfigToml = "# Bassia meta-repo configuration\n";
-
-	private const string DefaultComponentsToml =
-		"# Bassia monorepo components\n" +
-		"# Each registered component is recorded as:\n" +
-		"# [[component]]\n" +
-		"# name = \"component_1\"\n" +
-		"# url = \"https://github.com/myrepo/component_1.git\"\n";
-
 	// bassia's subcommands (commit, setup, agent) parse their own arguments by hand: their grammars - nested
 	// subcommands, "-run" swallowing the rest of the command line verbatim - don't fit PowerArgs' declarative
 	// argument binding. PowerArgs' action framework is used only to route the first argument to the matching
@@ -57,179 +48,35 @@ internal static class ProgramCli
 	// PowerArgs' action framework: matches bassia's first command-line argument (case-insensitively) to one of
 	// these methods. AllowUnexpectedArgs lets the rest of the command line - including "-"-prefixed tokens such
 	// as commit's "-m" or agent's "-select"/"-run" - pass through unvalidated, since SubArgs() below hands it to
-	// the same hand-written parsers the CLI used before this rewrite.
+	// the same hand-written parsers the CLI used before this rewrite. Each action delegates to its own service
+	// class, which constructs whatever GitClient it needs itself.
 	[AllowUnexpectedArgs, ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
 	public sealed class CliActions
 	{
 		[ArgActionMethod, ArgDescription("Show the working tree status")]
-		public Task Status() => RecordAsync(RunGitAsync(NewGitClient(), ["status", "--short", "--branch"]));
+		public Task Status() => RecordAsync(StatusCommand.RunAsync());
 
 		[ArgActionMethod, ArgDescription("Show the latest commits")]
-		public Task Log() => RecordAsync(RunGitAsync(NewGitClient(), ["log", "--oneline", "--decorate", "-n", "20"]));
+		public Task Log() => RecordAsync(LogCommand.RunAsync());
 
 		[ArgActionMethod, ArgDescription("List local branches")]
-		public Task Branch() => RecordAsync(RunGitAsync(NewGitClient(), ["branch", "--list"]));
+		public Task Branch() => RecordAsync(BranchCommand.RunAsync());
 
 		[ArgActionMethod, ArgDescription("Create a commit")]
-		public Task Commit() => RecordAsync(CommitAsync(NewGitClient(), SubArgs()));
+		public Task Commit() => RecordAsync(CommitCommand.RunAsync(SubArgs()));
 
 		[ArgActionMethod, ArgDescription("Initialize a Bassia monorepo")]
-		public Task Init() => RecordAsync(InitAsync(NewGitClient(), SubArgs()));
+		public Task Init() => RecordAsync(InitCommand.RunAsync(SubArgs()));
 
 		[ArgActionMethod, ArgDescription("Register a component")]
-		public Task Setup() => RecordAsync(SetupAsync(NewGitClient(), SubArgs()));
+		public Task Setup() => RecordAsync(SetupCommand.RunAsync(SubArgs()));
 
 		[ArgActionMethod, ArgDescription("Materialize selected components and run an agentic command over them")]
-		public Task Agent() => RecordAsync(AgentCommand.RunAsync(NewGitClient(), SubArgs()));
-
-		private static GitClient NewGitClient() => new(Environment.CurrentDirectory);
+		public Task Agent() => RecordAsync(AgentCommand.RunAsync(SubArgs()));
 
 		private static string[] SubArgs() => rawArgs[1..];
 
 		private static async Task RecordAsync(Task<int> command) => exitCode = await command;
-	}
-
-	private static async Task<int> CommitAsync(GitClient git, string[] args)
-	{
-		if (args.Length != 2 || (args[0] != "-m" && args[0] != "--message") || string.IsNullOrWhiteSpace(args[1]))
-		{
-			Console.Error.WriteLine("Usage: bassia commit -m \"message\"");
-			return 2;
-		}
-
-		return await RunGitAsync(git, ["commit", "-m", args[1]]);
-	}
-
-	private static async Task<int> SetupAsync(GitClient git, string[] args)
-	{
-		if (args.Length == 0)
-		{
-			return WriteResult(false, "setup", "Usage: bassia setup <add-component> [arguments]");
-		}
-
-		var subcommand = args[0].ToLowerInvariant();
-		return subcommand switch
-		{
-			"add-component" => await SetupAddComponentAsync(git, args[1..]),
-			_ => WriteResult(false, "setup", $"Unknown setup subcommand '{subcommand}'.")
-		};
-	}
-
-	private static async Task<int> InitAsync(GitClient git, string[] args)
-	{
-		if (args.Length > 1)
-		{
-			return WriteResult(false, "init", "Usage: bassia init [directory]");
-		}
-
-		var root = Path.GetFullPath(args.Length == 1 ? args[0] : Environment.CurrentDirectory);
-		var metaRepoDir = Path.Combine(root, ".bassia");
-		var workspaceDir = Path.Combine(root, ".workspace");
-
-		if (Directory.Exists(metaRepoDir))
-		{
-			return WriteResult(false, "init", $"'{root}' is already a Bassia monorepo; '.bassia' already exists.");
-		}
-
-		if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
-		{
-			return WriteResult(false, "init", $"'{root}' is not empty. Run 'bassia init' in an empty folder or volume.");
-		}
-
-		Directory.CreateDirectory(metaRepoDir);
-		Directory.CreateDirectory(workspaceDir);
-
-		var initResult = await git.RunAsync(["init", "--quiet", metaRepoDir]);
-		if (initResult.ExitCode != 0)
-		{
-			return WriteResult(false, "init", $"git init failed: {initResult.Error.Trim()}");
-		}
-
-		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "config.toml"), DefaultConfigToml);
-		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "components.toml"), DefaultComponentsToml);
-
-		return WriteResult(true, "init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
-		{
-			["path"] = root,
-			["metaRepo"] = metaRepoDir
-		});
-	}
-
-	private static async Task<int> SetupAddComponentAsync(GitClient git, string[] args)
-	{
-		if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
-		{
-			return WriteResult(false, "setup add-component", "Usage: bassia setup add-component <repository-url>");
-		}
-
-		var url = args[0];
-		var root = Environment.CurrentDirectory;
-		var metaRepoDir = Path.Combine(root, ".bassia");
-		var componentsTomlPath = Path.Combine(metaRepoDir, "components.toml");
-
-		if (!Directory.Exists(metaRepoDir))
-		{
-			return WriteResult(false, "setup add-component", $"'{root}' is not a Bassia monorepo. Run 'bassia init' first.");
-		}
-
-		string name;
-		try
-		{
-			name = DeriveComponentName(url);
-		}
-		catch (ArgumentException ex)
-		{
-			return WriteResult(false, "setup add-component", ex.Message);
-		}
-
-		var componentDir = Path.Combine(root, name);
-		var componentGitDir = Path.Combine(componentDir, ".git");
-
-		if (Directory.Exists(componentDir))
-		{
-			return WriteResult(false, "setup add-component", $"Component '{name}' already exists at '{componentDir}'.");
-		}
-
-		var cloneResult = await git.RunAsync(["clone", "--bare", url, componentGitDir]);
-		if (cloneResult.ExitCode != 0)
-		{
-			if (Directory.Exists(componentDir))
-			{
-				Directory.Delete(componentDir, recursive: true);
-			}
-
-			return WriteResult(false, "setup add-component", $"git clone failed: {cloneResult.Error.Trim()}");
-		}
-
-		await File.AppendAllTextAsync(componentsTomlPath, $"\n[[component]]\nname = {TomlString(name)}\nurl = {TomlString(url)}\n");
-
-		return WriteResult(true, "setup add-component", $"Added component '{name}' from '{url}'.", new Dictionary<string, object?>
-		{
-			["name"] = name,
-			["url"] = url,
-			["path"] = componentDir
-		});
-	}
-
-	// TOML basic string: backslashes (Windows paths) and quotes must be escaped.
-	private static string TomlString(string value) =>
-		"\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
-
-	private static string DeriveComponentName(string url)
-	{
-		var trimmed = url.Trim().TrimEnd('/', '\\');
-		var lastSegment = trimmed.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-		if (string.IsNullOrWhiteSpace(lastSegment))
-		{
-			throw new ArgumentException($"Could not derive a component name from '{url}'.");
-		}
-
-		if (lastSegment.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
-		{
-			lastSegment = lastSegment[..^4];
-		}
-
-		return lastSegment;
 	}
 
 	internal static int WriteResult(bool ok, string command, string message, IReadOnlyDictionary<string, object?>? data = null)
@@ -262,7 +109,7 @@ internal static class ProgramCli
 		return ok ? 0 : 1;
 	}
 
-	private static async Task<int> RunGitAsync(GitClient git, IReadOnlyList<string> arguments)
+	internal static async Task<int> RunGitAsync(GitClient git, IReadOnlyList<string> arguments)
 	{
 		var result = await git.RunAsync(arguments);
 		if (!string.IsNullOrEmpty(result.Output))
