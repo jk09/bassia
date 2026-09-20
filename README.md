@@ -17,11 +17,11 @@ dotnet run -- status
 dotnet run -- log
 dotnet run -- branch
 dotnet run -- commit -m "Describe the change"
-dotnet run -- setup init
+dotnet run -- init
 dotnet run -- setup add-component https://github.com/myrepo/component_1.git
 ```
 
-`setup init` initializes a `Bassia` monorepo in the current, empty folder: a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent worktrees. `setup add-component <url>` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`. Both commands print a JSON result on stdout (success) or stderr (failure) for machine consumption.
+`init [directory]` initializes a `Bassia` monorepo in the given, empty folder (default: the current directory): a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent worktrees. `setup add-component <url>` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`. Both commands print a JSON result on stdout (success) or stderr (failure) for machine consumption.
 
 ### Agentic runs
 

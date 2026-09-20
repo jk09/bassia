@@ -52,11 +52,11 @@ public class ProgramCliTests
 	}
 
 	[Fact]
-	public async Task RunAsync_SetupInitInEmptyDirectory_CreatesMetaRepoAndWorkspace()
+	public async Task RunAsync_InitInEmptyDirectory_CreatesMetaRepoAndWorkspace()
 	{
 		using var workspace = new TempDirectory();
 
-		var (exitCode, output, _) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "setup", "init");
+		var (exitCode, output, _) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init");
 
 		Assert.Equal(0, exitCode);
 		Assert.True(Directory.Exists(Path.Combine(workspace.Path, ".bassia")));
@@ -67,27 +67,41 @@ public class ProgramCliTests
 	}
 
 	[Fact]
-	public async Task RunAsync_SetupInitTwice_SecondCallFails()
+	public async Task RunAsync_InitTwice_SecondCallFails()
 	{
 		using var workspace = new TempDirectory();
-		await TestEnvironment.RunInDirectoryAsync(workspace.Path, "setup", "init");
+		await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init");
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "setup", "init");
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("already a Bassia monorepo", error);
 	}
 
 	[Fact]
-	public async Task RunAsync_SetupInitInNonEmptyDirectory_Fails()
+	public async Task RunAsync_InitInNonEmptyDirectory_Fails()
 	{
 		using var workspace = new TempDirectory();
 		await File.WriteAllTextAsync(Path.Combine(workspace.Path, "existing.txt"), "not empty");
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "setup", "init");
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("is not empty", error);
+	}
+
+	[Fact]
+	public async Task RunAsync_InitWithDirectoryArgument_CreatesMonorepoInThatDirectory()
+	{
+		using var workspace = new TempDirectory();
+		var target = Path.Combine(workspace.Path, "monorepo");
+
+		var (exitCode, output, _) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init", target);
+
+		Assert.Equal(0, exitCode);
+		Assert.True(Directory.Exists(Path.Combine(target, ".bassia")));
+		Assert.True(Directory.Exists(Path.Combine(target, ".workspace")));
+		Assert.Contains("\"ok\": true", output);
 	}
 
 	[Fact]

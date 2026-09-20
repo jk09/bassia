@@ -71,7 +71,7 @@ internal static class AgentCommand
 	private static Monorepo LoadMonorepo()
 	{
 		var root = Monorepo.FindRoot(Environment.CurrentDirectory)
-			?? throw new AgentException($"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia setup init' first.");
+			?? throw new AgentException($"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' first.");
 		return Monorepo.Load(root);
 	}
 

@@ -73,7 +73,10 @@ internal static class ProgramCli
 		[ArgActionMethod, ArgDescription("Create a commit")]
 		public Task Commit() => RecordAsync(CommitAsync(NewGitClient(), SubArgs()));
 
-		[ArgActionMethod, ArgDescription("Initialize a Bassia monorepo, or register a component")]
+		[ArgActionMethod, ArgDescription("Initialize a Bassia monorepo")]
+		public Task Init() => RecordAsync(InitAsync(NewGitClient(), SubArgs()));
+
+		[ArgActionMethod, ArgDescription("Register a component")]
 		public Task Setup() => RecordAsync(SetupAsync(NewGitClient(), SubArgs()));
 
 		[ArgActionMethod, ArgDescription("Materialize selected components and run an agentic command over them")]
@@ -101,37 +104,36 @@ internal static class ProgramCli
 	{
 		if (args.Length == 0)
 		{
-			return WriteResult(false, "setup", "Usage: bassia setup <init|add-component> [arguments]");
+			return WriteResult(false, "setup", "Usage: bassia setup <add-component> [arguments]");
 		}
 
 		var subcommand = args[0].ToLowerInvariant();
 		return subcommand switch
 		{
-			"init" => await SetupInitAsync(git, args[1..]),
 			"add-component" => await SetupAddComponentAsync(git, args[1..]),
 			_ => WriteResult(false, "setup", $"Unknown setup subcommand '{subcommand}'.")
 		};
 	}
 
-	private static async Task<int> SetupInitAsync(GitClient git, string[] args)
+	private static async Task<int> InitAsync(GitClient git, string[] args)
 	{
-		if (args.Length != 0)
+		if (args.Length > 1)
 		{
-			return WriteResult(false, "setup init", "Usage: bassia setup init");
+			return WriteResult(false, "init", "Usage: bassia init [directory]");
 		}
 
-		var root = Environment.CurrentDirectory;
+		var root = Path.GetFullPath(args.Length == 1 ? args[0] : Environment.CurrentDirectory);
 		var metaRepoDir = Path.Combine(root, ".bassia");
 		var workspaceDir = Path.Combine(root, ".workspace");
 
 		if (Directory.Exists(metaRepoDir))
 		{
-			return WriteResult(false, "setup init", $"'{root}' is already a Bassia monorepo; '.bassia' already exists.");
+			return WriteResult(false, "init", $"'{root}' is already a Bassia monorepo; '.bassia' already exists.");
 		}
 
-		if (Directory.EnumerateFileSystemEntries(root).Any())
+		if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
 		{
-			return WriteResult(false, "setup init", $"'{root}' is not empty. Run 'bassia setup init' in an empty folder or volume.");
+			return WriteResult(false, "init", $"'{root}' is not empty. Run 'bassia init' in an empty folder or volume.");
 		}
 
 		Directory.CreateDirectory(metaRepoDir);
@@ -140,13 +142,13 @@ internal static class ProgramCli
 		var initResult = await git.RunAsync(["init", "--quiet", metaRepoDir]);
 		if (initResult.ExitCode != 0)
 		{
-			return WriteResult(false, "setup init", $"git init failed: {initResult.Error.Trim()}");
+			return WriteResult(false, "init", $"git init failed: {initResult.Error.Trim()}");
 		}
 
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "config.toml"), DefaultConfigToml);
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "components.toml"), DefaultComponentsToml);
 
-		return WriteResult(true, "setup init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
+		return WriteResult(true, "init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
 		{
 			["path"] = root,
 			["metaRepo"] = metaRepoDir
@@ -167,7 +169,7 @@ internal static class ProgramCli
 
 		if (!Directory.Exists(metaRepoDir))
 		{
-			return WriteResult(false, "setup add-component", $"'{root}' is not a Bassia monorepo. Run 'bassia setup init' first.");
+			return WriteResult(false, "setup add-component", $"'{root}' is not a Bassia monorepo. Run 'bassia init' first.");
 		}
 
 		string name;
@@ -295,7 +297,7 @@ internal static class ProgramCli
 		Console.WriteLine("  log                    Show the latest commits");
 		Console.WriteLine("  branch                 List local branches");
 		Console.WriteLine("  commit -m \"message\"  Create a commit");
-		Console.WriteLine("  setup init             Initialize a Bassia monorepo in the current empty folder");
+		Console.WriteLine("  init [directory]       Initialize a Bassia monorepo (default: the current empty folder)");
 		Console.WriteLine("  setup add-component <url>");
 		Console.WriteLine("                         Clone a repo as a bare Bassia monorepo component");
 		Console.WriteLine("  agent -select <component@tag>[,<component@tag>...] [-pin <component@tag>] -run <command>");

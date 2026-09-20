@@ -137,7 +137,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 	{
 		var fixture = new MonorepoFixture();
 		Directory.CreateDirectory(fixture.Root);
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(fixture.Root, "setup", "init");
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(fixture.Root, "init");
 		Assert.True(exitCode == 0, error);
 		return fixture;
 	}
