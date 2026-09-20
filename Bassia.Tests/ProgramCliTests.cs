@@ -169,13 +169,29 @@ public class ProgramCliTests
 		Assert.True(exitCode == 0, error);
 
 		var metaRepoDir = Path.Combine(workspace.Path, ".bassia");
-		var status = await TestEnvironment.GitAsync(metaRepoDir, "status", "--porcelain", "--", "components.toml");
+		var status = await TestEnvironment.GitAsync(metaRepoDir, "status", "--porcelain");
 		Assert.Empty(status);
 
 		var lastCommitMessage = await TestEnvironment.GitAsync(metaRepoDir, "log", "-1", "--format=%s");
 		Assert.Equal("Add component 'component_1' from '" + upstream + "'", lastCommitMessage);
 
 		var committedFiles = await TestEnvironment.GitAsync(metaRepoDir, "show", "--name-only", "--format=", "HEAD");
+		Assert.Contains("components.toml", committedFiles.Split('\n'));
+	}
+
+	[Fact]
+	public async Task RunAsync_Init_CommitsMetaRepoFiles()
+	{
+		using var workspace = new TempDirectory();
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "init");
+		Assert.True(exitCode == 0, error);
+
+		var metaRepoDir = Path.Combine(workspace.Path, ".bassia");
+		var status = await TestEnvironment.GitAsync(metaRepoDir, "status", "--porcelain");
+		Assert.Empty(status);
+
+		var committedFiles = await TestEnvironment.GitAsync(metaRepoDir, "show", "--name-only", "--format=", "HEAD");
+		Assert.Contains("config.toml", committedFiles.Split('\n'));
 		Assert.Contains("components.toml", committedFiles.Split('\n'));
 	}
 }

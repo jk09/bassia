@@ -66,14 +66,7 @@ internal static class AddComponentCommand
 
 		await File.AppendAllTextAsync(componentsTomlPath, $"\n[[component]]\nname = {TomlString(name)}\nurl = {TomlString(url)}\n");
 
-		var metaGit = GitClient.In(metaRepoDir);
-		var addResult = await metaGit.RunAsync(["add", "components.toml"]);
-		if (addResult.ExitCode != 0)
-		{
-			return ProgramCli.WriteResult(false, "add-component", $"git add failed: {addResult.Error.Trim()}");
-		}
-
-		var commitResult = await metaGit.RunAsync(["commit", "--quiet", "-m", $"Add component '{name}' from '{url}'"]);
+		var commitResult = await GitClient.In(metaRepoDir).CommitAllAsync($"Add component '{name}' from '{url}'");
 		if (commitResult.ExitCode != 0)
 		{
 			return ProgramCli.WriteResult(false, "add-component", $"git commit failed: {commitResult.Error.Trim()}");

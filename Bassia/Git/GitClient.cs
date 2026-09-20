@@ -61,4 +61,15 @@ internal sealed class GitClient(string workingDirectory)
 
 		return result.Output.Trim();
 	}
+
+	/// <summary>
+	/// Stages every change in the working directory (new, modified and deleted files alike) and commits it.
+	/// Used to keep the meta-repo's own history in sync whenever its files (e.g. <c>components.toml</c>,
+	/// <c>config.toml</c>) are created or changed. Returns the failing step's result, or the commit's.
+	/// </summary>
+	public async Task<GitResult> CommitAllAsync(string message)
+	{
+		var addResult = await RunAsync(["add", "--all"]);
+		return addResult.ExitCode != 0 ? addResult : await RunAsync(["commit", "--quiet", "-m", message]);
+	}
 }

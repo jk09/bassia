@@ -48,6 +48,12 @@ internal static class InitCommand
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "config.toml"), DefaultConfigToml);
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "components.toml"), DefaultComponentsToml);
 
+		var commitResult = await GitClient.In(metaRepoDir).CommitAllAsync("Initialize Bassia meta-repo");
+		if (commitResult.ExitCode != 0)
+		{
+			return ProgramCli.WriteResult(false, "init", $"git commit failed: {commitResult.Error.Trim()}");
+		}
+
 		return ProgramCli.WriteResult(true, "init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
 		{
 			["path"] = root,
