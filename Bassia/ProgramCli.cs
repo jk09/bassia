@@ -3,6 +3,7 @@ namespace Bassia;
 using System.ComponentModel;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using Bassia.CliCommands;
 using Bassia.Git;
 using PowerArgs;
 

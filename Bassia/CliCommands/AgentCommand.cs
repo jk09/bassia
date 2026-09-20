@@ -1,6 +1,7 @@
-namespace Bassia;
+namespace Bassia.CliCommands;
 
 using System.Diagnostics;
+using Bassia;
 using Bassia.Git;
 
 internal sealed class AgentException(string message) : Exception(message);

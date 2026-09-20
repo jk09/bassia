@@ -1,3 +1,5 @@
+using Bassia.CliCommands;
+
 namespace Bassia.Tests;
 
 public class AgentCommandTests
