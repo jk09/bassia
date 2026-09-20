@@ -22,34 +22,34 @@ dotnet run -- add-component https://github.com/myrepo/component_1.git
 dotnet run -- -C C:\temp\foo init
 ```
 
-`init [directory]` initializes a `Bassia` monorepo in the given, empty folder (default: the current directory): a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent worktrees. `add-component <url> [name]` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`, under the given logical name or, by default, one inferred from the URL. Both commands print a JSON result on stdout (success) or stderr (failure) for machine consumption.
+`init [directory]` initializes a `Bassia` monorepo in the given, empty folder (default: the current directory): a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent run folders. `add-component <url> [name]` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`, under the given logical name or, by default, one inferred from the URL. Both commands print a JSON result on stdout (success) or stderr (failure) for machine consumption.
 
 `-C <path>`, given before the command, runs `bassia` as if it had been started in `<path>` instead of the current directory, same as `git -C <path>`. It can be repeated, with each occurrence resolved relative to the directory left by the previous one.
 
 ### Agentic runs
 
 ```powershell
-git -C R:\example tag -a v0 -m "baseline"          # -select needs an annotated tag
-dotnet run -- agent -select example@v0 -run "claude -p 'add a hello world script' --permission-mode acceptEdits"
+git -C R:\app tag -a v0 -m "baseline"                # -select needs an annotated tag per component
+git -C R:\lib tag -a v0 -m "baseline"
+dotnet run -- agent -select app@v0,lib@v0 -run "claude -p 'add a hello world script' --permission-mode acceptEdits"
 dotnet run -- agent retry agentic-run-1              # re-run a failed commit/tag/push sequence
-dotnet run -- agent abandon agentic-run-1            # discard the run's workspace and cache
+dotnet run -- agent abandon agentic-run-1            # discard the run's folder
 ```
 
-`agent -select <component@tag>[,...] [-pin <component@tag>[,...]] -run <command>` runs an agent on an isolated copy of the selected monorepo state:
+`agent -select <component@tag>[,...] -run <command>` runs an agent on an isolated copy of the selected monorepo state:
 
 1. Every `-select` entry names a component registered in `.bassia/components.toml` and an **annotated tag** in its source-of-truth repo (`R:\<component>`); the tag is the immutable provenance recorded for the run. Unregistered names, branches and bare commits are rejected.
-2. The run gets a unique id (`agentic-run-N`) and folder `.workspace/agentic-run-N/`. Selected components are cloned from their source-of-truth repos and checked out there on the run branch `agent/agentic-run-N`.
-3. Components that are only *referenced* by a selected component (`references = ["lib"]` or `references = [{ name = "lib", path = "libs/lib" }]` in `components.toml`; the graph must be acyclic) are checked out once into the run's cache (`.cache/agentic-run-N/<component>`) and junctioned into the referencing checkout at the expected subfolder. They use their source repo's `HEAD` unless pinned with `-pin`. A component that is both selected and referenced stays a direct checkout; the junction points at it.
+2. The selection must cover the full transitive closure of the reference graph (`references = ["lib"]` or `references = [{ name = "lib", path = "libs/lib" }]` in `components.toml`; the graph must be acyclic). Selecting `app` without the `lib` it references fails before anything is materialized — a run pins every component it touches, so nothing is ever resolved from a mutable reference.
+3. The run gets a unique id (`agentic-run-N`) and folder `.workspace/agentic-run-N/`. Every selected component is cloned from its source-of-truth repo and checked out there, side by side, on the run branch `agent/agentic-run-N`. Where one component references another, the referenced component appears inside it as a junction to that sibling checkout, at the subfolder `components.toml` records; the nested path is excluded from the referring repo's index, so each repo only ever commits its own files.
 4. The `-run` command is started by the platform shell (`cmd.exe` / `sh`) in `.workspace/agentic-run-N/`, with `BASSIA_ROOT`, `BASSIA_RUN_ID` and `BASSIA_RUN_DIR` set.
-5. Before the agent starts and after it finishes, the run record (`run.toml`: selection, resolved commits, command, timestamps, status, per-component results) is committed to the bare repo `.workspace/.agentic-runs/.git` with plumbing commands only (no checkout, no branch) and tagged `agent/agentic-run-N/<lineage>`.
-6. When the agent exits successfully, each changed component (direct or cached) is committed on its run branch, tagged `agent/agentic-run-N/0`, and branch + tag are pushed to its source-of-truth repo. Nothing is merged or checked out there. The sequence is not transactional: a failed component leaves the run `partial`; `agent retry` finishes the remaining steps and `agent abandon` discards the workspace and cache without touching anything already pushed.
+5. Before the agent starts and after it finishes, the run record (`run.toml`: selection, resolved commits, command, timestamps, status, per-component results) is committed to the bare repo `.bassia/.agentic-runs/.git` with plumbing commands only (no checkout, no branch) and tagged `agent/agentic-run-N/<lineage>`. It lives with the meta-repo rather than in the workspace, so the run folder can be discarded once its results are pushed.
+6. When the agent exits successfully, each changed component is committed on its run branch, tagged `agent/agentic-run-N/0`, and branch + tag are pushed to its source-of-truth repo. Nothing is merged or checked out there. The sequence is not transactional: a failed component leaves the run `partial`; `agent retry` finishes the remaining steps and `agent abandon` discards the run folder without touching anything already pushed.
 
-The workspace and cache locations can be moved (for example to another volume) via `.bassia/config.toml`:
+The workspace location can be moved (for example to another volume) via `.bassia/config.toml`:
 
 ```toml
 [workspace]
 path = 'D:\bassia-workspace'
-cache = 'D:\bassia-cache'
 ```
 
 `Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.

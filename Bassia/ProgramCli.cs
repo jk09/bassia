@@ -195,11 +195,12 @@ internal static class ProgramCli
 		Console.WriteLine("  init [directory]       Initialize a Bassia monorepo (default: the current empty folder)");
 		Console.WriteLine("  add-component <url> [name]");
 		Console.WriteLine("                         Clone a repo as a bare Bassia monorepo component");
-		Console.WriteLine("  agent -select <component@tag>[,<component@tag>...] [-pin <component@tag>] -run <command>");
-		Console.WriteLine("                         Materialize the selected components in an isolated workspace,");
-		Console.WriteLine("                         run the agent command there, then commit, tag and push the results");
+		Console.WriteLine("  agent -select <component@tag>[,<component@tag>...] -run <command>");
+		Console.WriteLine("                         Materialize the selected components (the full reference closure,");
+		Console.WriteLine("                         each at an annotated tag) in an isolated run folder, run the agent");
+		Console.WriteLine("                         command there, then commit, tag and push the results");
 		Console.WriteLine("  agent retry <run-id>   Retry committing/pushing components that failed in a previous run");
-		Console.WriteLine("  agent abandon <run-id> Discard a run's workspace and cache (sources of truth are untouched)");
+		Console.WriteLine("  agent abandon <run-id> Discard a run's folder (sources of truth are untouched)");
 		Console.WriteLine("  help                   Show this help");
 	}
 }

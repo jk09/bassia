@@ -16,13 +16,12 @@ internal sealed class MonorepoException(string message) : Exception(message);
 
 /// <summary>
 /// The Bassia monorepo as laid out on disk: the <c>.bassia</c> meta-repo, its configuration and component registry,
-/// plus the derived workspace and cache locations.
+/// plus the derived workspace location.
 /// </summary>
 internal sealed class Monorepo
 {
 	public const string MetaRepoFolderName = ".bassia";
 	public const string DefaultWorkspaceFolderName = ".workspace";
-	public const string DefaultCacheFolderName = ".cache";
 	public const string RunsRepoFolderName = ".agentic-runs";
 
 	public string Root { get; }
@@ -31,19 +30,19 @@ internal sealed class Monorepo
 	/// <summary>Folder holding the isolated per-run areas. Configurable via <c>[workspace] path</c> in <c>config.toml</c>.</summary>
 	public string WorkspaceDir { get; }
 
-	/// <summary>Folder holding the per-run cache of nested components. Configurable via <c>[workspace] cache</c>.</summary>
-	public string CacheDir { get; }
-
-	/// <summary>Bare repo (laid out as <c>&lt;workspace&gt;/.agentic-runs/.git</c>) that stores agentic run metadata.</summary>
-	public string RunsRepoDir => Path.Combine(WorkspaceDir, RunsRepoFolderName, ".git");
+	/// <summary>
+	/// Bare repo (<c>.bassia/.agentic-runs/.git</c>) that stores agentic run metadata. It lives with the meta-repo,
+	/// not in the workspace: a run folder is scratch that may be discarded once its results are pushed, while the
+	/// mapping from a run to the tags it created in the components is durable monorepo state.
+	/// </summary>
+	public string RunsRepoDir => Path.Combine(MetaRepoDir, RunsRepoFolderName, ".git");
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, string cacheDir, IReadOnlyList<ComponentDefinition> components)
+	private Monorepo(string root, string workspaceDir, IReadOnlyList<ComponentDefinition> components)
 	{
 		Root = root;
 		WorkspaceDir = workspaceDir;
-		CacheDir = cacheDir;
 		Components = components;
 	}
 
@@ -66,23 +65,15 @@ internal sealed class Monorepo
 		var metaRepoDir = Path.Combine(root, MetaRepoFolderName);
 		var config = ReadToml(Path.Combine(metaRepoDir, "config.toml"));
 		var workspaceDir = Path.Combine(root, DefaultWorkspaceFolderName);
-		var cacheDir = Path.Combine(root, DefaultCacheFolderName);
 
-		if (config.TryGetValue("workspace", out var workspaceSection) && workspaceSection is TomlTable workspace)
+		if (config.TryGetValue("workspace", out var workspaceSection) && workspaceSection is TomlTable workspace
+			&& workspace.TryGetValue("path", out var path) && path is string workspacePath && !string.IsNullOrWhiteSpace(workspacePath))
 		{
-			if (workspace.TryGetValue("path", out var path) && path is string workspacePath && !string.IsNullOrWhiteSpace(workspacePath))
-			{
-				workspaceDir = Path.GetFullPath(workspacePath, root);
-			}
-
-			if (workspace.TryGetValue("cache", out var cache) && cache is string cachePath && !string.IsNullOrWhiteSpace(cachePath))
-			{
-				cacheDir = Path.GetFullPath(cachePath, root);
-			}
+			workspaceDir = Path.GetFullPath(workspacePath, root);
 		}
 
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, cacheDir, components);
+		return new Monorepo(root, workspaceDir, components);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>

@@ -1,6 +1,6 @@
 namespace Bassia.CliCommands.Agent;
 
-/// <summary>One <c>component@commit-ish</c> pair from <c>-select</c> or <c>-pin</c>.</summary>
+/// <summary>One <c>component@commit-ish</c> pair from <c>-select</c>.</summary>
 internal sealed record ComponentSelection(string Component, string CommitIsh)
 {
 	/// <summary>Parses a comma-separated list of <c>component@commit-ish</c> pairs.</summary>

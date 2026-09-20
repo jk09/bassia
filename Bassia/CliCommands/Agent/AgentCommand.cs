@@ -37,7 +37,7 @@ internal static class AgentCommand
 	}
 
 	private const string Usage =
-		"Usage: bassia agent -select <component@tag>[,<component@tag>...] [-pin <component@tag>[,...]] -run <agent command>\n" +
+		"Usage: bassia agent -select <component@tag>[,<component@tag>...] -run <agent command>\n" +
 		"       bassia agent retry <run-id>\n" +
 		"       bassia agent abandon <run-id>";
 
@@ -52,12 +52,11 @@ internal static class AgentCommand
 
 	private static async Task<int> StartAsync(GitClient git, string[] args)
 	{
-		var (select, pin, command) = ParseStartArguments(args);
+		var (select, command) = ParseStartArguments(args);
 		var monorepo = LoadMonorepo();
 
 		var selected = ComponentSelection.ParseList("-select", select);
-		var pinned = pin is null ? [] : ComponentSelection.ParseList("-pin", pin);
-		foreach (var selection in selected.Concat(pinned))
+		foreach (var selection in selected)
 		{
 			if (monorepo.FindComponent(selection.Component) is null)
 			{
@@ -66,35 +65,21 @@ internal static class AgentCommand
 		}
 
 		var closure = monorepo.Closure(selected.Select(selection => selection.Component));
-		var selectedNames = selected.Select(selection => selection.Component).ToHashSet(StringComparer.Ordinal);
-		foreach (var pinnedSelection in pinned)
-		{
-			if (selectedNames.Contains(pinnedSelection.Component))
-			{
-				throw new AgentException($"Component '{pinnedSelection.Component}' is both selected and pinned; use -select alone.");
-			}
-
-			if (closure.All(component => component.Name != pinnedSelection.Component))
-			{
-				throw new AgentException($"Pinned component '{pinnedSelection.Component}' is not referenced by any selected component.");
-			}
-		}
+		RequireCompleteClosure(selected, closure);
 
 		// Resolve every commit-ish before touching the filesystem, so a bad selection leaves no trace.
-		var commitIshByName = selected.Concat(pinned).ToDictionary(selection => selection.Component, selection => selection.CommitIsh, StringComparer.Ordinal);
+		var commitIshByName = selected.ToDictionary(selection => selection.Component, selection => selection.CommitIsh, StringComparer.Ordinal);
 		var resolved = new List<(ComponentDefinition Component, string CommitIsh, string Commit)>();
 		foreach (var component in closure)
 		{
-			var explicitCommitIsh = commitIshByName.GetValueOrDefault(component.Name);
-			var commit = await ResolveCommitAsync(git, monorepo, component.Name, explicitCommitIsh);
-			resolved.Add((component, explicitCommitIsh ?? "HEAD", commit));
+			var commitIsh = commitIshByName[component.Name];
+			resolved.Add((component, commitIsh, await ResolveCommitAsync(monorepo, component.Name, commitIsh)));
 		}
 
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
 		await store.EnsureRepositoryAsync();
-		var runId = await AllocateRunIdAsync(git, monorepo, store, closure.Select(component => component.Name));
+		var runId = await AllocateRunIdAsync(monorepo, store, closure.Select(component => component.Name));
 		var runDir = Path.Combine(monorepo.WorkspaceDir, runId);
-		var cacheDir = Path.Combine(monorepo.CacheDir, runId);
 		var branch = $"{RunMetadata.TagPrefix}/{runId}";
 
 		var metadata = new RunMetadata
@@ -103,22 +88,18 @@ internal static class AgentCommand
 			Status = "started",
 			Created = RunMetadata.Timestamp(),
 			Select = select,
-			Pin = pin,
 			Command = command,
-			WorkspacePath = runDir,
-			CachePath = cacheDir
+			WorkspacePath = runDir
 		};
 
 		foreach (var (component, commitIsh, commit) in resolved)
 		{
-			var isSelected = selectedNames.Contains(component.Name);
 			metadata.Components.Add(new ComponentRun
 			{
 				Name = component.Name,
 				CommitIsh = commitIsh,
 				Commit = commit,
-				Materialization = isSelected ? Materialization.Checkout : Materialization.Cache,
-				Path = Path.Combine(isSelected ? runDir : cacheDir, component.Name),
+				Path = Path.Combine(runDir, component.Name),
 				Branch = branch
 			});
 		}
@@ -129,7 +110,7 @@ internal static class AgentCommand
 		}
 		catch
 		{
-			DiscardRunFolders(metadata);
+			DiscardRunFolder(metadata);
 			throw;
 		}
 
@@ -162,10 +143,9 @@ internal static class AgentCommand
 			ResultData(metadata, store, [startTag, finalTag]));
 	}
 
-	private static (string Select, string? Pin, string Command) ParseStartArguments(string[] args)
+	private static (string Select, string Command) ParseStartArguments(string[] args)
 	{
 		string? select = null;
-		string? pin = null;
 		string? command = null;
 
 		for (var i = 0; i < args.Length; i++)
@@ -174,9 +154,6 @@ internal static class AgentCommand
 			{
 				case "-select":
 					select = string.Join(",", new[] { select, RequireValue(args, ref i) }.Where(value => value is not null));
-					break;
-				case "-pin":
-					pin = string.Join(",", new[] { pin, RequireValue(args, ref i) }.Where(value => value is not null));
 					break;
 				case "-run":
 					// -run takes the rest of the command line: either one quoted string or the command's own words.
@@ -201,7 +178,32 @@ internal static class AgentCommand
 			throw new AgentException($"Both -select and -run are required.\n{Usage}");
 		}
 
-		return (select, pin, command);
+		return (select, command);
+	}
+
+	/// <summary>
+	/// A run must select every component it materializes: the reference closure of the selection has to be the
+	/// selection itself. Inferring a version for a component nobody named would put a mutable reference into an
+	/// otherwise tag-pinned, reproducible run record.
+	/// </summary>
+	private static void RequireCompleteClosure(IReadOnlyList<ComponentSelection> selected, IReadOnlyList<ComponentDefinition> closure)
+	{
+		var selectedNames = selected.Select(selection => selection.Component).ToHashSet(StringComparer.Ordinal);
+		var missing = closure.Where(component => !selectedNames.Contains(component.Name)).Select(component => component.Name).ToList();
+		if (missing.Count == 0)
+		{
+			return;
+		}
+
+		var referrers = missing.ToDictionary(
+			name => name,
+			name => closure.First(component => component.References.Any(reference => reference.Name == name)).Name,
+			StringComparer.Ordinal);
+
+		var details = string.Join(", ", missing.Select(name => $"'{name}' (referenced by '{referrers[name]}')"));
+		throw new AgentException(
+			$"-select must cover the full component closure; missing: {details}. " +
+			$"Add each as <component>@<tag>, for example: -select {selected[0].Component}@{selected[0].CommitIsh},{missing[0]}@<tag>.");
 	}
 
 	private static string RequireValue(string[] args, ref int index)
@@ -215,10 +217,10 @@ internal static class AgentCommand
 	}
 
 	/// <summary>
-	/// Resolves a component's commit in its source-of-truth repo. Explicit commit-ishes must be annotated tags,
-	/// since they are logged as the run's immutable provenance; unpinned nested components use the repo's HEAD.
+	/// Resolves a component's commit in its source-of-truth repo. The commit-ish must be an annotated tag, since it
+	/// is logged as the run's immutable provenance.
 	/// </summary>
-	private static async Task<string> ResolveCommitAsync(GitClient git, Monorepo monorepo, string componentName, string? commitIsh)
+	private static async Task<string> ResolveCommitAsync(Monorepo monorepo, string componentName, string commitIsh)
 	{
 		var sourceDir = monorepo.SourceRepoDir(componentName);
 		if (!Directory.Exists(sourceDir))
@@ -227,17 +229,6 @@ internal static class AgentCommand
 		}
 
 		var source = GitClient.In(sourceDir);
-		if (commitIsh is null)
-		{
-			var head = await source.RunAsync(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
-			if (head.ExitCode != 0)
-			{
-				throw new AgentException($"Component '{componentName}' has no commits at HEAD; pin it with -pin {componentName}@<tag>.");
-			}
-
-			return head.Output.Trim();
-		}
-
 		var type = await source.RunAsync(["cat-file", "-t", commitIsh]);
 		if (type.ExitCode != 0)
 		{
@@ -252,7 +243,7 @@ internal static class AgentCommand
 		return await source.RunOrThrowAsync(["rev-parse", "--verify", $"{commitIsh}^{{commit}}"]);
 	}
 
-	private static async Task<string> AllocateRunIdAsync(GitClient git, Monorepo monorepo, RunMetadataStore store, IEnumerable<string> componentNames)
+	private static async Task<string> AllocateRunIdAsync(Monorepo monorepo, RunMetadataStore store, IEnumerable<string> componentNames)
 	{
 		Directory.CreateDirectory(monorepo.WorkspaceDir);
 		var used = new HashSet<string>(await store.ListRunIdsAsync(), StringComparer.Ordinal);
@@ -299,14 +290,14 @@ internal static class AgentCommand
 
 		foreach (var component in metadata.Components)
 		{
-			Progress($"{metadata.RunId}: {component.Materialization.ToString().ToLowerInvariant()} of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'.");
+			Progress($"{metadata.RunId}: checkout of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'.");
 			Directory.CreateDirectory(Path.GetDirectoryName(component.Path)!);
 			await git.RunOrThrowAsync(["clone", "--quiet", "--no-checkout", monorepo.SourceRepoDir(component.Name), component.Path]);
 			await GitClient.In(component.Path).RunOrThrowAsync(["checkout", "--quiet", "-b", component.Branch, component.Commit]);
 		}
 
-		// Nested components appear inside their referencing component as links (junctions) to the single
-		// checkout of that component: a cache checkout, or the direct checkout when it was also selected.
+		// A referenced component appears inside the referencing component as a link (junction) to its sibling
+		// checkout, so every reference to it in the run resolves to the same working tree and the same commit.
 		foreach (var definition in closure)
 		{
 			var owner = runs[definition.Name];
@@ -332,7 +323,7 @@ internal static class AgentCommand
 		}
 	}
 
-	private static void DiscardRunFolders(RunMetadata metadata)
+	private static void DiscardRunFolder(RunMetadata metadata)
 	{
 		// Remove links first so a recursive delete can never reach into another checkout.
 		foreach (var component in metadata.Components)
@@ -343,13 +334,10 @@ internal static class AgentCommand
 			}
 		}
 
-		foreach (var directory in new[] { metadata.WorkspacePath, metadata.CachePath })
+		if (Directory.Exists(metadata.WorkspacePath))
 		{
-			if (Directory.Exists(directory))
-			{
-				ClearReadOnlyAttributes(directory);
-				Directory.Delete(directory, recursive: true);
-			}
+			ClearReadOnlyAttributes(metadata.WorkspacePath);
+			Directory.Delete(metadata.WorkspacePath, recursive: true);
 		}
 	}
 
@@ -457,7 +445,6 @@ internal static class AgentCommand
 			$"Agentic run: {metadata.RunId}\n" +
 			$"Run metadata: {RunMetadata.TagName(metadata.RunId, 0)} in {store.RepoDir}\n" +
 			$"Selection: {metadata.Select}\n" +
-			(metadata.Pin is null ? "" : $"Pinned: {metadata.Pin}\n") +
 			$"Component: {component.Name} @ {component.CommitIsh} ({component.Commit})\n" +
 			$"Command: {metadata.Command}\n";
 	}
@@ -525,12 +512,12 @@ internal static class AgentCommand
 			throw new AgentException($"Agentic run '{metadata.RunId}' is already abandoned.");
 		}
 
-		DiscardRunFolders(metadata);
+		DiscardRunFolder(metadata);
 		metadata.Status = "abandoned";
 		metadata.Finished = RunMetadata.Timestamp();
 		var tag = await store.CommitAsync(metadata);
 		return ProgramCli.WriteResult(true, "agent abandon",
-			$"Agentic run '{metadata.RunId}' abandoned; its workspace and cache were discarded. Results already pushed to source-of-truth repos were left in place.",
+			$"Agentic run '{metadata.RunId}' abandoned; its run folder was discarded. Results already pushed to source-of-truth repos were left in place.",
 			ResultData(metadata, store, [tag]));
 	}
 
@@ -554,7 +541,6 @@ internal static class AgentCommand
 		["runId"] = metadata.RunId,
 		["status"] = metadata.Status,
 		["workspace"] = metadata.WorkspacePath,
-		["cache"] = metadata.CachePath,
 		["agentExitCode"] = metadata.AgentExitCode,
 		["metadataRepo"] = store.RepoDir,
 		["metadataTags"] = metadataTags,
@@ -563,7 +549,6 @@ internal static class AgentCommand
 			["name"] = component.Name,
 			["commitish"] = component.CommitIsh,
 			["commit"] = component.Commit,
-			["materialization"] = component.Materialization.ToString().ToLowerInvariant(),
 			["path"] = component.Path,
 			["branch"] = component.Branch,
 			["resultStatus"] = component.ResultStatus.ToString().ToLowerInvariant(),

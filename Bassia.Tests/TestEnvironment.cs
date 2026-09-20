@@ -128,10 +128,11 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 
 	public string Root => Path.Combine(temp.Path, "root");
 	public string Workspace => Path.Combine(Root, ".workspace");
-	public string Cache => Path.Combine(Root, ".cache");
-	public string RunsRepo => Path.Combine(Workspace, ".agentic-runs", ".git");
+	public string MetaRepo => Path.Combine(Root, ".bassia");
+	public string RunsRepo => Path.Combine(MetaRepo, ".agentic-runs", ".git");
 	public string SourceRepo(string component) => Path.Combine(Root, component);
 	public string RunDir(string runId) => Path.Combine(Workspace, runId);
+	public string Checkout(string runId, string component) => Path.Combine(RunDir(runId), component);
 
 	public static async Task<MonorepoFixture> CreateAsync()
 	{
@@ -158,13 +159,20 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 	}
 
 	/// <summary>Adds <c>references = [...]</c> to a registered component by rewriting components.toml.</summary>
-	public async Task SetReferencesAsync(string component, params string[] references)
+	public Task SetReferencesAsync(string component, params string[] references) =>
+		WriteReferencesAsync(component, references.Select(reference => $"\"{reference}\""));
+
+	/// <summary>Adds references that nest a component at a folder name other than the component's own name.</summary>
+	public Task SetReferencesAsync(string component, params (string Name, string Path)[] references) =>
+		WriteReferencesAsync(component, references.Select(reference => $"{{ name = \"{reference.Name}\", path = \"{reference.Path}\" }}"));
+
+	private async Task WriteReferencesAsync(string component, IEnumerable<string> entries)
 	{
-		var path = Path.Combine(Root, ".bassia", "components.toml");
+		var path = Path.Combine(MetaRepo, "components.toml");
 		var lines = (await File.ReadAllLinesAsync(path)).ToList();
 		var nameLine = lines.IndexOf($"name = \"{component}\"");
 		Assert.True(nameLine >= 0, $"component '{component}' not found in components.toml");
-		lines.Insert(nameLine + 1, $"references = [{string.Join(", ", references.Select(reference => $"\"{reference}\""))}]");
+		lines.Insert(nameLine + 1, $"references = [{string.Join(", ", entries)}]");
 		await File.WriteAllLinesAsync(path, lines);
 	}
 
