@@ -2,6 +2,7 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 
@@ -15,7 +16,8 @@ static class Program
 
 internal static class ProgramCli
 {
-	private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+	// Relaxed escaping keeps quotes and paths in messages readable; the output is still valid JSON.
+	private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
 	private const string DefaultConfigToml = "# Bassia meta-repo configuration\n";
 
@@ -46,6 +48,7 @@ internal static class ProgramCli
 				"branch" => await RunGitAsync(git, ["branch", "--list"]),
 				"commit" => await CommitAsync(git, args[1..]),
 				"setup" => await SetupAsync(git, args[1..]),
+				"agent" => await AgentCommand.RunAsync(git, args[1..]),
 				_ => UnknownCommand(command)
 			};
 		}
@@ -116,7 +119,7 @@ internal static class ProgramCli
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "config.toml"), DefaultConfigToml);
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "components.toml"), DefaultComponentsToml);
 
-		return WriteResult(true, "setup init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, string?>
+		return WriteResult(true, "setup init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
 		{
 			["path"] = root,
 			["metaRepo"] = metaRepoDir
@@ -169,15 +172,19 @@ internal static class ProgramCli
 			return WriteResult(false, "setup add-component", $"git clone failed: {cloneResult.Error.Trim()}");
 		}
 
-		await File.AppendAllTextAsync(componentsTomlPath, $"\n[[component]]\nname = \"{name}\"\nurl = \"{url}\"\n");
+		await File.AppendAllTextAsync(componentsTomlPath, $"\n[[component]]\nname = {TomlString(name)}\nurl = {TomlString(url)}\n");
 
-		return WriteResult(true, "setup add-component", $"Added component '{name}' from '{url}'.", new Dictionary<string, string?>
+		return WriteResult(true, "setup add-component", $"Added component '{name}' from '{url}'.", new Dictionary<string, object?>
 		{
 			["name"] = name,
 			["url"] = url,
 			["path"] = componentDir
 		});
 	}
+
+	// TOML basic string: backslashes (Windows paths) and quotes must be escaped.
+	private static string TomlString(string value) =>
+		"\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
 	private static string DeriveComponentName(string url)
 	{
@@ -196,7 +203,7 @@ internal static class ProgramCli
 		return lastSegment;
 	}
 
-	private static int WriteResult(bool ok, string command, string message, IReadOnlyDictionary<string, string?>? data = null)
+	internal static int WriteResult(bool ok, string command, string message, IReadOnlyDictionary<string, object?>? data = null)
 	{
 		var payload = new Dictionary<string, object?>
 		{
@@ -264,6 +271,11 @@ internal static class ProgramCli
 		Console.WriteLine("  setup init             Initialize a Bassia monorepo in the current empty folder");
 		Console.WriteLine("  setup add-component <url>");
 		Console.WriteLine("                         Clone a repo as a bare Bassia monorepo component");
+		Console.WriteLine("  agent -select <component@tag>[,<component@tag>...] [-pin <component@tag>] -run <command>");
+		Console.WriteLine("                         Materialize the selected components in an isolated workspace,");
+		Console.WriteLine("                         run the agent command there, then commit, tag and push the results");
+		Console.WriteLine("  agent retry <run-id>   Retry committing/pushing components that failed in a previous run");
+		Console.WriteLine("  agent abandon <run-id> Discard a run's workspace and cache (sources of truth are untouched)");
 		Console.WriteLine("  help                   Show this help");
 	}
 }
@@ -277,7 +289,12 @@ internal sealed class GitClient
 		this.workingDirectory = workingDirectory;
 	}
 
-	public async Task<GitResult> RunAsync(IReadOnlyList<string> arguments)
+	/// <summary>Returns a client bound to another working directory (e.g. a component checkout).</summary>
+	public GitClient In(string directory) => new(directory);
+
+	public Task<GitResult> RunAsync(IReadOnlyList<string> arguments) => RunAsync(arguments, standardInput: null);
+
+	public async Task<GitResult> RunAsync(IReadOnlyList<string> arguments, string? standardInput)
 	{
 		using var process = new Process
 		{
@@ -285,6 +302,7 @@ internal sealed class GitClient
 			{
 				FileName = "git",
 				WorkingDirectory = workingDirectory,
+				RedirectStandardInput = standardInput is not null,
 				RedirectStandardOutput = true,
 				RedirectStandardError = true,
 				UseShellExecute = false,
@@ -300,10 +318,30 @@ internal sealed class GitClient
 		process.Start();
 		var outputTask = process.StandardOutput.ReadToEndAsync();
 		var errorTask = process.StandardError.ReadToEndAsync();
+		if (standardInput is not null)
+		{
+			await process.StandardInput.WriteAsync(standardInput);
+			process.StandardInput.Close();
+		}
+
 		await process.WaitForExitAsync();
 
 		return new GitResult(process.ExitCode, await outputTask, await errorTask);
 	}
+
+	/// <summary>Runs git and throws <see cref="GitException"/> on a non-zero exit code; returns trimmed stdout.</summary>
+	public async Task<string> RunOrThrowAsync(IReadOnlyList<string> arguments, string? standardInput = null)
+	{
+		var result = await RunAsync(arguments, standardInput);
+		if (result.ExitCode != 0)
+		{
+			throw new GitException($"git {string.Join(' ', arguments)} failed in '{workingDirectory}': {result.Error.Trim()}");
+		}
+
+		return result.Output.Trim();
+	}
 }
 
 internal sealed record GitResult(int ExitCode, string Output, string Error);
+
+internal sealed class GitException(string message) : Exception(message);

@@ -148,7 +148,7 @@ The `component-1` includes `component-2` as a junctioned subfolder. What if we c
 ## Acceptance criteria
 
 
-- [ ] Initialize a `Bassia` monorepo in the temp folder (called here `R:\` to remain consistent). The monorepo will have a single component, cloned locally to `R:\example` from `https://github.com/jk09/example.git`. Create an annotated tag, e.g. `v0`, on the component's current commit — this is the immutable identifier `-select` requires (see "Select a monorepo state"), not `HEAD` or a branch. Run the command `bassia agent -select <example component@v0> -run <claude, add C# "hello, world" script, no csproj>`. Verify that:
+- [x] Initialize a `Bassia` monorepo in the temp folder (called here `R:\` to remain consistent). The monorepo will have a single component, cloned locally to `R:\example` from `https://github.com/jk09/example.git`. Create an annotated tag, e.g. `v0`, on the component's current commit — this is the immutable identifier `-select` requires (see "Select a monorepo state"), not `HEAD` or a branch. Run the command `bassia agent -select <example component@v0> -run <claude, add C# "hello, world" script, no csproj>`. Verify that:
   - at the end there's a new tagged commit in `R:\example\.git` containing the "hello, world" script;
   - the `v0` tag itself still points at the original, unmodified commit;
   - `R:\example` was populated as a direct checkout in `.workspace\agentic-run-1\example` (not a cache + junction), since it was explicitly named in `-select` and has no nested components.
@@ -169,10 +169,23 @@ The `component-1` includes `component-2` as a junctioned subfolder. What if we c
 - Nested components are materialized via a shared cache (one clone+checkout per component/commit-ish) plus filesystem junctions inside `.workspace/agentic-run-*`, rather than per-workspace clones, so shared nested components (e.g. a common `component-lib`) resolve to one consistent copy across all referencing components.
 - Two distinct commit strategies are used and must not be conflated: agentic-run *metadata* (in `.workspace/.agentic-runs`) is committed via `git` plumbing with no branch checkout, to avoid index-lock contention across many parallel runs; component *content* changes are committed on a normal checked-out, run-unique branch, since editing files requires a working tree and each component's checkout is only ever touched by a single run.
 - Tag names follow `<prefix>/<run-id>/<lineage-index>` (e.g. `agent/agentic-run-1/0`, `agent/agentic-run-1/1`) so that a tag can be mapped back to the run and to its position in that run's history, for both run-metadata tags and component-content tags.
+- Selection syntax is `<logical-name>@<commit-ish>`, comma-separated and/or repeated `-select`; `-run` takes either one quoted string or the remaining words of the command line. The command is executed by the platform shell (`cmd.exe /d /s /c` on Windows, `/bin/sh -c` elsewhere) so agent CLIs can be invoked exactly as from a terminal.
+- Nested (transitively reached) components are pinned with `-pin <component@tag>` using the same syntax; a nested component that is neither selected nor pinned resolves to the `HEAD` of its source-of-truth repo, and the resolved commit hash is what the run record stores. Requiring a tag for every transitive dependency was rejected as too demanding for large graphs; the recorded hash keeps provenance immutable either way.
+- The per-run cache lives in `.cache/<run-id>/<component>` next to `.workspace` (both configurable via `[workspace] path` / `cache` in `config.toml`), keyed by run id because nested components receive commits during the run and must not be shared across concurrent runs.
+- Nested checkouts are hidden from the referencing component's index via `.git/info/exclude` (not a tracked `.gitignore`), so the referencing repo's history is not polluted and the junctioned files are committed only by the nested component's own repo.
+- Junctions are created with `mklink /J` on Windows (no elevation needed) and symlinks elsewhere; abandon removes links before deleting folders so a recursive delete can never reach into another checkout.
+- Source-of-truth repos are the bare clones at `R:\<component>\.git` created by `setup add-component`; the run checkouts are `git clone --no-checkout` of them (local clones share objects via hardlinks), and results are pushed back as the run branch `agent/<run-id>` plus the tag. Run ids already present as `agent/<run-id>` refs in any involved source repo are skipped so tags never collide.
+- A non-zero agent exit code marks the run `failed`, commits nothing, and keeps the workspace for inspection. Commit/push failures mark the run `partial`; `agent retry` re-runs only the missing steps (idempotent per component), `agent abandon` discards workspace + cache and records status `abandoned`, never touching what was already pushed.
+- `setup add-component` now writes TOML basic strings with proper escaping (a Windows path URL previously produced an unparsable `components.toml`), and JSON results use relaxed escaping so quotes and paths in messages are readable.
 
 ## Progress
 
-- [ ] Add only meaningful implementation and validation milestones.
+- [x] `components.toml` reference graph (`references = [...]`, string or `{ name, path }` entries) with cycle detection and dependency-ordered closure (`Monorepo.cs`).
+- [x] `bassia agent -select ... [-pin ...] -run ...`: selection parsing, annotated-tag enforcement, run-id allocation, direct checkouts + cache/junction materialization, agent process, commit/tag/push, JSON result (`AgentCommand.cs`, `DirectoryLinks.cs`).
+- [x] Run-metadata records committed via plumbing (`hash-object`/`mktree`/`commit-tree` + annotated tag `agent/<run-id>/<lineage>`) into the bare `.workspace/.agentic-runs/.git`; no branch is ever created or checked out there (`RunMetadata.cs`).
+- [x] `bassia agent retry <run-id>` and `bassia agent abandon <run-id>` for the non-transactional commit/push sequence.
+- [x] xUnit coverage: single component end-to-end, metadata lineage, nested cache + junction, selected-and-nested, cycles, failing agent, push failure + retry, abandon, run-id collision with source-repo refs, selection parsing.
+- [x] Validated the acceptance scenario manually with the real `https://github.com/jk09/example.git` component and the Claude Code CLI (`claude -p ... --permission-mode acceptEdits`) as the `-run` command.
 
 ## Validation
 
