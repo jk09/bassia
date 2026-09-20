@@ -253,7 +253,7 @@ internal static class AgentCommand
 			throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia setup add-component' first.");
 		}
 
-		var source = git.In(sourceDir);
+		var source = GitClient.In(sourceDir);
 		if (commitIsh is null)
 		{
 			var head = await source.RunAsync(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
@@ -292,7 +292,7 @@ internal static class AgentCommand
 		// (e.g. from a run on another workspace) must not be reused.
 		foreach (var componentName in componentNames)
 		{
-			var refs = await git.In(monorepo.SourceRepoDir(componentName)).RunOrThrowAsync(
+			var refs = await GitClient.In(monorepo.SourceRepoDir(componentName)).RunOrThrowAsync(
 				["for-each-ref", "--format=%(refname)", $"refs/heads/{RunMetadata.TagPrefix}/", $"refs/tags/{RunMetadata.TagPrefix}/"]);
 			foreach (var reference in refs.Split('\n', StringSplitOptions.RemoveEmptyEntries))
 			{
@@ -329,7 +329,7 @@ internal static class AgentCommand
 			Progress($"{metadata.RunId}: {component.Materialization.ToString().ToLowerInvariant()} of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'.");
 			Directory.CreateDirectory(Path.GetDirectoryName(component.Path)!);
 			await git.RunOrThrowAsync(["clone", "--quiet", "--no-checkout", monorepo.SourceRepoDir(component.Name), component.Path]);
-			await git.In(component.Path).RunOrThrowAsync(["checkout", "--quiet", "-b", component.Branch, component.Commit]);
+			await GitClient.In(component.Path).RunOrThrowAsync(["checkout", "--quiet", "-b", component.Branch, component.Commit]);
 		}
 
 		// Nested components appear inside their referencing component as links (junctions) to the single
@@ -435,7 +435,7 @@ internal static class AgentCommand
 			return;
 		}
 
-		var checkout = git.In(component.Path);
+		var checkout = GitClient.In(component.Path);
 		try
 		{
 			if (component.ResultCommit is null)

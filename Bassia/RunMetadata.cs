@@ -178,7 +178,7 @@ internal sealed class RunMetadataStore
 	public RunMetadataStore(GitClient git, string repoDir)
 	{
 		this.repoDir = repoDir;
-		this.git = git.In(repoDir);
+		this.git = GitClient.In(repoDir);
 	}
 
 	public string RepoDir => repoDir;

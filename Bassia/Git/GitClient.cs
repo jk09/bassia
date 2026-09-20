@@ -2,17 +2,16 @@ namespace Bassia.Git;
 
 using System.Diagnostics;
 
-internal sealed class GitClient
+/// <summary>
+/// Runs the <c>git</c command in the <paramref name="workingDirectory"/>.
+/// </summary>
+/// <param name="workingDirectory">The directory in which the <c>git</c> command is run.</param>
+internal sealed class GitClient(string workingDirectory)
 {
-	private readonly string workingDirectory;
+	private readonly string workingDirectory = workingDirectory;
 
-	public GitClient(string workingDirectory)
-	{
-		this.workingDirectory = workingDirectory;
-	}
-
-	/// <summary>Returns a client bound to another working directory (e.g. a component checkout).</summary>
-	public GitClient In(string directory) => new(directory);
+    /// <summary>Returns a client bound to another working directory (e.g. a component checkout).</summary>
+    public static GitClient In(string directory) => new(directory);
 
 	public Task<GitResult> RunAsync(IReadOnlyList<string> arguments) => RunAsync(arguments, standardInput: null);
 
