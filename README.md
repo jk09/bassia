@@ -36,6 +36,13 @@ dotnet run -- agent retry agent-run-<id>             # re-run a failed commit/ta
 dotnet run -- agent abandon agent-run-<id>           # discard the run's folder
 ```
 
+For a quick hand-check against the Debug build, `scripts/` has two helpers: `New-TestMonorepo.ps1` creates a throwaway monorepo in `%TEMP%` with the [jk09/example](https://github.com/jk09/example) component added and its HEAD tagged `tag-base`, and returns the path; `Invoke-AgentRun.ps1 -Monorepo <path> -Prompt <prompt>` runs `claude -p --permission-mode acceptEdits "<prompt>"` over it (`-Select` and `-Agent` override the defaults) and prints where each result landed.
+
+```powershell
+$r = ./scripts/New-TestMonorepo.ps1
+./scripts/Invoke-AgentRun.ps1 -Monorepo $r -Prompt 'write hello world in C# as example/HelloWorld.cs'
+```
+
 `agent -select <component@tag>[,...] -run <command>` runs an agent on an isolated copy of the selected monorepo state:
 
 1. Every `-select` entry names a component registered in `.bassia/components.toml` and an **annotated tag** in its source-of-truth repo (`R:\<component>`); the tag is the immutable provenance recorded for the run. Unregistered names, branches and bare commits are rejected.
