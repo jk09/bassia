@@ -106,30 +106,19 @@ public class AgentCommandTests
 	}
 
 	[Fact]
-	public async Task Agent_CommitMessage_IsATemplateWithTheRecordWhereverMetadataIsPlaced()
+	public async Task Agent_CommitSubject_IsConfigurable()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
-		// The default config.toml written by init already has [agent.commit]; a later table of the same name would be
-		// a TOML error, so the test rewrites the file.
-		await File.WriteAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml"),
-			"[agent.commit]\nmessage = \"\"\"\n[{component}] {summary} ({run_id})\n\n{metadata}\n\nRun: {short_id}\n\"\"\"\n");
+		await File.AppendAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml"), "\n[agent.commit]\nsubject = \"[{component}] {summary} ({run_id})\"\n");
 
 		var (exitCode, output, error) = await monorepo.AgentAsync(
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "x"));
 
 		Assert.True(exitCode == 0, error);
 		var runId = TestEnvironment.RunIdOf(output);
-		var summary = AgentCommand.SummarizeCommand(TestEnvironment.WriteFileCommand("example/hello.cs", "x"));
-		var message = (await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "log", "-1", "--format=%B", RunMetadata.RefBase(runId))).Replace("\r", "");
-		var lines = message.Split('\n');
-
-		Assert.Equal($"[example] {summary} ({runId})", lines[0]);
-		Assert.Equal("", lines[1]);
-		Assert.Equal("[agentic_run]", lines[2]);
-		Assert.Equal($"Run: {RunMetadata.ShortKey(runId)}", lines[^1]);
-		var record = TomlSerializer.Deserialize<TomlTable>(string.Join('\n', lines[2..^2]))!;
-		Assert.Equal(runId, ((TomlTable)record["agentic_run"])["id"]);
+		var subject = await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "log", "-1", "--format=%s", RunMetadata.RefBase(runId));
+		Assert.Equal($"[example] {AgentCommand.SummarizeCommand(TestEnvironment.WriteFileCommand("example/hello.cs", "x"))} ({runId})", subject);
 	}
 
 	[Fact]

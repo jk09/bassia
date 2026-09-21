@@ -23,7 +23,7 @@ internal sealed class Monorepo
 	public const string MetaRepoFolderName = ".bassia";
 	public const string DefaultWorkspaceFolderName = ".workspace";
 	public const string RunsRepoFolderName = ".agentic-runs";
-	public const string DefaultCommitMessage = "agent({short_id}): {summary}\n\n{metadata}\n";
+	public const string DefaultCommitSubject = "agent({short_id}): {summary}";
 
 	public string Root { get; }
 	public string MetaRepoDir => Path.Combine(Root, MetaRepoFolderName);
@@ -32,10 +32,10 @@ internal sealed class Monorepo
 	public string WorkspaceDir { get; }
 
 	/// <summary>
-	/// Template of the message of the commits an agentic run makes in a component. Configurable via
-	/// <c>[agent.commit] message</c> in <c>config.toml</c>; see <see cref="ResultCommitMessage"/> for the placeholders.
+	/// Subject line of the commits an agentic run makes in a component. Configurable via <c>[agent.commit] subject</c>
+	/// in <c>config.toml</c>; see <see cref="ResultCommitMessage"/> for the placeholders.
 	/// </summary>
-	public string CommitMessage { get; }
+	public string CommitSubject { get; }
 
 	/// <summary>
 	/// Bare repo (<c>.agentic-runs/.git</c>) that stores agentic run metadata. It lives at the monorepo root,
@@ -48,11 +48,11 @@ internal sealed class Monorepo
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, string commitMessage, IReadOnlyList<ComponentDefinition> components)
+	private Monorepo(string root, string workspaceDir, string commitSubject, IReadOnlyList<ComponentDefinition> components)
 	{
 		Root = root;
 		WorkspaceDir = workspaceDir;
-		CommitMessage = commitMessage;
+		CommitSubject = commitSubject;
 		Components = components;
 	}
 
@@ -82,16 +82,16 @@ internal sealed class Monorepo
 			workspaceDir = Path.GetFullPath(workspacePath, root);
 		}
 
-		var commitMessage = DefaultCommitMessage;
+		var commitSubject = DefaultCommitSubject;
 		if (config.TryGetValue("agent", out var agentSection) && agentSection is TomlTable agent
 			&& agent.TryGetValue("commit", out var commitSection) && commitSection is TomlTable commit
-			&& commit.TryGetValue("message", out var message) && message is string messageTemplate && !string.IsNullOrWhiteSpace(messageTemplate))
+			&& commit.TryGetValue("subject", out var subject) && subject is string subjectTemplate && !string.IsNullOrWhiteSpace(subjectTemplate))
 		{
-			commitMessage = messageTemplate;
+			commitSubject = subjectTemplate;
 		}
 
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, commitMessage, components);
+		return new Monorepo(root, workspaceDir, commitSubject, components);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>
