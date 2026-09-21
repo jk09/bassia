@@ -73,11 +73,15 @@ branch = "agent/run-c37ed8ae51f1420a9abee46a4f836af3"
 tag = "agent/run-c37ed8ae51f1420a9abee46a4f836af3/0"
 ```
 
-The subject line is a template in `.bassia/config.toml` (written by `init`); the body's keys are fixed. `{run_id}` is the full `agent-run-<id>`, `{short_id}` the first 8 digits of `<id>`, `{summary}` the longest quoted part of the agent command (usually the prompt) or the command itself, `{component}` the component name:
+The whole message is a template in `.bassia/config.toml` (written by `init`). `{metadata}` expands to the TOML record above — that block is serialized, not templated, so it always parses wherever the template puts it; leave the placeholder out and the commit carries no record. `{run_id}` is the full `agent-run-<id>`, `{short_id}` the first 8 digits of `<id>`, `{summary}` the longest quoted part of the agent command (usually the prompt) or the command itself, `{component}` the component name:
 
 ```toml
 [agent.commit]
-subject = "agent({short_id}): {summary}"
+message = """
+agent({short_id}): {summary}
+
+{metadata}
+"""
 ```
 
 The workspace location can be moved (for example to another volume) via the same file:

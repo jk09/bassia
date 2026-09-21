@@ -389,7 +389,7 @@ internal static class AgentCommand
 			var tag = component.ResultTag ??= await NextResultTagAsync(checkout, metadata.RunId);
 			if (component.ResultCommit is null)
 			{
-				var message = ResultCommitMessage.Render(monorepo.CommitSubject, metadata, component, tag, SummarizeCommand(metadata.Command));
+				var message = ResultCommitMessage.Render(monorepo.CommitMessage, metadata, component, tag, SummarizeCommand(metadata.Command));
 				await checkout.RunOrThrowAsync(["commit", "--quiet", "-m", message]);
 				component.ResultCommit = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
 				component.ResultStatus = ResultStatus.Committed;

@@ -9,9 +9,10 @@ internal static class InitCommand
 		"# Bassia meta-repo configuration\n" +
 		"\n" +
 		"[agent.commit]\n" +
-		"# Subject line of the commits an agentic run makes in a component. The body is always a TOML record of the run.\n" +
-		"# Placeholders: {run_id} (agent-run-<id>), {short_id} (first 8 digits of <id>), {summary} (from the agent command), {component}.\n" +
-		"subject = \"" + Monorepo.DefaultCommitSubject + "\"\n";
+		"# Message of the commits an agentic run makes in a component. Placeholders: {run_id} (agent-run-<id>),\n" +
+		"# {short_id} (first 8 digits of <id>), {summary} (from the agent command), {component}, and {metadata}, which\n" +
+		"# expands to a TOML record of the run ([agentic_run] / [agentic_run.component]).\n" +
+		"message = \"\"\"\n" + Monorepo.DefaultCommitMessage + "\"\"\"\n";
 
 	private const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +
