@@ -5,7 +5,13 @@ using Bassia.Git;
 /// <summary><c>bassia init</c>: initializes a Bassia monorepo.</summary>
 internal static class InitCommand
 {
-	private const string DefaultConfigToml = "# Bassia meta-repo configuration\n";
+	private const string DefaultConfigToml =
+		"# Bassia meta-repo configuration\n" +
+		"\n" +
+		"[agent.commit]\n" +
+		"# Subject line of the commits an agentic run makes in a component. The body is always a TOML record of the run.\n" +
+		"# Placeholders: {run_id} (agent-run-<id>), {short_id} (first 8 digits of <id>), {summary} (from the agent command), {component}.\n" +
+		"subject = \"" + Monorepo.DefaultCommitSubject + "\"\n";
 
 	private const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +

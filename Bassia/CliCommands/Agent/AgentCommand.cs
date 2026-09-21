@@ -10,8 +10,6 @@ using Bassia.Git;
 /// </summary>
 internal static class AgentCommand
 {
-	private const string RunIdPrefix = "agentic-run-";
-
 	public static async Task<int> RunAsync(string[] args)
 	{
 		if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
@@ -78,9 +76,10 @@ internal static class AgentCommand
 
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
 		await store.EnsureRepositoryAsync();
-		var runId = await AllocateRunIdAsync(monorepo, store, closure.Select(component => component.Name));
+		var runId = RunMetadata.NewRunId();
 		var runDir = Path.Combine(monorepo.WorkspaceDir, runId);
-		var branch = $"{RunMetadata.TagPrefix}/{runId}";
+		var branch = RunMetadata.RefBase(runId);
+		Directory.CreateDirectory(runDir);
 
 		var metadata = new RunMetadata
 		{
@@ -132,7 +131,7 @@ internal static class AgentCommand
 
 		foreach (var component in metadata.Components)
 		{
-			await FinalizeComponentAsync(git, monorepo, store, metadata, component);
+			await FinalizeComponentAsync(monorepo, metadata, component);
 		}
 
 		metadata.Status = OverallStatus(metadata);
@@ -256,45 +255,6 @@ internal static class AgentCommand
 		return await source.RunOrThrowAsync(["rev-parse", "--verify", $"{commitIsh}^{{commit}}"]);
 	}
 
-	private static async Task<string> AllocateRunIdAsync(Monorepo monorepo, RunMetadataStore store, IEnumerable<string> componentNames)
-	{
-		Directory.CreateDirectory(monorepo.WorkspaceDir);
-		var used = new HashSet<string>(await store.ListRunIdsAsync(), StringComparer.Ordinal);
-		foreach (var directory in Directory.EnumerateDirectories(monorepo.WorkspaceDir, $"{RunIdPrefix}*"))
-		{
-			used.Add(Path.GetFileName(directory));
-		}
-
-		// Result branches/tags are named after the run id, so ids already present in a source-of-truth repo
-		// (e.g. from a run on another workspace) must not be reused.
-		foreach (var componentName in componentNames)
-		{
-			var refs = await GitClient.In(monorepo.SourceRepoDir(componentName)).RunOrThrowAsync(
-				["for-each-ref", "--format=%(refname)", $"refs/heads/{RunMetadata.TagPrefix}/", $"refs/tags/{RunMetadata.TagPrefix}/"]);
-			foreach (var reference in refs.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-			{
-				var parts = reference.Split('/');
-				if (parts.Length >= 4)
-				{
-					used.Add(parts[3]);
-				}
-			}
-		}
-
-		for (var number = 1; ; number++)
-		{
-			var runId = $"{RunIdPrefix}{number}";
-			var runDir = Path.Combine(monorepo.WorkspaceDir, runId);
-			if (used.Contains(runId) || Directory.Exists(runDir))
-			{
-				continue;
-			}
-
-			Directory.CreateDirectory(runDir);
-			return runId;
-		}
-	}
-
 	// ----- materialization -----
 
 	private static async Task MaterializeAsync(GitClient git, Monorepo monorepo, RunMetadata metadata, IReadOnlyList<ComponentDefinition> closure)
@@ -402,7 +362,7 @@ internal static class AgentCommand
 	/// Commits the component's working tree on its run branch, tags the commit and pushes branch + tag to the
 	/// source-of-truth repo. Idempotent, so a partially failed sequence can be retried: steps already done are skipped.
 	/// </summary>
-	private static async Task FinalizeComponentAsync(GitClient git, Monorepo monorepo, RunMetadataStore store, RunMetadata metadata, ComponentRun component)
+	private static async Task FinalizeComponentAsync(Monorepo monorepo, RunMetadata metadata, ComponentRun component)
 	{
 		if (component.ResultStatus is ResultStatus.Pushed or ResultStatus.Unchanged)
 		{
@@ -422,22 +382,29 @@ internal static class AgentCommand
 					Progress($"{metadata.RunId}: '{component.Name}' unchanged.");
 					return;
 				}
+			}
 
-				await checkout.RunOrThrowAsync(["commit", "--quiet", "-m", ComponentCommitMessage(store, metadata, component)]);
+			// The tag is settled before the commit exists so the commit message can name it. A retry keeps the tag
+			// recorded by the earlier attempt.
+			var tag = component.ResultTag ??= await NextResultTagAsync(checkout, metadata.RunId);
+			if (component.ResultCommit is null)
+			{
+				var message = ResultCommitMessage.Render(monorepo.CommitSubject, metadata, component, tag, SummarizeCommand(metadata.Command));
+				await checkout.RunOrThrowAsync(["commit", "--quiet", "-m", message]);
 				component.ResultCommit = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
 				component.ResultStatus = ResultStatus.Committed;
 			}
 
-			var tag = component.ResultTag ?? RunMetadata.TagName(metadata.RunId, 0);
 			var existingTag = await checkout.RunAsync(["rev-parse", "--quiet", "--verify", $"refs/tags/{tag}^{{commit}}"]);
-			if (existingTag.ExitCode != 0 || existingTag.Output.Trim() != component.ResultCommit)
+			if (existingTag.ExitCode != 0)
 			{
-				// The checkout is private to this run, so a stale tag (e.g. one cloned from the source repo) may be
-				// replaced here; the push below never forces, so the source of truth is still protected.
-				await checkout.RunOrThrowAsync(["tag", "--force", "-a", tag, "-m", $"{metadata.RunId}: result of the agentic run in component '{component.Name}'", component.ResultCommit]);
+				await checkout.RunOrThrowAsync(["tag", "-a", tag, "-m", $"{metadata.RunId}: result of the agentic run in component '{component.Name}'", component.ResultCommit]);
+			}
+			else if (existingTag.Output.Trim() != component.ResultCommit)
+			{
+				throw new GitException($"tag '{tag}' already exists in '{component.Path}' and does not point at the result commit {component.ResultCommit[..7]}.");
 			}
 
-			component.ResultTag = tag;
 			await checkout.RunOrThrowAsync(["push", "--quiet", monorepo.SourceRepoDir(component.Name),
 				$"refs/heads/{component.Branch}:refs/heads/{component.Branch}", $"refs/tags/{tag}:refs/tags/{tag}"]);
 			component.ResultStatus = ResultStatus.Pushed;
@@ -452,14 +419,15 @@ internal static class AgentCommand
 		}
 	}
 
-	private static string ComponentCommitMessage(RunMetadataStore store, RunMetadata metadata, ComponentRun component)
+	/// <summary>
+	/// <c>agent/run-&lt;id&gt;/&lt;counter&gt;</c> with the next unused counter. Every result tag of the run sits on the
+	/// run branch of this checkout (cloned from the source of truth, so earlier pushed results are visible too), which
+	/// makes the checkout's own tag list the complete sequence.
+	/// </summary>
+	internal static async Task<string> NextResultTagAsync(GitClient checkout, string runId)
 	{
-		return $"agent({metadata.RunId}): {SummarizeCommand(metadata.Command)}\n\n" +
-			$"Agentic run: {metadata.RunId}\n" +
-			$"Run metadata: {RunMetadata.TagName(metadata.RunId, 0)} in {store.RepoDir}\n" +
-			$"Selection: {metadata.Select}\n" +
-			$"Component: {component.Name} @ {component.CommitIsh} ({component.Commit})\n" +
-			$"Command: {metadata.Command}\n";
+		var tags = await checkout.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.RefBase(runId)}/*"]);
+		return RunMetadata.TagName(runId, RunMetadata.HighestIndex(tags.Split('\n', StringSplitOptions.RemoveEmptyEntries)) + 1);
 	}
 
 	/// <summary>
@@ -503,7 +471,7 @@ internal static class AgentCommand
 
 		foreach (var component in metadata.Components)
 		{
-			await FinalizeComponentAsync(git, monorepo, store, metadata, component);
+			await FinalizeComponentAsync(monorepo, metadata, component);
 		}
 
 		metadata.Status = OverallStatus(metadata);
@@ -541,10 +509,11 @@ internal static class AgentCommand
 			throw new AgentException($"Usage: bassia agent {subcommand} <run-id>");
 		}
 
+		var runId = RunMetadata.NormalizeRunId(args[0]);
 		var monorepo = LoadMonorepo();
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
-		var metadata = Directory.Exists(store.RepoDir) ? await store.LoadLatestAsync(args[0]) : null;
-		return (monorepo, store, metadata ?? throw new AgentException($"Unknown agentic run '{args[0]}'."));
+		var metadata = Directory.Exists(store.RepoDir) ? await store.LoadLatestAsync(runId) : null;
+		return (monorepo, store, metadata ?? throw new AgentException($"Unknown agentic run '{runId}'."));
 	}
 
 	// ----- output -----

@@ -23,12 +23,19 @@ internal sealed class Monorepo
 	public const string MetaRepoFolderName = ".bassia";
 	public const string DefaultWorkspaceFolderName = ".workspace";
 	public const string RunsRepoFolderName = ".agentic-runs";
+	public const string DefaultCommitSubject = "agent({short_id}): {summary}";
 
 	public string Root { get; }
 	public string MetaRepoDir => Path.Combine(Root, MetaRepoFolderName);
 
 	/// <summary>Folder holding the isolated per-run areas. Configurable via <c>[workspace] path</c> in <c>config.toml</c>.</summary>
 	public string WorkspaceDir { get; }
+
+	/// <summary>
+	/// Subject line of the commits an agentic run makes in a component. Configurable via <c>[agent.commit] subject</c>
+	/// in <c>config.toml</c>; see <see cref="ResultCommitMessage"/> for the placeholders.
+	/// </summary>
+	public string CommitSubject { get; }
 
 	/// <summary>
 	/// Bare repo (<c>.agentic-runs/.git</c>) that stores agentic run metadata. It lives at the monorepo root,
@@ -41,10 +48,11 @@ internal sealed class Monorepo
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, IReadOnlyList<ComponentDefinition> components)
+	private Monorepo(string root, string workspaceDir, string commitSubject, IReadOnlyList<ComponentDefinition> components)
 	{
 		Root = root;
 		WorkspaceDir = workspaceDir;
+		CommitSubject = commitSubject;
 		Components = components;
 	}
 
@@ -74,8 +82,16 @@ internal sealed class Monorepo
 			workspaceDir = Path.GetFullPath(workspacePath, root);
 		}
 
+		var commitSubject = DefaultCommitSubject;
+		if (config.TryGetValue("agent", out var agentSection) && agentSection is TomlTable agent
+			&& agent.TryGetValue("commit", out var commitSection) && commitSection is TomlTable commit
+			&& commit.TryGetValue("subject", out var subject) && subject is string subjectTemplate && !string.IsNullOrWhiteSpace(subjectTemplate))
+		{
+			commitSubject = subjectTemplate;
+		}
+
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, components);
+		return new Monorepo(root, workspaceDir, commitSubject, components);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>

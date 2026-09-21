@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 // ProgramCli reads Environment.CurrentDirectory and writes to Console, both process-global.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
@@ -115,6 +116,14 @@ internal static class TestEnvironment
 			: $"echo '{content}' > {relativePath}";
 
 	public static string FailingCommand => OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3";
+
+	/// <summary>The run id from an <c>agent</c> command's JSON result (stdout on success, stderr on failure).</summary>
+	public static string RunIdOf(string json)
+	{
+		var match = Regex.Match(json, "\"runId\": \"(agent-run-[0-9a-f]{32})\"");
+		Assert.True(match.Success, $"no run id in: {json}");
+		return match.Groups[1].Value;
+	}
 }
 
 /// <summary>
@@ -133,6 +142,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 	public string SourceRepo(string component) => Path.Combine(Root, component);
 	public string RunDir(string runId) => Path.Combine(Workspace, runId);
 	public string Checkout(string runId, string component) => Path.Combine(RunDir(runId), component);
+	public bool HasRunDirs => Directory.Exists(Workspace) && Directory.EnumerateDirectories(Workspace).Any();
 
 	public static async Task<MonorepoFixture> CreateAsync()
 	{

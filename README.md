@@ -32,20 +32,48 @@ dotnet run -- -C C:\temp\foo init
 git -C R:\app tag -a v0 -m "baseline"                # -select needs an annotated tag per component
 git -C R:\lib tag -a v0 -m "baseline"
 dotnet run -- agent -select app@v0,lib@v0 -run "claude -p 'add a hello world script' --permission-mode acceptEdits"
-dotnet run -- agent retry agentic-run-1              # re-run a failed commit/tag/push sequence
-dotnet run -- agent abandon agentic-run-1            # discard the run's folder
+dotnet run -- agent retry agent-run-<id>             # re-run a failed commit/tag/push sequence (the bare <id> works too)
+dotnet run -- agent abandon agent-run-<id>           # discard the run's folder
 ```
 
 `agent -select <component@tag>[,...] -run <command>` runs an agent on an isolated copy of the selected monorepo state:
 
 1. Every `-select` entry names a component registered in `.bassia/components.toml` and an **annotated tag** in its source-of-truth repo (`R:\<component>`); the tag is the immutable provenance recorded for the run. Unregistered names, branches and bare commits are rejected.
 2. The selection must cover the full transitive closure of the reference graph (`references = ["lib"]` or `references = [{ name = "lib", path = "libs/lib" }]` in `components.toml`; the graph must be acyclic). Selecting `app` without the `lib` it references fails before anything is materialized — a run pins every component it touches, so nothing is ever resolved from a mutable reference.
-3. The run gets a unique id (`agentic-run-N`) and folder `.workspace/agentic-run-N/`. Every selected component is cloned from its source-of-truth repo and checked out there, side by side, on the run branch `agent/agentic-run-N`. Where one component references another, the referenced component appears inside it as a junction to that sibling checkout, at the subfolder `components.toml` records; the nested path is excluded from the referring repo's index, so each repo only ever commits its own files.
-4. The `-run` command is started by the platform shell (`cmd.exe` / `sh`) in `.workspace/agentic-run-N/`, with `BASSIA_ROOT`, `BASSIA_RUN_ID` and `BASSIA_RUN_DIR` set.
-5. Before the agent starts and after it finishes, the run record (`run.toml`: selection, resolved commits, command, timestamps, status, per-component results) is committed to the bare repo `.agentic-runs/.git`, at the monorepo root alongside `.bassia` and `.workspace`, with plumbing commands only (no checkout, no branch) and tagged `agent/agentic-run-N/<lineage>`. It lives outside both the meta-repo and the workspace, so the run folder can be discarded once its results are pushed while the record survives.
-6. When the agent exits successfully, each changed component is committed on its run branch, tagged `agent/agentic-run-N/0`, and branch + tag are pushed to its source-of-truth repo. Nothing is merged or checked out there. The sequence is not transactional: a failed component leaves the run `partial`; `agent retry` finishes the remaining steps and `agent abandon` discards the run folder without touching anything already pushed.
+3. The run gets a random id, `agent-run-<id>` with `<id>` a GUID (32 hex digits), and the folder `.workspace/agent-run-<id>/`. The id is unique without any coordination, so runs from different workspaces or machines never collide on the branches and tags they push to a shared component repo. Every selected component is cloned from its source-of-truth repo and checked out there, side by side, on the run branch `agent/run-<id>`. Where one component references another, the referenced component appears inside it as a junction to that sibling checkout, at the subfolder `components.toml` records; the nested path is excluded from the referring repo's index, so each repo only ever commits its own files.
+4. The `-run` command is started by the platform shell (`cmd.exe` / `sh`) in `.workspace/agent-run-<id>/`, with `BASSIA_ROOT`, `BASSIA_RUN_ID` and `BASSIA_RUN_DIR` set.
+5. Before the agent starts and after it finishes, the run record (`run.toml`: selection, resolved commits, command, timestamps, status, per-component results) is committed to the bare repo `.agentic-runs/.git`, at the monorepo root alongside `.bassia` and `.workspace`, with plumbing commands only (no checkout, no branch) and tagged `agent/run-<id>/<lineage>`. It lives outside both the meta-repo and the workspace, so the run folder can be discarded once its results are pushed while the record survives.
+6. When the agent exits successfully, each changed component is committed on its run branch, tagged `agent/run-<id>/<counter>`, and branch + tag are pushed to its source-of-truth repo. The counter is the next unused index among the component's existing `agent/run-<id>/*` tags — all of them sit on the run branch, so the checkout's own tag list is the whole sequence; a run's first result is `/0`. Nothing is merged or checked out there. The sequence is not transactional: a failed component leaves the run `partial`; `agent retry` finishes the remaining steps and `agent abandon` discards the run folder without touching anything already pushed.
 
-The workspace location can be moved (for example to another volume) via `.bassia/config.toml`:
+The result commit's message is a subject line, a blank line, and a TOML record of the run and the component, so tooling can read a component's history back to the run that produced each commit:
+
+```toml
+agent(c37ed8ae): add a hello world script
+
+[agentic_run]
+id = "agent-run-c37ed8ae51f1420a9abee46a4f836af3"
+summary = "add a hello world script"
+command = "claude -p \"add a hello world script\" --permission-mode acceptEdits"
+select = "app@v0,lib@v0"
+created = "2026-09-21T02:12:05.5578522+00:00"
+finished = "2026-09-21T02:12:06.4559366+00:00"
+record_tag = "agent/run-c37ed8ae51f1420a9abee46a4f836af3/0"
+[agentic_run.component]
+name = "app"
+commitish = "v0"
+base_commit = "350c164c94f720acf82b204da3a0a436b9270118"
+branch = "agent/run-c37ed8ae51f1420a9abee46a4f836af3"
+tag = "agent/run-c37ed8ae51f1420a9abee46a4f836af3/0"
+```
+
+The subject line is a template in `.bassia/config.toml` (written by `init`); the body's keys are fixed. `{run_id}` is the full `agent-run-<id>`, `{short_id}` the first 8 digits of `<id>`, `{summary}` the longest quoted part of the agent command (usually the prompt) or the command itself, `{component}` the component name:
+
+```toml
+[agent.commit]
+subject = "agent({short_id}): {summary}"
+```
+
+The workspace location can be moved (for example to another volume) via the same file:
 
 ```toml
 [workspace]

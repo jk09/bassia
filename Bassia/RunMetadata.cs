@@ -36,7 +36,8 @@ internal sealed class ComponentRun
 internal sealed class RunMetadata
 {
 	public const string FileName = "run.toml";
-	public const string TagPrefix = "agent";
+	public const string RunIdPrefix = "agent-run-";
+	public const string RefPrefix = "agent/run-";
 
 	public required string RunId { get; set; }
 	public required string Status { get; set; }
@@ -53,8 +54,40 @@ internal sealed class RunMetadata
 
 	public static string Timestamp() => DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
 
-	/// <summary>Tag of the metadata commit at the given lineage index: <c>agent/&lt;run-id&gt;/&lt;index&gt;</c>.</summary>
-	public static string TagName(string runId, int lineage) => $"{TagPrefix}/{runId}/{lineage}";
+	/// <summary><c>agent-run-&lt;id&gt;</c> with a fresh GUID, so ids never collide across workspaces sharing a component repo.</summary>
+	public static string NewRunId() => RunIdPrefix + Guid.NewGuid().ToString("N");
+
+	/// <summary>Accepts the full run id or just its <c>&lt;id&gt;</c> part.</summary>
+	public static string NormalizeRunId(string runId) => runId.StartsWith(RunIdPrefix, StringComparison.Ordinal) ? runId : RunIdPrefix + runId;
+
+	/// <summary>The <c>&lt;id&gt;</c> part of a run id.</summary>
+	public static string Key(string runId) => runId[RunIdPrefix.Length..];
+
+	public static string ShortKey(string runId) => Key(runId)[..8];
+
+	/// <summary>Branch of the run in every component checkout: <c>agent/run-&lt;id&gt;</c>.</summary>
+	public static string RefBase(string runId) => RefPrefix + Key(runId);
+
+	/// <summary>
+	/// <c>agent/run-&lt;id&gt;/&lt;index&gt;</c>: a result tag in a component repo, or a lineage tag in the run-metadata repo.
+	/// </summary>
+	public static string TagName(string runId, int index) => $"{RefBase(runId)}/{index}";
+
+	/// <summary>Highest <c>&lt;index&gt;</c> among the given <c>agent/run-&lt;id&gt;/&lt;index&gt;</c> tags, or -1 when there is none.</summary>
+	public static int HighestIndex(IEnumerable<string> tags)
+	{
+		var highest = -1;
+		foreach (var tag in tags)
+		{
+			var suffix = tag[(tag.LastIndexOf('/') + 1)..];
+			if (int.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out var index) && index > highest)
+			{
+				highest = index;
+			}
+		}
+
+		return highest;
+	}
 
 	public string ToToml()
 	{
@@ -184,38 +217,11 @@ internal sealed class RunMetadataStore
 		await git.RunOrThrowAsync(["init", "--quiet", "--bare", repoDir]);
 	}
 
-	/// <summary>Run ids that have at least one metadata tag.</summary>
-	public async Task<IReadOnlyList<string>> ListRunIdsAsync()
-	{
-		if (!Directory.Exists(repoDir))
-		{
-			return [];
-		}
-
-		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.TagPrefix}/*/*"]);
-		return tags.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-			.Select(tag => tag.Split('/'))
-			.Where(parts => parts.Length == 3)
-			.Select(parts => parts[1])
-			.Distinct(StringComparer.Ordinal)
-			.ToList();
-	}
-
 	/// <summary>Highest lineage index recorded for the run, or -1 when the run is unknown.</summary>
 	public async Task<int> LatestLineageAsync(string runId)
 	{
-		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.TagPrefix}/{runId}/*"]);
-		var latest = -1;
-		foreach (var tag in tags.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-		{
-			var suffix = tag[(tag.LastIndexOf('/') + 1)..];
-			if (int.TryParse(suffix, NumberStyles.None, CultureInfo.InvariantCulture, out var lineage) && lineage > latest)
-			{
-				latest = lineage;
-			}
-		}
-
-		return latest;
+		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.RefBase(runId)}/*"]);
+		return RunMetadata.HighestIndex(tags.Split('\n', StringSplitOptions.RemoveEmptyEntries));
 	}
 
 	public async Task<RunMetadata?> LoadLatestAsync(string runId)
