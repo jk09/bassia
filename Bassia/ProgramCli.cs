@@ -90,6 +90,9 @@ internal static class ProgramCli
 		[ArgActionMethod, ArgDescription("Materialize selected components and run an agentic command over them")]
 		public Task Agent() => RecordAsync(AgentCommand.RunAsync(SubArgs()));
 
+		[ArgActionMethod, ArgDescription("Open the interactive frontend")]
+		public Task Ui() => RecordAsync(UiCommand.RunAsync());
+
 		private static string[] SubArgs() => rawArgs[1..];
 
 		private static async Task RecordAsync(Task<int> command) => exitCode = await command;
@@ -205,6 +208,8 @@ internal static class ProgramCli
 		Console.WriteLine("                         command there, then commit, tag and push the results");
 		Console.WriteLine("  agent retry <run-id>   Retry committing/pushing components that failed in a previous run");
 		Console.WriteLine("  agent abandon <run-id> Discard a run's folder (sources of truth are untouched)");
+		Console.WriteLine("  ui                     Open the interactive frontend: components, their refs and");
+		Console.WriteLine("                         dependency graph, agentic runs, tagging and starting runs");
 		Console.WriteLine("  help                   Show this help");
 	}
 }
