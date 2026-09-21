@@ -114,7 +114,7 @@ public class AgentCommandTests
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "x"));
 		Assert.True(exitCode == 0, error);
 
-		// The record lives with the meta-repo, without becoming part of its tree, and outlives the run folder.
+		// The record lives at the monorepo root, alongside (not inside) the meta-repo, and outlives the run folder.
 		var runs = monorepo.RunsRepo;
 		Assert.Equal("true", await TestEnvironment.GitAsync(runs, "rev-parse", "--is-bare-repository"));
 		Assert.Equal("", await TestEnvironment.GitAsync(monorepo.MetaRepo, "status", "--porcelain"));

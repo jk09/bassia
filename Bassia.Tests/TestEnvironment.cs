@@ -129,7 +129,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 	public string Root => Path.Combine(temp.Path, "root");
 	public string Workspace => Path.Combine(Root, ".workspace");
 	public string MetaRepo => Path.Combine(Root, ".bassia");
-	public string RunsRepo => Path.Combine(MetaRepo, ".agentic-runs", ".git");
+	public string RunsRepo => Path.Combine(Root, ".agentic-runs", ".git");
 	public string SourceRepo(string component) => Path.Combine(Root, component);
 	public string RunDir(string runId) => Path.Combine(Workspace, runId);
 	public string Checkout(string runId, string component) => Path.Combine(RunDir(runId), component);

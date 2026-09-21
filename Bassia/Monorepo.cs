@@ -31,11 +31,13 @@ internal sealed class Monorepo
 	public string WorkspaceDir { get; }
 
 	/// <summary>
-	/// Bare repo (<c>.bassia/.agentic-runs/.git</c>) that stores agentic run metadata. It lives with the meta-repo,
-	/// not in the workspace: a run folder is scratch that may be discarded once its results are pushed, while the
-	/// mapping from a run to the tags it created in the components is durable monorepo state.
+	/// Bare repo (<c>.agentic-runs/.git</c>) that stores agentic run metadata. It lives at the monorepo root,
+	/// next to <c>.bassia</c> and <c>.workspace</c>, not inside either of them: it isn't meta-repo content (so it
+	/// must not sit in the <c>.bassia</c> working tree, which git would otherwise try to track it as part of), and
+	/// unlike a run folder - scratch that may be discarded once its results are pushed - the mapping from a run to
+	/// the tags it created in the components is durable monorepo state that must outlive the workspace.
 	/// </summary>
-	public string RunsRepoDir => Path.Combine(MetaRepoDir, RunsRepoFolderName, ".git");
+	public string RunsRepoDir => Path.Combine(Root, RunsRepoFolderName, ".git");
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 

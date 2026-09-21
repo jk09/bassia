@@ -14,10 +14,6 @@ internal static class InitCommand
 		"# name = \"component_1\"\n" +
 		"# url = \"https://github.com/myrepo/component_1.git\"\n";
 
-	// The agentic-run records are their own bare repo inside the meta-repo folder; the meta-repo must not try to
-	// track it as an embedded repository.
-	private const string DefaultGitIgnore = "/" + Monorepo.RunsRepoFolderName + "/\n";
-
 	public static async Task<int> RunAsync(string[] args)
 	{
 		if (args.Length > 1)
@@ -51,7 +47,6 @@ internal static class InitCommand
 
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "config.toml"), DefaultConfigToml);
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "components.toml"), DefaultComponentsToml);
-		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, ".gitignore"), DefaultGitIgnore);
 
 		var commitResult = await GitClient.In(metaRepoDir).CommitAllAsync("Initialize Bassia meta-repo");
 		if (commitResult.ExitCode != 0)
