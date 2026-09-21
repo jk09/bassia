@@ -51,8 +51,13 @@ internal static class AgentCommand
 	private static async Task<int> StartAsync(GitClient git, string[] args)
 	{
 		var (select, command) = ParseStartArguments(args);
-		var monorepo = LoadMonorepo();
+		var outcome = await StartRunAsync(git, LoadMonorepo(), select, command);
+		return ProgramCli.WriteResult(outcome.Ok, "agent", outcome.Message, ResultData(outcome.Metadata, outcome.Store, outcome.MetadataTags));
+	}
 
+	/// <summary>The full <c>bassia agent -select ... -run ...</c> sequence, shared by the CLI and the interactive frontend.</summary>
+	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command)
+	{
 		var selected = ComponentSelection.ParseList("-select", select);
 		foreach (var selection in selected)
 		{
@@ -124,9 +129,9 @@ internal static class AgentCommand
 		{
 			metadata.Status = "failed";
 			var failedTag = await store.CommitAsync(metadata);
-			return ProgramCli.WriteResult(false, "agent",
+			return new AgentRunOutcome(false,
 				$"Agent command exited with code {metadata.AgentExitCode}; nothing was committed. The workspace '{runDir}' is kept for inspection.",
-				ResultData(metadata, store, [startTag, failedTag]));
+				metadata, store, [startTag, failedTag]);
 		}
 
 		foreach (var component in metadata.Components)
@@ -137,9 +142,9 @@ internal static class AgentCommand
 		metadata.Status = OverallStatus(metadata);
 		var finalTag = await store.CommitAsync(metadata);
 		var ok = metadata.Status == "completed";
-		return ProgramCli.WriteResult(ok, "agent",
+		return new AgentRunOutcome(ok,
 			ok ? CompletedMessage(metadata) : $"Agentic run '{runId}' finished with failures; run 'bassia agent retry {runId}' or 'bassia agent abandon {runId}'.",
-			ResultData(metadata, store, [startTag, finalTag]));
+			metadata, store, [startTag, finalTag]);
 	}
 
 	private static string CompletedMessage(RunMetadata metadata)

@@ -89,6 +89,19 @@ path = 'D:\bassia-workspace'
 
 `Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
 
+### Interactive frontend
+
+```powershell
+dotnet run -- -C R:\ ui
+```
+
+`ui` opens a menu-driven session over the monorepo the current directory belongs to (it fails with the usual JSON error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation:
+
+- **Components**: every component from `components.toml` with its source and references; the dependency graph drawn in the console, exportable as Markdown with a Mermaid block (`components.md`) or as SVG (`components.svg`).
+- **A component**: its branches and tags (annotated tags marked, since only those can be selected for a run), its git tree, and every agentic run that touched it with the result tag it left. *Create annotated tag* runs `git tag -a` on a chosen branch, tag or commit and the view refreshes.
+- **Agentic runs**: every run recorded in `.agentic-runs`, newest first, with status, selection and per-component results. Stop / suspend / resume / hand off / integrate results are listed but not implemented yet; they report so and change nothing.
+- **Start an agentic run**: pick components (the reference closure is completed automatically) and an annotated tag for each, then the prompt, model, effort and context; the composed `-run` command (default agent command `claude -p --permission-mode acceptEdits`) can be edited before the run starts through the same path as `bassia agent -select ... -run ...`.
+
 ## Build
 
 ```powershell

@@ -224,6 +224,32 @@ internal sealed class RunMetadataStore
 		return RunMetadata.HighestIndex(tags.Split('\n', StringSplitOptions.RemoveEmptyEntries));
 	}
 
+	/// <summary>Every run with a record in the store, newest first, each at its latest lineage.</summary>
+	public async Task<IReadOnlyList<RunMetadata>> ListLatestAsync()
+	{
+		if (!Directory.Exists(Path.Combine(repoDir, "objects")))
+		{
+			return [];
+		}
+
+		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.RefPrefix}*/*"]);
+		var runIds = tags.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+			.Select(tag => tag[RunMetadata.RefPrefix.Length..tag.LastIndexOf('/')])
+			.Distinct(StringComparer.Ordinal)
+			.Select(RunMetadata.NormalizeRunId);
+
+		var runs = new List<RunMetadata>();
+		foreach (var runId in runIds)
+		{
+			if (await LoadLatestAsync(runId) is { } metadata)
+			{
+				runs.Add(metadata);
+			}
+		}
+
+		return runs.OrderByDescending(run => run.Created, StringComparer.Ordinal).ToList();
+	}
+
 	public async Task<RunMetadata?> LoadLatestAsync(string runId)
 	{
 		var lineage = await LatestLineageAsync(runId);
