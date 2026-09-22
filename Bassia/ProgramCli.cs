@@ -1,8 +1,6 @@
 namespace Bassia;
 
 using System.ComponentModel;
-using System.Text.Encodings.Web;
-using System.Text.Json;
 using Bassia.CliCommands.Agent;
 
 
@@ -11,9 +9,6 @@ using PowerArgs;
 
 internal static class ProgramCli
 {
-	// Relaxed escaping keeps quotes and paths in messages readable; the output is still valid JSON.
-	private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-
 	// bassia's subcommands (commit, add-component, agent) parse their own arguments by hand: their grammars - nested
 	// subcommands, "-run" swallowing the rest of the command line verbatim - don't fit PowerArgs' declarative
 	// argument binding. PowerArgs' action framework is used only to route the first argument to the matching
@@ -115,14 +110,14 @@ internal static class ProgramCli
 			}
 		}
 
-		var json = JsonSerializer.Serialize(payload, JsonOptions);
+		var toml = TomlResult.Serialize(payload);
 		if (ok)
 		{
-			Console.WriteLine(json);
+			Console.WriteLine(toml);
 		}
 		else
 		{
-			Console.Error.WriteLine(json);
+			Console.Error.WriteLine(toml);
 		}
 
 		return ok ? 0 : 1;

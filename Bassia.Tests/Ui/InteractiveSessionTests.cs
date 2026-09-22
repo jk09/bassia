@@ -120,8 +120,8 @@ public class InteractiveSessionTests
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
-		var (_, json, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
-		var runId = TestEnvironment.RunIdOf(json.Length > 0 ? json : error);
+		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
 		var tagsBefore = await TestEnvironment.GitAsync(fixture.RunsRepo, "tag", "--list");
 		var harness = new Harness(fixture)
 			.Choose("Agentic runs", $"Open {RunMetadata.ShortKey(runId)}", "Stop", "Suspend", "Resume", "Hand off", "Integrate results", "Back", "Back", "Quit");
@@ -146,8 +146,8 @@ public class InteractiveSessionTests
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
 		await fixture.AddComponentAsync("other");
-		var (_, json, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
-		var runId = TestEnvironment.RunIdOf(json.Length > 0 ? json : error);
+		var (_, output, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var runId = TestEnvironment.RunIdOf(output.Length > 0 ? output : error);
 
 		var touched = await new Harness(fixture).Choose("Components", "Open example", "Back", "Back", "Quit").RunAsync();
 		var untouched = await new Harness(fixture).Choose("Components", "Open other", "Back", "Back", "Quit").RunAsync();

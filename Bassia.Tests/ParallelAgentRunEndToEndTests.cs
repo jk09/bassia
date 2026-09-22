@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
-using System.Text.Json;
 using Bassia.CliCommands.Agent;
 using Tomlyn;
 using Tomlyn.Model;
@@ -85,7 +84,7 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		{
 			var name = $"hello{index}";
 			var added = AssertOk(await BassiaAsync(root, "add-component", ComponentUrl, name), "add-component");
-			Assert.Equal(name, added.GetProperty("name").GetString());
+			Assert.Equal(name, added["name"]);
 
 			var source = Path.Combine(root, name);
 			Assert.Equal("true", await TestEnvironment.GitAsync(source, "rev-parse", "--is-bare-repository"));
@@ -167,22 +166,22 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 	/// </summary>
 	private static async Task<VerifiedRun> VerifyComponentResultAsync(RunPlan plan, CliResult result, ProofReport proof)
 	{
-		var json = AssertOk(result, $"agent -select {plan.Name}@{plan.BaseTag}");
-		Assert.Equal("completed", json.GetProperty("status").GetString());
-		Assert.Equal(0, json.GetProperty("agentExitCode").GetInt32());
+		var toml = AssertOk(result, $"agent -select {plan.Name}@{plan.BaseTag}");
+		Assert.Equal("completed", toml["status"]);
+		Assert.Equal(0L, toml["agent_exit_code"]);
 
-		var runId = json.GetProperty("runId").GetString()!;
+		var runId = (string)toml["run_id"];
 		var branch = RunMetadata.RefBase(runId);
 		var resultTag = RunMetadata.TagName(runId, 0);
 
-		var component = Assert.Single(json.GetProperty("components").EnumerateArray().ToList());
-		Assert.Equal(plan.Name, component.GetProperty("name").GetString());
-		Assert.Equal(plan.BaseTag, component.GetProperty("commitish").GetString());
-		Assert.Equal(plan.BaseCommit, component.GetProperty("commit").GetString());
-		Assert.Equal("pushed", component.GetProperty("resultStatus").GetString());
-		Assert.Equal(branch, component.GetProperty("branch").GetString());
-		Assert.Equal(resultTag, component.GetProperty("resultTag").GetString());
-		var resultCommit = component.GetProperty("resultCommit").GetString()!;
+		var component = Assert.Single((TomlTableArray)toml["component"]);
+		Assert.Equal(plan.Name, component["name"]);
+		Assert.Equal(plan.BaseTag, component["commitish"]);
+		Assert.Equal(plan.BaseCommit, component["commit"]);
+		Assert.Equal("pushed", component["result_status"]);
+		Assert.Equal(branch, component["branch"]);
+		Assert.Equal(resultTag, component["result_tag"]);
+		var resultCommit = (string)component["result_commit"];
 
 		var source = plan.SourceRepo;
 
@@ -227,7 +226,7 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		proof.Fact("Run id", $"`{runId}`");
 		proof.Fact("Selection", $"`{plan.Name}@{plan.BaseTag}` -> `{plan.BaseCommit}`");
 		proof.Fact("Command", $"`{plan.AgentCommand}`");
-		proof.Fact("Workspace", json.GetProperty("workspace").GetString());
+		proof.Fact("Workspace", (string)toml["workspace"]);
 		proof.Fact("Result branch", $"`{branch}` -> `{resultCommit}`");
 		proof.Fact("Result tag", $"`{resultTag}` (annotated, object `{await TestEnvironment.GitAsync(source, "rev-parse", resultTag)}`)");
 		proof.Fact("Result commit parent", $"`{await TestEnvironment.GitAsync(source, "rev-parse", $"{resultCommit}^")}` (= the baseline)");
@@ -237,7 +236,7 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		proof.Block("Commit message", message);
 		proof.Block($"{plan.FileName} at {resultTag}", plan.FileContent);
 
-		return new VerifiedRun(runId, plan, resultCommit, resultTag, json.GetProperty("workspace").GetString()!);
+		return new VerifiedRun(runId, plan, resultCommit, resultTag, (string)toml["workspace"]);
 	}
 
 	/// <summary>
@@ -359,25 +358,25 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		return new CliResult(process.ExitCode, await standardOutput, await standardError);
 	}
 
-	/// <summary>Asserts the command succeeded and returns its JSON result.</summary>
-	private static JsonElement AssertOk(CliResult result, string what)
+	/// <summary>Asserts the command succeeded and returns its TOML result.</summary>
+	private static TomlTable AssertOk(CliResult result, string what)
 	{
 		Assert.True(result.ExitCode == 0, $"bassia {what} failed ({result.ExitCode}):\n{result.StandardError}");
-		var json = ParseResult(result.StandardOutput, what);
-		Assert.True(json.GetProperty("ok").GetBoolean(), $"bassia {what} reported failure: {json}");
-		return json;
+		var toml = ParseResult(result.StandardOutput, what);
+		Assert.True((bool)toml["ok"], $"bassia {what} reported failure:\n{result.StandardOutput}");
+		return toml;
 	}
 
 	/// <summary>
-	/// bassia prints an indented JSON result; an agent command's own output can precede it, so the result is the
-	/// trailing block that starts at the only kind of line holding an unindented <c>{</c>.
+	/// An agent command's own output can precede the result, so the result is the block starting at the last
+	/// marker line bassia opens it with.
 	/// </summary>
-	private static JsonElement ParseResult(string standardOutput, string what)
+	private static TomlTable ParseResult(string standardOutput, string what)
 	{
 		var text = standardOutput.Replace("\r\n", "\n");
-		var start = text.StartsWith("{\n", StringComparison.Ordinal) ? 0 : text.LastIndexOf("\n{\n", StringComparison.Ordinal) + 1;
-		Assert.True(start > 0 || text.StartsWith("{\n", StringComparison.Ordinal), $"bassia {what} printed no JSON result:\n{standardOutput}");
-		return JsonDocument.Parse(text[start..]).RootElement.Clone();
+		var start = text.LastIndexOf(TomlResult.Marker + "\n", StringComparison.Ordinal);
+		Assert.True(start >= 0, $"bassia {what} printed no TOML result:\n{standardOutput}");
+		return TomlSerializer.Deserialize<TomlTable>(text[start..])!;
 	}
 
 	// ----- the proof -----

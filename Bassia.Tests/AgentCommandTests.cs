@@ -66,8 +66,8 @@ public class AgentCommandTests
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "class Hello {}"));
 
 		Assert.True(exitCode == 0, error);
-		Assert.Contains("\"status\": \"completed\"", output);
-		Assert.Contains("\"resultStatus\": \"pushed\"", output);
+		Assert.Contains("status = \"completed\"", output);
+		Assert.Contains("result_status = \"pushed\"", output);
 		var runId = TestEnvironment.RunIdOf(output);
 		var branch = RunMetadata.RefBase(runId);
 		var tag = RunMetadata.TagName(runId, 0);
@@ -155,8 +155,8 @@ public class AgentCommandTests
 		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "example@v0", "-run", "echo hello");
 
 		Assert.True(exitCode == 0, error);
-		Assert.Contains("\"status\": \"completed\"", output);
-		Assert.Contains("\"resultStatus\": \"unchanged\"", output);
+		Assert.Contains("status = \"completed\"", output);
+		Assert.Contains("result_status = \"unchanged\"", output);
 		Assert.Contains("changed no component; nothing was committed", output);
 
 		var refs = await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "for-each-ref", "--format=%(refname)", "refs/heads/agent/", "refs/tags/agent/");
@@ -309,8 +309,8 @@ public class AgentCommandTests
 		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0,lib@v0", "-run", command);
 
 		Assert.Equal(1, exitCode);
-		Assert.Contains("\"status\": \"partial\"", error);
-		Assert.Contains("\"resultStatus\": \"failed\"", error);
+		Assert.Contains("status = \"partial\"", error);
+		Assert.Contains("result_status = \"failed\"", error);
 		Assert.Contains("lib is locked", error);
 		var runId = TestEnvironment.RunIdOf(error);
 		var resultTag = RunMetadata.TagName(runId, 0);
@@ -322,7 +322,7 @@ public class AgentCommandTests
 		var (retryExitCode, retryOutput, retryError) = await monorepo.AgentAsync("retry", RunMetadata.Key(runId));
 
 		Assert.True(retryExitCode == 0, retryError);
-		Assert.Contains("\"status\": \"completed\"", retryOutput);
+		Assert.Contains("status = \"completed\"", retryOutput);
 		Assert.Contains(resultTag, await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "tag", "--list"));
 		Assert.Contains("l.txt", await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "ls-tree", "--name-only", "-r", resultTag));
 		Assert.Contains("status = \"completed\"", await TestEnvironment.GitAsync(monorepo.RunsRepo, "show", $"{RunMetadata.TagName(runId, 2)}:run.toml"));

@@ -33,18 +33,18 @@ $command = "$Agent `"$($Prompt.Replace('"', '\"'))`""
 $result = Invoke-Bassia -C $Monorepo agent -select $Select -run $command
 
 Write-Host ''
-Write-Host "Run $($result.runId): $($result.status)"
-foreach ($component in $result.components) {
-	$where = if ($component.resultTag) { " -> $($component.resultTag) in $(Join-Path $Monorepo $component.name)" } else { '' }
-	Write-Host "  $($component.name)@$($component.commitish): $($component.resultStatus)$where"
+Write-Host "Run $($result.run_id): $($result.status)"
+foreach ($component in $result.component) {
+	$where = if ($component.result_tag) { " -> $($component.result_tag) in $(Join-Path $Monorepo $component.name)" } else { '' }
+	Write-Host "  $($component.name)@$($component.commitish): $($component.result_status)$where"
 }
 
-$pushed = $result.components | Where-Object { $_.resultStatus -eq 'pushed' }
+$pushed = $result.component | Where-Object { $_.result_status -eq 'pushed' }
 if ($pushed) {
 	Write-Host ''
 	Write-Host 'Inspect a result with:'
 	foreach ($component in $pushed) {
-		Write-Host "  git -C '$(Join-Path $Monorepo $component.name)' log -1 --format=%B $($component.resultTag)"
+		Write-Host "  git -C '$(Join-Path $Monorepo $component.name)' log -1 --format=%B $($component.result_tag)"
 	}
 }
 
