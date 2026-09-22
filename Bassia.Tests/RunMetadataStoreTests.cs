@@ -14,6 +14,24 @@ public class RunMetadataStoreTests
 	}
 
 	[Fact]
+	public async Task EnsureRepositoryAsync_CalledConcurrently_CreatesOneCompleteStoreAndLeavesNoStagingFolder()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+
+		// Runs started in parallel all reach this on a monorepo whose store does not exist yet.
+		var stores = Enumerable.Range(0, 8).Select(_ => new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepo)).ToArray();
+		await Task.WhenAll(stores.Select(store => store.EnsureRepositoryAsync()));
+
+		var git = GitClient.In(monorepo.RunsRepo);
+		Assert.Equal("true", await git.RunOrThrowAsync(["rev-parse", "--is-bare-repository"]));
+		Assert.Empty(await stores[0].ListLatestAsync());
+
+		// Only the store itself: the losers of the race cleaned their staging folders up.
+		var entries = Directory.EnumerateDirectories(Path.GetDirectoryName(monorepo.RunsRepo)!).Select(directory => Path.GetFileName(directory)!).Order();
+		Assert.Equal([".git"], entries);
+	}
+
+	[Fact]
 	public async Task ListLatestAsync_ReturnsEveryRunAtItsLatestLineageNewestFirst()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();

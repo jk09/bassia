@@ -108,4 +108,29 @@ dotnet run -- -C R:\ ui
 dotnet build
 ```
 
+## Test
+
+```powershell
+dotnet test                                   # everything
+dotnet test --filter Category!=EndToEnd       # skip the tests that need network access
+dotnet test --filter Category=EndToEnd --logger "console;verbosity=detailed"
+```
+
+Most tests drive the CLI in-process against components created locally. `ParallelAgentRunEndToEndTests`
+(`Category=EndToEnd`) is the whole-pipeline proof and works differently: it builds a monorepo in the temp folder,
+clones [jk09/example](https://github.com/jk09/example) twice as two components, tags each component's HEAD, and
+starts one agentic run per component **at the same time**, each as its own `bassia` process. It then checks that
+every run pushed an annotated result tag onto its own component's baseline, left the baseline tag and `main`
+where they were, stayed out of the other component, and recorded both runs in `.agentic-runs`; the recorded
+`created`/`finished` timestamps have to overlap, which is what makes it a parallel run rather than two runs in a
+row. The run command is a deterministic shell command standing in for a coding agent, so the proof is about
+Bassia and not about a model's output.
+
+It writes a Markdown report of every commit, tag and record it verified, to the test output and to a file. Three
+environment variables steer it:
+
+- `BASSIA_E2E_PROOF` — where to write the report (default: a timestamped file in the temp folder).
+- `BASSIA_E2E_KEEP` — keep the monorepo after the test so the refs in the report can be inspected.
+- `BASSIA_E2E_COMPONENT_URL` — clone from a local mirror instead of GitHub, to run offline.
+
 The current command surface is intentionally small. Future features can add workflow-specific behavior while continuing to use Git for repository compatibility.

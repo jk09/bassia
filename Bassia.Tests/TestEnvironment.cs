@@ -42,9 +42,15 @@ internal sealed class TempDirectory : IDisposable
 
 internal static class TestEnvironment
 {
-	static TestEnvironment()
+	static TestEnvironment() => EnsureGitIdentity();
+
+	/// <summary>
+	/// Commits and annotated tags need an identity even on machines without a global git config. Tests that drive
+	/// bassia in-process get this from the static constructor; tests that start it as a child process (which
+	/// inherits this environment) call it themselves, before the first commit their subprocess makes.
+	/// </summary>
+	public static void EnsureGitIdentity()
 	{
-		// Commits and annotated tags need an identity even on machines without a global git config.
 		foreach (var variable in new[] { "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME" })
 		{
 			Environment.SetEnvironmentVariable(variable, Environment.GetEnvironmentVariable(variable) ?? "Bassia Tests");

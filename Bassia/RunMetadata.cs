@@ -206,15 +206,56 @@ internal sealed class RunMetadataStore
 
 	public string RepoDir => repoDir;
 
+	/// <summary>A complete bare repo is in place (<c>objects/</c> exists).</summary>
+	private bool IsInitialized => Directory.Exists(Path.Combine(repoDir, "objects"));
+
+	/// <summary>
+	/// Creates the bare repo on first use. Runs started in parallel reach this at the same moment, so the repo is
+	/// initialized under a private staging name and then moved into place: the rename is atomic and fails when the
+	/// destination already exists, so the loser of the race discards its own copy and every run sees a complete
+	/// repo - never one that another process is still filling with template files.
+	/// </summary>
 	public async Task EnsureRepositoryAsync()
 	{
-		if (Directory.Exists(Path.Combine(repoDir, "objects")))
+		if (IsInitialized)
 		{
 			return;
 		}
 
-		Directory.CreateDirectory(repoDir);
-		await git.RunOrThrowAsync(["init", "--quiet", "--bare", repoDir]);
+		var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(repoDir))
+			?? throw new MonorepoException($"'{repoDir}' has no parent directory to create the run-metadata repo in.");
+		Directory.CreateDirectory(parent);
+
+		var staging = Path.Combine(parent, $".init-{Guid.NewGuid():N}");
+		try
+		{
+			Directory.CreateDirectory(staging);
+			await GitClient.In(staging).RunOrThrowAsync(["init", "--quiet", "--bare", staging]);
+
+			try
+			{
+				Directory.Move(staging, repoDir);
+			}
+			catch (IOException) when (IsInitialized)
+			{
+				// Another run got there first; its repo is complete, so ours is redundant.
+			}
+		}
+		finally
+		{
+			if (Directory.Exists(staging))
+			{
+				// A freshly initialized bare repo has no read-only pack files, so a plain recursive delete suffices.
+				try
+				{
+					Directory.Delete(staging, recursive: true);
+				}
+				catch (IOException)
+				{
+					// Best-effort cleanup: a leftover staging folder is inert.
+				}
+			}
+		}
 	}
 
 	/// <summary>Highest lineage index recorded for the run, or -1 when the run is unknown.</summary>
