@@ -54,7 +54,7 @@ public class ProgramCliTests
 		Assert.True(Directory.Exists(Path.Combine(workspace.Path, ".workspace")));
 		Assert.True(File.Exists(Path.Combine(workspace.Path, ".bassia", "config.toml")));
 		Assert.True(File.Exists(Path.Combine(workspace.Path, ".bassia", "components.toml")));
-		Assert.Contains("\"ok\": true", output);
+		Assert.Contains("ok = true", output);
 	}
 
 	[Fact]
@@ -92,7 +92,7 @@ public class ProgramCliTests
 		Assert.Equal(0, exitCode);
 		Assert.True(Directory.Exists(Path.Combine(target, ".bassia")));
 		Assert.True(Directory.Exists(Path.Combine(target, ".workspace")));
-		Assert.Contains("\"ok\": true", output);
+		Assert.Contains("ok = true", output);
 	}
 
 	[Fact]
@@ -106,7 +106,7 @@ public class ProgramCliTests
 
 		Assert.Equal(0, exitCode);
 		Assert.True(Directory.Exists(Path.Combine(target, ".bassia")));
-		Assert.Contains("\"ok\": true", output);
+		Assert.Contains("ok = true", output);
 	}
 
 	[Fact]

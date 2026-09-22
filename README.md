@@ -22,9 +22,37 @@ dotnet run -- add-component https://github.com/myrepo/component_1.git
 dotnet run -- -C C:\temp\foo init
 ```
 
-`init [directory]` initializes a `Bassia` monorepo in the given, empty folder (default: the current directory): a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent run folders. `add-component <url> [name]` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`, under the given logical name or, by default, one inferred from the URL. Both commands print a JSON result on stdout (success) or stderr (failure) for machine consumption.
+`init [directory]` initializes a `Bassia` monorepo in the given, empty folder (default: the current directory): a `.bassia` meta-repo (with its own Git history and `config.toml`/`components.toml`) and a `.workspace` folder for agent run folders. `add-component <url> [name]` clones a repository as a bare component alongside the meta-repo and registers it in `.bassia/components.toml`, under the given logical name or, by default, one inferred from the URL. Both commands print a result on stdout (success) or stderr (failure) for machine consumption; see [Results](#results).
 
 `-C <path>`, given before the command, runs `bassia` as if it had been started in `<path>` instead of the current directory, same as `git -C <path>`. It can be repeated, with each occurrence resolved relative to the directory left by the previous one.
+
+### Results
+
+Every command prints its result as TOML — on stdout when it succeeded, on stderr when it failed — so an agent or a script can read it without scraping prose. TOML is what `Bassia` stores everything else in (`config.toml`, `components.toml`, the `run.toml` records), so a caller uses one parser and one vocabulary of `snake_case` keys throughout.
+
+A result always opens with the comment line `# bassia result`, then `ok`, the `command`, and either `message` (success) or `error` (failure); commands that have more to report add their own keys after those, and `agent` adds a `[[component]]` section per component, named as in `run.toml`. The marker exists because `bassia agent` lets the agent command inherit stdout: a caller takes the last marker line as the start of the result and treats anything before it as agent output. Values TOML cannot express are simply absent keys — there is no `null`.
+
+```toml
+# bassia result
+ok = true
+command = "agent"
+message = "Agentic run 'agent-run-c37ed8ae51f1420a9abee46a4f836af3' completed."
+run_id = "agent-run-c37ed8ae51f1420a9abee46a4f836af3"
+status = "completed"
+workspace = "R:\\.workspace\\agent-run-c37ed8ae51f1420a9abee46a4f836af3"
+agent_exit_code = 0
+metadata_repo = "R:\\.agentic-runs\\.git"
+metadata_tags = ["agent/run-c37ed8ae51f1420a9abee46a4f836af3/0", "agent/run-c37ed8ae51f1420a9abee46a4f836af3/1"]
+[[component]]
+name = "app"
+commitish = "v0"
+commit = "350c164c94f720acf82b204da3a0a436b9270118"
+path = "R:\\.workspace\\agent-run-c37ed8ae51f1420a9abee46a4f836af3\\app"
+branch = "agent/run-c37ed8ae51f1420a9abee46a4f836af3"
+result_status = "pushed"
+result_commit = "1f4a0c8d0f2f4a9b9d1a6f0b6f1c2d3e4a5b6c7d"
+result_tag = "agent/run-c37ed8ae51f1420a9abee46a4f836af3/0"
+```
 
 ### Agentic runs
 
@@ -95,7 +123,7 @@ path = 'D:\bassia-workspace'
 dotnet run -- -C R:\ ui
 ```
 
-`ui` opens a menu-driven session over the monorepo the current directory belongs to (it fails with the usual JSON error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation:
+`ui` opens a menu-driven session over the monorepo the current directory belongs to (it fails with the usual TOML error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation:
 
 - **Components**: every component from `components.toml` with its source and references; the dependency graph drawn in the console, exportable as Markdown with a Mermaid block (`components.md`) or as SVG (`components.svg`).
 - **A component**: its branches and tags (annotated tags marked, since only those can be selected for a run), its git tree, and every agentic run that touched it with the result tag it left. *Create annotated tag* runs `git tag -a` on a chosen branch, tag or commit and the view refreshes.

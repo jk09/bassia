@@ -63,7 +63,7 @@ internal static class InitCommand
 		return ProgramCli.WriteResult(true, "init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
 		{
 			["path"] = root,
-			["metaRepo"] = metaRepoDir
+			["meta_repo"] = metaRepoDir
 		});
 	}
 }

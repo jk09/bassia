@@ -525,23 +525,24 @@ internal static class AgentCommand
 
 	private static Dictionary<string, object?> ResultData(RunMetadata metadata, RunMetadataStore store, IReadOnlyList<string> metadataTags) => new()
 	{
-		["runId"] = metadata.RunId,
+		["run_id"] = metadata.RunId,
 		["status"] = metadata.Status,
 		["workspace"] = metadata.WorkspacePath,
-		["agentExitCode"] = metadata.AgentExitCode,
-		["metadataRepo"] = store.RepoDir,
-		["metadataTags"] = metadataTags,
-		["components"] = metadata.Components.Select(component => new Dictionary<string, object?>
+		["agent_exit_code"] = metadata.AgentExitCode,
+		["metadata_repo"] = store.RepoDir,
+		["metadata_tags"] = metadataTags,
+		// Named as in run.toml, so a caller reads the result and the stored record with the same keys.
+		["component"] = metadata.Components.Select(component => new Dictionary<string, object?>
 		{
 			["name"] = component.Name,
 			["commitish"] = component.CommitIsh,
 			["commit"] = component.Commit,
 			["path"] = component.Path,
 			["branch"] = component.Branch,
-			["resultStatus"] = component.ResultStatus.ToString().ToLowerInvariant(),
-			["resultCommit"] = component.ResultCommit,
-			["resultTag"] = component.ResultTag,
-			["resultError"] = component.ResultError
+			["result_status"] = component.ResultStatus.ToString().ToLowerInvariant(),
+			["result_commit"] = component.ResultCommit,
+			["result_tag"] = component.ResultTag,
+			["result_error"] = component.ResultError
 		}).ToList()
 	};
 

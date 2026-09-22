@@ -117,11 +117,11 @@ internal static class TestEnvironment
 
 	public static string FailingCommand => OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3";
 
-	/// <summary>The run id from an <c>agent</c> command's JSON result (stdout on success, stderr on failure).</summary>
-	public static string RunIdOf(string json)
+	/// <summary>The run id from an <c>agent</c> command's TOML result (stdout on success, stderr on failure).</summary>
+	public static string RunIdOf(string toml)
 	{
-		var match = Regex.Match(json, "\"runId\": \"(agent-run-[0-9a-f]{32})\"");
-		Assert.True(match.Success, $"no run id in: {json}");
+		var match = Regex.Match(toml, "run_id = \"(agent-run-[0-9a-f]{32})\"");
+		Assert.True(match.Success, $"no run id in: {toml}");
 		return match.Groups[1].Value;
 	}
 }
