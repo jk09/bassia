@@ -123,6 +123,14 @@ internal static class TestEnvironment
 
 	public static string FailingCommand => OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3";
 
+	/// <summary>
+	/// Shell command that blocks for <paramref name="seconds"/>, standing in for an agent that is still working.
+	/// On Windows it pings rather than calling <c>timeout</c>, which refuses to run with stdin redirected - which
+	/// is exactly how the frontend runs an agent whose output it captures.
+	/// </summary>
+	public static string SleepCommand(int seconds) =>
+		OperatingSystem.IsWindows() ? $"ping -n {seconds + 1} 127.0.0.1 > nul" : $"sleep {seconds}";
+
 	/// <summary>The run id from an <c>agent</c> command's TOML result (stdout on success, stderr on failure).</summary>
 	public static string RunIdOf(string toml)
 	{

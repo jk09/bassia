@@ -55,9 +55,14 @@ internal static class AgentCommand
 		return ProgramCli.WriteResult(outcome.Ok, "agent", outcome.Message, ResultData(outcome.Metadata, outcome.Store, outcome.MetadataTags));
 	}
 
-	/// <summary>The full <c>bassia agent -select ... -run ...</c> sequence, shared by the CLI and the interactive frontend.</summary>
-	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command)
+	/// <summary>
+	/// The full <c>bassia agent -select ... -run ...</c> sequence, shared by the CLI and the interactive frontend.
+	/// <paramref name="context"/> is how a caller watches and interrupts the run; without one the sequence behaves
+	/// exactly as the CLI always has (see <see cref="AgentRunContext"/>).
+	/// </summary>
+	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null)
 	{
+		var cancellation = context?.Cancellation ?? CancellationToken.None;
 		var selected = ComponentSelection.ParseList("-select", select);
 		foreach (var selection in selected)
 		{
@@ -78,6 +83,9 @@ internal static class AgentCommand
 			var commitIsh = commitIshByName[component.Name];
 			resolved.Add((component, commitIsh, await ResolveCommitAsync(monorepo, component.Name, commitIsh)));
 		}
+
+		// Up to here nothing outside git's object database has been touched, so a cancellation simply unwinds.
+		cancellation.ThrowIfCancellationRequested();
 
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
 		await store.EnsureRepositoryAsync();
@@ -110,7 +118,7 @@ internal static class AgentCommand
 
 		try
 		{
-			await MaterializeAsync(git, monorepo, metadata, closure);
+			await MaterializeAsync(git, monorepo, metadata, closure, context);
 		}
 		catch
 		{
@@ -119,11 +127,25 @@ internal static class AgentCommand
 		}
 
 		var startTag = await store.CommitAsync(metadata);
-		Progress($"{runId}: metadata committed as {startTag} in '{store.RepoDir}'.");
-		Progress($"{runId}: running agent command in '{runDir}'.");
+		Report(context, runId, AgentRunPhase.Preparing, $"{runId}: metadata committed as {startTag} in '{store.RepoDir}'.");
+		Report(context, runId, AgentRunPhase.Agent, $"{runId}: running agent command in '{runDir}'.");
 
-		metadata.AgentExitCode = await RunAgentProcessAsync(monorepo, metadata);
+		var exitCode = await RunAgentProcessAsync(monorepo, metadata, context);
 		metadata.Finished = RunMetadata.Timestamp();
+
+		// A null exit code means the agent process was killed on request; the record says so and keeps the run
+		// folder, so what the agent had already written can still be inspected (or abandoned, which discards it).
+		if (exitCode is null)
+		{
+			metadata.Status = "cancelled";
+			var cancelledTag = await store.CommitAsync(metadata);
+			Report(context, runId, AgentRunPhase.Cancelled, $"{runId}: cancelled; the agent process tree was stopped.");
+			return new AgentRunOutcome(false,
+				$"Agentic run '{runId}' was cancelled; the agent command was stopped and nothing was committed. The workspace '{runDir}' is kept for inspection.",
+				metadata, store, [startTag, cancelledTag]);
+		}
+
+		metadata.AgentExitCode = exitCode;
 
 		if (metadata.AgentExitCode != 0)
 		{
@@ -134,9 +156,10 @@ internal static class AgentCommand
 				metadata, store, [startTag, failedTag]);
 		}
 
+		Report(context, runId, AgentRunPhase.Finalizing, $"{runId}: committing, tagging and pushing the component results.");
 		foreach (var component in metadata.Components)
 		{
-			await FinalizeComponentAsync(monorepo, metadata, component);
+			await FinalizeComponentAsync(monorepo, metadata, component, context);
 		}
 
 		metadata.Status = OverallStatus(metadata);
@@ -262,13 +285,15 @@ internal static class AgentCommand
 
 	// ----- materialization -----
 
-	private static async Task MaterializeAsync(GitClient git, Monorepo monorepo, RunMetadata metadata, IReadOnlyList<ComponentDefinition> closure)
+	private static async Task MaterializeAsync(GitClient git, Monorepo monorepo, RunMetadata metadata, IReadOnlyList<ComponentDefinition> closure, AgentRunContext? context)
 	{
 		var runs = metadata.Components.ToDictionary(component => component.Name, StringComparer.Ordinal);
 
 		foreach (var component in metadata.Components)
 		{
-			Progress($"{metadata.RunId}: checkout of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'.");
+			(context?.Cancellation ?? CancellationToken.None).ThrowIfCancellationRequested();
+			Report(context, metadata.RunId, AgentRunPhase.Preparing,
+				$"{metadata.RunId}: checkout of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'.");
 			Directory.CreateDirectory(Path.GetDirectoryName(component.Path)!);
 			await git.RunOrThrowAsync(["clone", "--quiet", "--no-checkout", monorepo.SourceRepoDir(component.Name), component.Path]);
 			await GitClient.In(component.Path).RunOrThrowAsync(["checkout", "--quiet", "-b", component.Branch, component.Commit]);
@@ -330,7 +355,13 @@ internal static class AgentCommand
 
 	// ----- agent process -----
 
-	private static async Task<int> RunAgentProcessAsync(Monorepo monorepo, RunMetadata metadata)
+	/// <summary>
+	/// Runs the agent command in the run folder and returns its exit code, or <c>null</c> when it was cancelled and
+	/// its process tree killed. Without <see cref="AgentRunContext.OnOutput"/> the process inherits this console, so
+	/// a caller of <c>bassia agent</c> sees the agent's output as it happens; with one, both pipes are redirected
+	/// and delivered line by line, which is what lets the frontend run an agent behind a live screen.
+	/// </summary>
+	private static async Task<int?> RunAgentProcessAsync(Monorepo monorepo, RunMetadata metadata, AgentRunContext? context)
 	{
 		var startInfo = new ProcessStartInfo
 		{
@@ -355,10 +386,55 @@ internal static class AgentCommand
 		startInfo.Environment["BASSIA_RUN_ID"] = metadata.RunId;
 		startInfo.Environment["BASSIA_RUN_DIR"] = metadata.WorkspacePath;
 
+		var onOutput = context?.OnOutput;
+		if (onOutput is not null)
+		{
+			startInfo.RedirectStandardOutput = true;
+			startInfo.RedirectStandardError = true;
+		}
+
 		using var process = Process.Start(startInfo)
 			?? throw new AgentException("Could not start the agent command.");
-		await process.WaitForExitAsync();
+
+		if (onOutput is not null)
+		{
+			process.OutputDataReceived += (_, args) => Deliver(args.Data);
+			process.ErrorDataReceived += (_, args) => Deliver(args.Data);
+			process.BeginOutputReadLine();
+			process.BeginErrorReadLine();
+		}
+
+		try
+		{
+			await process.WaitForExitAsync(context?.Cancellation ?? CancellationToken.None);
+		}
+		catch (OperationCanceledException)
+		{
+			// The command runs under a shell, so the agent itself is a grandchild: only killing the whole tree
+			// actually stops it. Then wait unconditionally, so the run folder is quiescent before the caller
+			// inspects or discards it.
+			try
+			{
+				process.Kill(entireProcessTree: true);
+			}
+			catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+			{
+				// It exited between the cancellation and the kill; nothing left to stop.
+			}
+
+			await process.WaitForExitAsync(CancellationToken.None);
+			return null;
+		}
+
 		return process.ExitCode;
+
+		void Deliver(string? line)
+		{
+			if (line is not null)
+			{
+				onOutput(line);
+			}
+		}
 	}
 
 	// ----- commit / tag / push -----
@@ -367,7 +443,7 @@ internal static class AgentCommand
 	/// Commits the component's working tree on its run branch, tags the commit and pushes branch + tag to the
 	/// source-of-truth repo. Idempotent, so a partially failed sequence can be retried: steps already done are skipped.
 	/// </summary>
-	private static async Task FinalizeComponentAsync(Monorepo monorepo, RunMetadata metadata, ComponentRun component)
+	private static async Task FinalizeComponentAsync(Monorepo monorepo, RunMetadata metadata, ComponentRun component, AgentRunContext? context = null)
 	{
 		if (component.ResultStatus is ResultStatus.Pushed or ResultStatus.Unchanged)
 		{
@@ -384,7 +460,7 @@ internal static class AgentCommand
 				if (status.Length == 0)
 				{
 					component.ResultStatus = ResultStatus.Unchanged;
-					Progress($"{metadata.RunId}: '{component.Name}' unchanged.");
+					Report(context, metadata.RunId, AgentRunPhase.Finalizing, $"{metadata.RunId}: '{component.Name}' unchanged.");
 					return;
 				}
 			}
@@ -414,13 +490,13 @@ internal static class AgentCommand
 				$"refs/heads/{component.Branch}:refs/heads/{component.Branch}", $"refs/tags/{tag}:refs/tags/{tag}"]);
 			component.ResultStatus = ResultStatus.Pushed;
 			component.ResultError = null;
-			Progress($"{metadata.RunId}: '{component.Name}' committed as {component.ResultCommit[..7]}, tagged {tag}, pushed to '{monorepo.SourceRepoDir(component.Name)}'.");
+			Report(context, metadata.RunId, AgentRunPhase.Finalizing, $"{metadata.RunId}: '{component.Name}' committed as {component.ResultCommit[..7]}, tagged {tag}, pushed to '{monorepo.SourceRepoDir(component.Name)}'.");
 		}
 		catch (GitException ex)
 		{
 			component.ResultStatus = ResultStatus.Failed;
 			component.ResultError = ex.Message;
-			Progress($"{metadata.RunId}: '{component.Name}' failed: {ex.Message}");
+			Report(context, metadata.RunId, AgentRunPhase.Finalizing, $"{metadata.RunId}: '{component.Name}' failed: {ex.Message}");
 		}
 	}
 
@@ -469,7 +545,7 @@ internal static class AgentCommand
 			throw new AgentException($"Agentic run '{metadata.RunId}' was abandoned; nothing to retry.");
 		}
 
-		if (metadata.Status is "started" or "failed")
+		if (metadata.Status is "started" or "failed" or "cancelled")
 		{
 			throw new AgentException($"Agentic run '{metadata.RunId}' has status '{metadata.Status}'; only runs whose commit/push sequence failed can be retried.");
 		}
@@ -546,5 +622,20 @@ internal static class AgentCommand
 		}).ToList()
 	};
 
-	private static void Progress(string message) => Console.Error.WriteLine($"bassia: {message}");
+	/// <summary>
+	/// One progress step. Without a context - the scriptable CLI - it is the <c>bassia: ...</c> stderr line the
+	/// command has always written; with one it goes to the caller instead, which is how the frontend keeps the
+	/// running commentary of several parallel runs off its screen and on their cards.
+	/// </summary>
+	private static void Report(AgentRunContext? context, string runId, AgentRunPhase phase, string message)
+	{
+		if (context?.OnStep is { } onStep)
+		{
+			onStep(new AgentRunStep(runId, phase, message));
+		}
+		else
+		{
+			Console.Error.WriteLine($"bassia: {message}");
+		}
+	}
 }

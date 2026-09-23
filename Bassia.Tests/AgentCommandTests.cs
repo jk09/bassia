@@ -292,6 +292,77 @@ public class AgentCommandTests
 	}
 
 	[Fact]
+	public async Task Agent_Cancelled_KillsTheAgentProcessTreeAndRecordsTheRunAsCancelled()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("example");
+		using var cancellation = new CancellationTokenSource();
+		var steps = new List<AgentRunStep>();
+		var git = new Bassia.Git.GitClient(monorepo.Root);
+
+		// The agent blocks; the run is cancelled as soon as its process is the thing being waited on.
+		var context = new AgentRunContext
+		{
+			Cancellation = cancellation.Token,
+			OnStep = step =>
+			{
+				lock (steps)
+				{
+					steps.Add(step);
+				}
+
+				if (step.Phase == AgentRunPhase.Agent)
+				{
+					cancellation.Cancel();
+				}
+			}
+		};
+
+		var outcome = await AgentCommand.StartRunAsync(git, Monorepo.Load(monorepo.Root), "example@v0", TestEnvironment.SleepCommand(60), context);
+
+		Assert.False(outcome.Ok);
+		Assert.Contains("was cancelled", outcome.Message);
+		Assert.Equal("cancelled", outcome.Metadata.Status);
+		Assert.Null(outcome.Metadata.AgentExitCode);
+		// Nothing was committed into the component, and the run folder is kept for inspection.
+		Assert.Equal("v0", await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "tag", "--list"));
+		Assert.True(Directory.Exists(monorepo.RunDir(outcome.Metadata.RunId)));
+		Assert.Contains("status = \"cancelled\"", await TestEnvironment.GitAsync(monorepo.RunsRepo, "show", $"{RunMetadata.TagName(outcome.Metadata.RunId, 1)}:run.toml"));
+
+		// The steps went to the context instead of stderr, which is what keeps a live frontend readable.
+		Assert.Contains(steps, step => step.Phase == AgentRunPhase.Preparing);
+		Assert.Contains(steps, step => step.Phase == AgentRunPhase.Cancelled);
+
+		var (retryExitCode, _, retryError) = await monorepo.AgentAsync("retry", outcome.Metadata.RunId);
+		Assert.Equal(1, retryExitCode);
+		Assert.Contains("has status 'cancelled'", retryError);
+	}
+
+	[Fact]
+	public async Task Agent_WithAnOutputCallback_CapturesTheAgentsOutputInsteadOfLettingItReachTheConsole()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("example");
+		var lines = new List<string>();
+		var context = new AgentRunContext
+		{
+			OnOutput = line =>
+			{
+				lock (lines)
+				{
+					lines.Add(line);
+				}
+			}
+		};
+
+		var outcome = await AgentCommand.StartRunAsync(new Bassia.Git.GitClient(monorepo.Root), Monorepo.Load(monorepo.Root),
+			"example@v0", "echo hello-from-the-agent", context);
+
+		Assert.True(outcome.Ok);
+		Assert.Contains(lines, line => line.Contains("hello-from-the-agent"));
+	}
+
+	[Fact]
 	public async Task Agent_PushFailure_IsPartialAndCanBeRetried()
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();

@@ -203,8 +203,9 @@ internal static class ProgramCli
 		Console.WriteLine("                         command there, then commit, tag and push the results");
 		Console.WriteLine("  agent retry <run-id>   Retry committing/pushing components that failed in a previous run");
 		Console.WriteLine("  agent abandon <run-id> Discard a run's folder (sources of truth are untouched)");
-		Console.WriteLine("  ui                     Open the interactive frontend: components, their refs and");
-		Console.WriteLine("                         dependency graph, agentic runs, tagging and starting runs");
+		Console.WriteLine("  ui                     Open the interactive frontend: a components board with the");
+		Console.WriteLine("                         dependency graph, a live board of the agentic runs, tagging,");
+		Console.WriteLine("                         and starting or stopping runs in the background");
 		Console.WriteLine("  help                   Show this help");
 	}
 }

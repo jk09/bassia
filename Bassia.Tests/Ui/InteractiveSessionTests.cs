@@ -7,82 +7,187 @@ namespace Bassia.Tests.Ui;
 
 public class InteractiveSessionTests
 {
-	/// <summary>A session over the fixture, driven by a scripted console. Menus use search, so a choice is typed by name.</summary>
-	private sealed class Harness
+	/// <summary>
+	/// A session over the fixture, driven by a scripted console. The boards are keys, so a command is one
+	/// character; the wizards and other prompts still read whole lines, which <see cref="Text"/> pushes.
+	/// </summary>
+	private sealed class Harness : IAsyncDisposable
 	{
 		public TestConsole Console { get; } = new();
 		public List<(string Select, string Command)> StartedRuns { get; } = [];
 		public InteractiveSession Session { get; }
+		public RunSupervisor Supervisor { get; }
 		public Monorepo Monorepo { get; }
 
-		public Harness(MonorepoFixture fixture, Func<string, string, Task<AgentRunOutcome>>? startRun = null)
+		public Harness(MonorepoFixture fixture, Func<string, string, AgentRunContext, Task<AgentRunOutcome>>? startRun = null)
 		{
 			Console.Profile.Capabilities.Interactive = true;
 			Console.Width(200);
 			Monorepo = Monorepo.Load(fixture.Root);
 			var git = new GitClient(fixture.Root);
 			var store = new RunMetadataStore(git, Monorepo.RunsRepoDir);
-			Session = new InteractiveSession(Console, Monorepo, store, startRun ?? ((select, command) =>
+			Supervisor = new RunSupervisor((select, command, context) =>
 			{
-				StartedRuns.Add((select, command));
-				return AgentCommand.StartRunAsync(git, Monorepo, select, command);
-			}));
+				lock (StartedRuns)
+				{
+					StartedRuns.Add((select, command));
+				}
+
+				return (startRun ?? ((s, c, x) => AgentCommand.StartRunAsync(git, Monorepo, s, c, x)))(select, command, context);
+			});
+
+			Session = new InteractiveSession(Console, Monorepo, store, Supervisor)
+			{
+				// A script that forgets to quit must fail the test, not hang the run.
+				IdleTimeout = TimeSpan.FromSeconds(30)
+			};
 		}
 
-		public Harness Choose(params string[] choices)
+		/// <summary>Board commands: one keystroke each.</summary>
+		public Harness Press(params char[] keys)
 		{
-			foreach (var choice in choices)
+			foreach (var key in keys)
 			{
-				Console.Input.PushTextWithEnter(choice);
+				Console.Input.PushCharacter(key);
 			}
 
 			return this;
 		}
 
-		public Harness Enter(int times = 1)
+		public Harness Key(params ConsoleKey[] keys)
 		{
-			for (var i = 0; i < times; i++)
+			foreach (var key in keys)
 			{
-				Console.Input.PushKey(ConsoleKey.Enter);
+				Console.Input.PushKey(key);
 			}
 
 			return this;
 		}
+
+		/// <summary>Prompt answers: a whole line followed by enter.</summary>
+		public Harness Text(params string[] values)
+		{
+			foreach (var value in values)
+			{
+				Console.Input.PushTextWithEnter(value);
+			}
+
+			return this;
+		}
+
+		public Harness Enter(int times = 1) => Key(Enumerable.Repeat(ConsoleKey.Enter, times).ToArray());
 
 		public async Task<string> RunAsync()
 		{
 			await Session.RunAsync();
 			return Console.Output;
 		}
+
+		public async ValueTask DisposeAsync()
+		{
+			Supervisor.CancelAll();
+			await Supervisor.WhenAllSettledAsync();
+			Supervisor.Dispose();
+		}
 	}
 
 	[Fact]
-	public async Task Components_ListsEveryRegisteredComponentWithSourceAndReferences()
+	public async Task ComponentsBoard_DrawsACardPerComponentWithItsFactsAndTheDependencyLines()
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("app");
 		await fixture.AddComponentAsync("lib");
 		await fixture.SetReferencesAsync("app", ("lib", "libs/lib"));
-		var harness = new Harness(fixture).Choose("Components", "Back", "Quit");
+		await using var harness = new Harness(fixture).Press('q');
 
 		var output = await harness.RunAsync();
 
 		Assert.Contains("app", output);
-		Assert.Contains("lib (at libs/lib)", output);
-		Assert.Contains(harness.Monorepo.FindComponent("lib")!.Url, output);
+		Assert.Contains("needs: lib@libs/lib", output);
+		Assert.Contains("used by: app", output);
+		Assert.Contains("1 tags", output);
+		// The cards are rectangles joined by an ASCII edge that ends in an arrow head at the referenced component.
+		Assert.Contains("┌─", output);
+		Assert.Contains("▼", output);
 	}
 
 	[Fact]
-	public async Task Graph_RendersTheDagAndExportsMermaidAndSvgToTheConfirmedPaths()
+	public async Task Views_SwitchWithASingleKeyAndTheTabBarFollows()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await using var harness = new Harness(fixture).Press('2', '1', 'q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains("1 Components (1)", output);
+		Assert.Contains("2 Agentic runs", output);
+		Assert.Contains("no runs recorded in", output);
+	}
+
+	[Fact]
+	public async Task RunsBoard_DrawsACardPerRecordedRunWithItsStatusAndCommand()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
+		await using var harness = new Harness(fixture).Press('2', 'q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains(RunMetadata.ShortKey(runId), output);
+		Assert.Contains("COMPLETED", output);
+		Assert.Contains("example: pushed", output);
+	}
+
+	[Fact]
+	public async Task Component_OpensWithRefsGitTreeAndTheRunsThatTouchedIt()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.AddComponentAsync("other");
+		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
+
+		await using var touchedHarness = new Harness(fixture).Enter().Press('q', 'q');
+		var touched = await touchedHarness.RunAsync();
+		// "other" is the second card, so one step right selects it.
+		await using var untouchedHarness = new Harness(fixture).Key(ConsoleKey.RightArrow).Enter().Press('q', 'q');
+		var untouched = await untouchedHarness.RunAsync();
+
+		Assert.Contains("Initial commit", touched);
+		Assert.Contains("annotated tag", touched);
+		Assert.Contains(RunMetadata.ShortKey(runId), touched);
+		Assert.Contains(RunMetadata.TagName(runId, 0), touched);
+		Assert.Contains("pushed", touched);
+		Assert.DoesNotContain(RunMetadata.ShortKey(runId), untouched[untouched.IndexOf("Agentic runs touching", StringComparison.Ordinal)..]);
+	}
+
+	[Fact]
+	public async Task Tag_CreatesAnAnnotatedTagFromTheBoardAndTheCardCountsItImmediately()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await using var harness = new Harness(fixture).Press('t').Text("main (", "v1", "second baseline").Press('q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains("Created annotated tag 'v1' at main.", output);
+		Assert.Equal("tag", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "cat-file", "-t", "v1"));
+		Assert.Equal("second baseline", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "-l", "--format=%(contents:subject)", "v1"));
+		// The board is redrawn after the action, and the card's tag count is refreshed with it.
+		Assert.Contains("2 tags", output[output.LastIndexOf("1 Components (1)", StringComparison.Ordinal)..]);
+	}
+
+	[Fact]
+	public async Task Graph_RendersTheTreeAndExportsMermaidAndSvgToTheConfirmedPaths()
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("app");
 		await fixture.AddComponentAsync("lib");
 		await fixture.SetReferencesAsync("app", "lib");
-		var harness = new Harness(fixture)
-			.Choose("Components", "Show dependency graph", "Export as Markdown").Enter()
-			.Choose("Export as SVG").Enter()
-			.Choose("Back", "Back", "Quit");
+		await using var harness = new Harness(fixture).Press('g', 'm').Enter().Press('v').Enter().Press('q', 'q');
 
 		var output = await harness.RunAsync();
 
@@ -95,45 +200,28 @@ public class InteractiveSessionTests
 	}
 
 	[Fact]
-	public async Task Component_ShowsRefsAndGitTreeAndCreatesAnAnnotatedTagThatAppearsWithoutRestarting()
-	{
-		await using var fixture = await MonorepoFixture.CreateAsync();
-		await fixture.AddComponentAsync("example");
-		await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "light", "main");
-		var harness = new Harness(fixture)
-			.Choose("Components", "Open example", "Create annotated tag", "main (", "v1", "second baseline", "Back", "Back", "Quit");
-
-		var output = await harness.RunAsync();
-
-		Assert.Contains("annotated tag", output);
-		Assert.Contains("lightweight tag", output);
-		Assert.Contains("Initial commit", output);
-		Assert.Contains("Created annotated tag 'v1' at main.", output);
-		Assert.Equal("tag", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "cat-file", "-t", "v1"));
-		Assert.Equal("second baseline", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "-l", "--format=%(contents:subject)", "v1"));
-		// The refreshed view after the action lists the new tag.
-		Assert.Contains("v1", output[output.LastIndexOf("Branches and tags", StringComparison.Ordinal)..]);
-	}
-
-	[Fact]
-	public async Task Runs_ListsRecordedRunsAndTheLifecycleStubsChangeNothing()
+	public async Task Run_OpensWithItsRecordAndTheRemainingLifecycleStubsChangeNothing()
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
 		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
 		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
 		var tagsBefore = await TestEnvironment.GitAsync(fixture.RunsRepo, "tag", "--list");
-		var harness = new Harness(fixture)
-			.Choose("Agentic runs", $"Open {RunMetadata.ShortKey(runId)}", "Stop", "Suspend", "Resume", "Hand off", "Integrate results", "Back", "Back", "Quit");
 
-		var output = await harness.RunAsync();
+		await using var harness = new Harness(fixture);
+		harness.Press('2').Enter();
+		foreach (var stub in new[] { "Suspend", "Resume", "Hand off", "Integrate results" })
+		{
+			harness.Press('m').Text(stub);
+		}
 
-		Assert.Contains("completed", output);
+		var output = await harness.Press('q', 'q').RunAsync();
+
 		Assert.Contains("example@v0", output);
 		Assert.Contains(RunMetadata.TagName(runId, 0), output);
-		foreach (var action in new[] { "Stop", "Suspend", "Resume", "Hand off", "Integrate results" })
+		foreach (var stub in new[] { "Suspend", "Resume", "Hand off", "Integrate results" })
 		{
-			Assert.Contains($"Not implemented yet: {action}.", output);
+			Assert.Contains($"Not implemented yet: {stub}.", output);
 		}
 
 		Assert.Equal(tagsBefore, await TestEnvironment.GitAsync(fixture.RunsRepo, "tag", "--list"));
@@ -141,69 +229,119 @@ public class InteractiveSessionTests
 	}
 
 	[Fact]
-	public async Task Component_ShowsTheRunsThatTouchedItWithTheirResultTags()
-	{
-		await using var fixture = await MonorepoFixture.CreateAsync();
-		await fixture.AddComponentAsync("example");
-		await fixture.AddComponentAsync("other");
-		var (_, output, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
-		var runId = TestEnvironment.RunIdOf(output.Length > 0 ? output : error);
-
-		var touched = await new Harness(fixture).Choose("Components", "Open example", "Back", "Back", "Quit").RunAsync();
-		var untouched = await new Harness(fixture).Choose("Components", "Open other", "Back", "Back", "Quit").RunAsync();
-
-		Assert.Contains(RunMetadata.ShortKey(runId), touched);
-		Assert.Contains(RunMetadata.TagName(runId, 0), touched);
-		Assert.Contains("pushed", touched);
-		Assert.DoesNotContain(RunMetadata.ShortKey(runId), untouched[untouched.IndexOf("Agentic runs touching", StringComparison.Ordinal)..]);
-	}
-
-	[Fact]
-	public async Task StartRun_ComposesSelectionAndCommandFromThePromptsAndShowsTheOutcome()
+	public async Task StartRun_ComposesSelectionAndCommandFromThePromptsAndRecordsTheRun()
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("app");
 		await fixture.AddComponentAsync("lib", "lib-base");
 		await fixture.SetReferencesAsync("app", "lib");
-		var harness = new Harness(fixture);
-		harness.Console.Input.PushTextWithEnter("Start an agentic run");
-		harness.Console.Input.PushKey(ConsoleKey.Spacebar); // select "app"; "lib" follows through the reference
-		harness.Console.Input.PushKey(ConsoleKey.Enter);
-		harness.Choose("v0 (", "lib-base (", "write hello world", "sonnet", "Agent default", "keep it short");
+		await using var harness = new Harness(fixture);
+		harness.Press('n');
+		harness.Key(ConsoleKey.Spacebar, ConsoleKey.Enter); // select "app"; "lib" follows through the reference
+		harness.Text("v0 (", "lib-base (", "write hello world", "sonnet", "Agent default", "keep it short");
 		harness.Enter(); // agent command: keep the default
-		harness.Console.Input.PushTextWithEnter(TestEnvironment.WriteFileCommand("app/hello.txt", "hi")); // replace the composed command
-		harness.Choose("y");
-		harness.Enter(); // continue past the outcome
-		harness.Choose("Quit");
+		harness.Text(TestEnvironment.WriteFileCommand("app/hello.txt", "hi")); // replace the composed command
+		harness.Text("y");
 
-		var output = await harness.RunAsync();
+		var running = harness.RunAsync();
+		await SettleAsync(harness, runs: 1);
+		harness.Press('q');
+		var output = await running;
 
 		var (select, command) = Assert.Single(harness.StartedRuns);
 		Assert.Equal("app@v0,lib@lib-base", select);
 		Assert.Equal(TestEnvironment.WriteFileCommand("app/hello.txt", "hi"), command);
 		Assert.Contains($"{InteractiveSession.DefaultAgentCommand} --model sonnet \"write hello world Context: keep it short\"", output);
-		Assert.Contains("completed", output);
-		Assert.Contains("pushed", output);
-		var runs = await new RunMetadataStore(new GitClient(fixture.Root), harness.Monorepo.RunsRepoDir).ListLatestAsync();
-		Assert.Equal("app@v0,lib@lib-base", Assert.Single(runs).Select);
+		Assert.Contains("in the background", output);
+		var run = Assert.Single(await new RunMetadataStore(new GitClient(fixture.Root), harness.Monorepo.RunsRepoDir).ListLatestAsync());
+		Assert.Equal("app@v0,lib@lib-base", run.Select);
+		Assert.Equal("completed", run.Status);
 	}
 
 	[Fact]
-	public async Task StartRun_ComponentWithoutAnnotatedTag_ExplainsAndReturnsToTheMenu()
+	public async Task StartRun_TheBoardStaysUsableWhileTheAgentIsStillRunning()
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
-		await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "-d", "v0");
-		var harness = new Harness(fixture);
-		harness.Console.Input.PushTextWithEnter("Start an agentic run");
-		harness.Console.Input.PushKey(ConsoleKey.Spacebar);
-		harness.Console.Input.PushKey(ConsoleKey.Enter);
-		harness.Enter().Choose("Quit");
+		await using var harness = new Harness(fixture);
+		StartOn(harness, component: 0, TestEnvironment.SleepCommand(60));
 
-		var output = await harness.RunAsync();
+		var running = harness.RunAsync();
+		await WaitForAsync(() => harness.Supervisor.Cards().Any(card => card.Phase == AgentRunPhase.Agent));
 
-		Assert.Contains("Component 'example' has no annotated tags", output);
-		Assert.Empty(harness.StartedRuns);
+		// While the agent is still working the frontend keeps taking keys: switch to the components board, back
+		// to the runs board, then stop the run from there.
+		harness.Press('1');
+		await WaitForAsync(() => harness.Console.Output.Contains("1 running"));
+		harness.Press('2', 'x');
+		await SettleAsync(harness, runs: 1);
+		harness.Press('q');
+		var output = await running;
+
+		Assert.Contains("RUNNING", output);
+		Assert.Contains("the agent process tree is being killed", output);
+		// The components card counted the live run against its component while it was going.
+		Assert.Contains("● 1 running", output);
+	}
+
+	[Fact]
+	public async Task StartRun_TwoRunsAtOnce_BothExecuteInParallelAndBothAreRecorded()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("app");
+		await fixture.AddComponentAsync("lib");
+		await using var harness = new Harness(fixture);
+
+		StartOn(harness, component: 0, TestEnvironment.WriteFileCommand("app/first.txt", "x"));
+		StartOn(harness, component: 1, TestEnvironment.WriteFileCommand("lib/second.txt", "x"));
+
+		var running = harness.RunAsync();
+		await SettleAsync(harness, runs: 2);
+		harness.Press('q');
+		await running;
+
+		Assert.Equal(2, harness.StartedRuns.Count);
+		var runs = await new RunMetadataStore(new GitClient(fixture.Root), harness.Monorepo.RunsRepoDir).ListLatestAsync();
+		Assert.Equal(2, runs.Count);
+		Assert.All(runs, run => Assert.Equal("completed", run.Status));
+		Assert.Equal(["app@v0", "lib@v0"], runs.Select(run => run.Select).Order().ToArray());
+	}
+
+	/// <summary>Drives the start-a-run wizard for the <paramref name="component"/>-th component on the board.</summary>
+	private static void StartOn(Harness harness, int component, string command)
+	{
+		harness.Press('n');
+		for (var i = 0; i < component; i++)
+		{
+			harness.Key(ConsoleKey.DownArrow);
+		}
+
+		harness.Key(ConsoleKey.Spacebar, ConsoleKey.Enter);
+		harness.Text("v0 (", "do it", "Agent default", "Agent default", ""); // tag, prompt, model, effort, context
+		harness.Enter(); // agent command: keep the default
+		harness.Text(command, "y");
+	}
+
+	[Fact]
+	public async Task StopRun_KillsTheAgentAndRecordsTheRunAsCancelled()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await using var harness = new Harness(fixture);
+		StartOn(harness, component: 0, TestEnvironment.SleepCommand(60));
+
+		var running = harness.RunAsync();
+		await WaitForAsync(() => harness.Supervisor.Cards().Any(card => card.Phase == AgentRunPhase.Agent));
+		harness.Press('x');
+		await SettleAsync(harness, runs: 1);
+		harness.Press('q');
+		var output = await running;
+
+		Assert.Contains("the agent process tree is being killed", output);
+		var run = Assert.Single(await new RunMetadataStore(new GitClient(fixture.Root), harness.Monorepo.RunsRepoDir).ListLatestAsync());
+		Assert.Equal("cancelled", run.Status);
+		Assert.All(run.Components, component => Assert.Equal(ResultStatus.Pending, component.ResultStatus));
+		Assert.Equal("", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "--list", "agent/*"));
 	}
 
 	[Fact]
@@ -211,16 +349,45 @@ public class InteractiveSessionTests
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
-		var harness = new Harness(fixture)
-			.Choose("Components", "Open example", "Create annotated tag", "Enter a commit hash", "0000000", "v1", "message")
+		await using var harness = new Harness(fixture)
+			.Press('t').Text("Enter a commit hash", "0000000", "v1", "message")
 			.Enter() // past the error
-			.Choose("Quit");
+			.Press('q');
 
 		var output = await harness.RunAsync();
 
 		Assert.Contains("Error", output);
 		Assert.Contains("git tag -a v1", output);
 		Assert.Equal("", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "--list", "v1"));
+	}
+
+	[Fact]
+	public async Task Help_ListsTheKeys()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await using var harness = new Harness(fixture).Press('?').Enter().Press('q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains("switch between the components board", output);
+		Assert.Contains("kills the agent process tree", output);
+	}
+
+	/// <summary>Waits until <paramref name="runs"/> runs have been started and every one of them has ended.</summary>
+	private static async Task SettleAsync(Harness harness, int runs)
+	{
+		await WaitForAsync(() => harness.Supervisor.Cards().Count == runs);
+		await harness.Supervisor.WhenAllSettledAsync();
+	}
+
+	private static async Task WaitForAsync(Func<bool> condition)
+	{
+		var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+		while (!condition())
+		{
+			Assert.True(DateTime.UtcNow < deadline, "the condition was not reached in time");
+			await Task.Delay(50);
+		}
 	}
 
 	[Theory]
