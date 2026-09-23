@@ -33,19 +33,25 @@ internal static class UiCommand
 
 		var git = new GitClient(root);
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
-		var session = new InteractiveSession(AnsiConsole.Console, monorepo, store,
-			(select, command) => AgentCommand.StartRunAsync(git, monorepo, select, command));
+		using var supervisor = new RunSupervisor(
+			(select, command, context) => AgentCommand.StartRunAsync(git, monorepo, select, command, context));
+		var session = new InteractiveSession(AnsiConsole.Console, monorepo, store, supervisor);
 
 		// Prompts hide the cursor while they run; make sure Ctrl-C doesn't leave the terminal without one.
-		ConsoleCancelEventHandler restoreCursor = (_, _) => AnsiConsole.Cursor.Show();
-		Console.CancelKeyPress += restoreCursor;
+		// The frontend's own runs are stopped through it too, so a Ctrl-C never leaves agent processes behind.
+		ConsoleCancelEventHandler stopEverything = (_, _) =>
+		{
+			supervisor.CancelAll();
+			AnsiConsole.Cursor.Show();
+		};
+		Console.CancelKeyPress += stopEverything;
 		try
 		{
 			await session.RunAsync();
 		}
 		finally
 		{
-			Console.CancelKeyPress -= restoreCursor;
+			Console.CancelKeyPress -= stopEverything;
 			AnsiConsole.Cursor.Show();
 		}
 

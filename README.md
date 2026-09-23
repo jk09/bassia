@@ -123,12 +123,37 @@ path = 'D:\bassia-workspace'
 dotnet run -- -C R:\ ui
 ```
 
-`ui` opens a menu-driven session over the monorepo the current directory belongs to (it fails with the usual TOML error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation:
+`ui` opens a live session over the monorepo the current directory belongs to (it fails with the usual TOML error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation.
 
-- **Components**: every component from `components.toml` with its source and references; the dependency graph drawn in the console, exportable as Markdown with a Mermaid block (`components.md`) or as SVG (`components.svg`).
-- **A component**: its branches and tags (annotated tags marked, since only those can be selected for a run), its git tree, and every agentic run that touched it with the result tag it left. *Create annotated tag* runs `git tag -a` on a chosen branch, tag or commit and the view refreshes.
-- **Agentic runs**: every run recorded in `.agentic-runs`, newest first, with status, selection and per-component results. Stop / suspend / resume / hand off / integrate results are listed but not implemented yet; they report so and change nothing.
-- **Start an agentic run**: pick components (the reference closure is completed automatically) and an annotated tag for each, then the prompt, model, effort and context; the composed `-run` command (default agent command `claude -p --permission-mode acceptEdits`) can be edited before the run starts through the same path as `bassia agent -select ... -run ...`.
+It has two boards, always one keystroke apart, and each is a wallboard of rectangles carrying that item's own facts:
+
+```
+┌─ app ──────────────────────┐   ┌─ ▸ tool ───────────────────┐   ┌─ ▸ 3f2a91c4 ⠸ ─────────────────┐
+│ 3 tags · 2 branches        │   │ 3 tags · 2 branches        │   │ RUNNING                   1:35 │
+│ needs: lib, ui@vendor/ui   │   │ needs: lib                 │   │ app, lib                       │
+│ used by: -                 │   │ used by: -                 │   │ ░░░▓▓░░░░░░░                   │
+│ 7 runs · v1.2              │   │ 7 runs · v1.2              │   │ add the changelog              │
+└────────────────────────────┘   └────────────────────────────┘   │ editing CHANGELOG.md           │
+          │        │                            │                 └────────────────────────────────┘
+          │        ├────────────────────────────┤
+          ▼        ▼                            ▼
+┌─ lib ──────────────────────┐   ┌─ ui ───────────────────────┐
+│ ● 2 running · 7 runs       │   │ 7 runs · v1.2              │
+└────────────────────────────┘   └────────────────────────────┘
+```
+
+- **`1` — Components**: one rectangle per component from `components.toml`, laid out in layers and joined by ASCII lines that follow `references`, so the list and the dependency graph are the same picture. A card shows its tags and branches, what it needs and what needs it, how many recorded runs touched it, and how many runs are working on it right now.
+- **`2` — Agentic runs**: one rectangle per run — the ones this session started first, then everything recorded in `.agentic-runs`. A card shows the run's short id, phase, elapsed time, components, command and the agent's latest output line; a live run animates.
+
+Keys: `1`/`2` switch boards from any screen, arrows move the selection, `enter` opens the selected card, `n` starts a run, `x` stops the selected run, `t` tags the selected component, `g` opens the dependency tree with its exports, `r` refreshes, `?` lists the keys and `q` quits. The detail screens behind `enter` are what the menu frontend showed:
+
+- **A component**: its branches and tags (annotated tags marked, since only those can be selected for a run), its git tree, and every agentic run that touched it with the result tag it left. `t` runs `git tag -a` on a chosen branch, tag or commit and the view refreshes.
+- **A run**: its record, per-component results, and the tail of the agent's output for a run this session started. `x` stops it; `m` lists suspend / resume / hand off / integrate results, which are not implemented yet and report so without changing anything.
+- **The dependency tree** (`g`): the graph as a text tree, exportable as Markdown with a Mermaid block (`components.md`) or as SVG (`components.svg`).
+
+**Starting a run** (`n`) asks for components (the reference closure is completed automatically) and an annotated tag for each, then the prompt, model, effort and context; the composed `-run` command (default agent command `claude -p --permission-mode acceptEdits`) can be edited before the run starts through the same path as `bassia agent -select ... -run ...`. The wizard then hands the run to the background and the board comes straight back, so the next run can be started while the first is still going. A background run's output is captured onto its card instead of reaching the screen.
+
+**Stopping a run** (`x`) kills the agent's whole process tree, records the run with status `cancelled` and keeps its run folder for inspection; nothing is committed into any component, and `bassia agent retry` refuses a cancelled run the same way it refuses a failed one. Quitting while runs are still going offers to stop them and waits, rather than orphaning the agent processes.
 
 ## Build
 
