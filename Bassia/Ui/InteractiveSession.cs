@@ -3,6 +3,7 @@ namespace Bassia.Ui;
 using System.Globalization;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Integration;
 using Spectre.Console;
 
 /// <summary>
@@ -10,27 +11,33 @@ using Spectre.Console;
 /// runs of one monorepo. Reads through the same model as the scriptable commands and never keeps state of its
 /// own; the mutating actions (annotated tag, run start, run cancel) go through the same code paths as the CLI.
 ///
-/// Navigation is keys, not menus: <c>1</c> and <c>2</c> switch between the two boards from anywhere, so the
-/// frontend never imposes a wait of its own. Data entry (the start-a-run wizard, tag details, export paths) stays
-/// in Spectre prompts. Runs execute in the background through <see cref="RunSupervisor"/>, so starting one returns
-/// to the board immediately and several can run at once.
+/// Navigation is keys, not menus: <c>1</c>, <c>2</c> and <c>3</c> switch between the two boards and the integration
+/// control panel from anywhere, so the frontend never imposes a wait of its own. Data entry (the start-a-run wizard,
+/// tag details, export paths) stays in Spectre prompts. Runs execute in the background through
+/// <see cref="RunSupervisor"/>, so starting one returns to the board immediately and several can run at once;
+/// integrations do the same through <see cref="IntegrationSupervisor"/>.
 /// </summary>
 internal sealed class InteractiveSession
 {
 	public const string DefaultAgentCommand = "claude -p --permission-mode acceptEdits";
 
-	/// <summary>Lifecycle actions the run model does not support yet. <c>Stop</c> used to be among them.</summary>
-	private static readonly string[] LifecycleStubs = ["Suspend", "Resume", "Hand off", "Integrate results"];
+	/// <summary>
+	/// Lifecycle actions the run model does not support yet. <c>Stop</c> used to be among them, and so did
+	/// <c>Integrate results</c>, which is now the integration control panel (<c>i</c> on a run, or <c>3</c>).
+	/// </summary>
+	private static readonly string[] LifecycleStubs = ["Suspend", "Resume", "Hand off"];
 
 	/// <summary>Repaint interval while something is live. An idle board is not repainted at all, so it does not flicker.</summary>
 	private static readonly TimeSpan Tick = TimeSpan.FromMilliseconds(200);
 
-	private enum View { Components, Runs }
+	private enum View { Components, Runs, Integration }
 
 	private readonly IAnsiConsole console;
 	private readonly Monorepo monorepo;
 	private readonly RunMetadataStore store;
 	private readonly RunSupervisor supervisor;
+	private readonly IntegrationSupervisor integrations;
+	private readonly IntegrationStore integrationStore;
 	private readonly ComponentGraph graph;
 
 	private View view = View.Components;
@@ -44,12 +51,25 @@ internal sealed class InteractiveSession
 	private IReadOnlyList<ComponentStatus> componentStatus = [];
 	private IReadOnlyList<RunMetadata> storedRuns = [];
 
-	public InteractiveSession(IAnsiConsole console, Monorepo monorepo, RunMetadataStore store, RunSupervisor supervisor)
+	// The integration control panel: which runs are chosen, what the user decided on top of the triage, and the
+	// triage itself, recomputed whenever one of those changes.
+	private readonly HashSet<string> chosenRuns = new(StringComparer.Ordinal);
+	private readonly Dictionary<string, string> onto = new(StringComparer.Ordinal);
+	private readonly Dictionary<(string Component, string RunId), MergeStrategy> strategies = [];
+	private int candidateIndex;
+	private IReadOnlyList<ComponentIntegration> plan = [];
+	private string? planError;
+	private string? resolver;
+	private IReadOnlyList<IntegrationRecord> storedIntegrations = [];
+
+	public InteractiveSession(IAnsiConsole console, Monorepo monorepo, RunMetadataStore store, RunSupervisor supervisor, IntegrationSupervisor integrations)
 	{
 		this.console = console;
 		this.monorepo = monorepo;
 		this.store = store;
 		this.supervisor = supervisor;
+		this.integrations = integrations;
+		integrationStore = new IntegrationStore(store);
 		graph = new ComponentGraph(monorepo.Components);
 	}
 
@@ -79,7 +99,7 @@ internal sealed class InteractiveSession
 	}
 
 	private static bool IsExpected(Exception ex) =>
-		ex is GitException or MonorepoException or AgentException or IOException or UnauthorizedAccessException;
+		ex is GitException or MonorepoException or AgentException or IntegrationException or IOException or UnauthorizedAccessException;
 
 	// ----- the key loop -----
 
@@ -101,12 +121,18 @@ internal sealed class InteractiveSession
 			}
 
 			var settled = supervisor.ConsumeSettled();
-			if (settled)
+			var integrated = integrations.ConsumeSettled();
+			if (settled || integrated)
 			{
 				await ReloadRunsAsync();
 			}
 
-			if (settled || supervisor.HasLive)
+			if (integrated)
+			{
+				await ReplanAsync();
+			}
+
+			if (settled || integrated || supervisor.HasLive || integrations.IsLive)
 			{
 				frame++;
 				Render();
@@ -136,6 +162,9 @@ internal sealed class InteractiveSession
 			case ConsoleKey.RightArrow or ConsoleKey.DownArrow or ConsoleKey.Tab:
 				Move(1);
 				return;
+			case ConsoleKey.Enter or ConsoleKey.Spacebar when view == View.Integration:
+				await ToggleCandidateAsync();
+				return;
 			case ConsoleKey.Enter or ConsoleKey.Spacebar:
 				await OpenAsync();
 				return;
@@ -155,6 +184,9 @@ internal sealed class InteractiveSession
 			case '2':
 				view = View.Runs;
 				break;
+			case '3':
+				view = View.Integration;
+				break;
 			case 'q':
 				await QuitAsync();
 				break;
@@ -171,8 +203,35 @@ internal sealed class InteractiveSession
 			case 't':
 				await TagSelectedComponentAsync();
 				break;
+			case 'x' when view == View.Integration:
+				StopIntegration();
+				break;
 			case 'x':
 				StopSelectedRun();
+				break;
+			case 'a' when view == View.Integration:
+				await ToggleAllCandidatesAsync();
+				break;
+			case 'o' when view == View.Integration:
+				await ChooseOntoAsync();
+				break;
+			case 's' when view == View.Integration:
+				await OverrideStrategyAsync();
+				break;
+			case 'c' when view == View.Integration:
+				onto.Clear();
+				strategies.Clear();
+				await ReplanAsync();
+				Notify("Cleared the bases and strategy overrides; the triage decides again.");
+				break;
+			case 'i' when view == View.Integration:
+				await IntegrateAsync();
+				break;
+			case 'v' when view == View.Integration:
+				await AdvanceAsync();
+				break;
+			case 'd' when view == View.Integration:
+				await IntegrationDetailAsync();
 				break;
 			case '?' or 'h':
 				await HelpAsync();
@@ -182,19 +241,28 @@ internal sealed class InteractiveSession
 
 	private void Move(int delta)
 	{
-		var count = view == View.Components ? Board().Order.Count : Cards().Count;
+		var count = view switch
+		{
+			View.Components => Board().Order.Count,
+			View.Runs => Cards().Count,
+			_ => Candidates().Count
+		};
 		if (count == 0)
 		{
 			return;
 		}
 
-		if (view == View.Components)
+		switch (view)
 		{
-			componentIndex = ((componentIndex + delta) % count + count) % count;
-		}
-		else
-		{
-			runIndex = ((runIndex + delta) % count + count) % count;
+			case View.Components:
+				componentIndex = ((componentIndex + delta) % count + count) % count;
+				break;
+			case View.Runs:
+				runIndex = ((runIndex + delta) % count + count) % count;
+				break;
+			default:
+				candidateIndex = ((candidateIndex + delta) % count + count) % count;
+				break;
 		}
 	}
 
@@ -202,6 +270,20 @@ internal sealed class InteractiveSession
 
 	private async Task QuitAsync()
 	{
+		if (integrations.IsLive)
+		{
+			console.MarkupLine("[yellow]An integration is still running in this session.[/]");
+			if (!await console.PromptAsync(new ConfirmationPrompt("Stop it and quit?")))
+			{
+				Notify("Still integrating; the control panel follows it.");
+				return;
+			}
+
+			integrations.Cancel();
+			console.MarkupLine("[grey]Stopping the integration...[/]");
+			await integrations.WhenSettledAsync();
+		}
+
 		var live = supervisor.LiveCount;
 		if (live > 0)
 		{
@@ -245,6 +327,10 @@ internal sealed class InteractiveSession
 				? "[grey]components.toml is empty.[/]"
 				: $"[grey]selected[/] [bold]{Markup.Escape(board.Order[componentIndex])}[/]");
 		}
+		else if (view == View.Integration)
+		{
+			RenderIntegration();
+		}
 		else
 		{
 			var cards = Cards();
@@ -272,7 +358,9 @@ internal sealed class InteractiveSession
 		var runs = Cards().Count;
 		return Tab(View.Components, "1", $"Components ({monorepo.Components.Count})")
 			+ "  "
-			+ Tab(View.Runs, "2", live > 0 ? $"Agentic runs ({runs}, {live} live)" : $"Agentic runs ({runs})");
+			+ Tab(View.Runs, "2", live > 0 ? $"Agentic runs ({runs}, {live} live)" : $"Agentic runs ({runs})")
+			+ "  "
+			+ Tab(View.Integration, "3", integrations.IsLive ? "Integration (live)" : $"Integration ({chosenRuns.Count} chosen)");
 	}
 
 	private string Tab(View target, string key, string label) =>
@@ -290,10 +378,14 @@ internal sealed class InteractiveSession
 
 	private string Keys()
 	{
-		const string shared = "[bold]1[/]/[bold]2[/] view  [bold]arrows[/] select  [bold]enter[/] open  [bold]n[/] new run  [bold]r[/] refresh  [bold]?[/] help  [bold]q[/] quit";
-		return view == View.Components
-			? $"[grey][bold]t[/] tag  [bold]g[/] graph & export  {shared}[/]"
-			: $"[grey][bold]x[/] stop  {shared}[/]";
+		const string shared = "[bold]1[/]/[bold]2[/]/[bold]3[/] view  [bold]arrows[/] select  [bold]enter[/] open  [bold]n[/] new run  [bold]r[/] refresh  [bold]?[/] help  [bold]q[/] quit";
+		return view switch
+		{
+			View.Components => $"[grey][bold]t[/] tag  [bold]g[/] graph & export  {shared}[/]",
+			View.Runs => $"[grey][bold]x[/] stop  {shared}[/]",
+			_ => "[grey][bold]space[/] choose run  [bold]a[/] all/none  [bold]o[/] onto  [bold]s[/] strategy  [bold]c[/] clear  [bold]i[/] integrate  " +
+				"[bold]x[/] stop  [bold]d[/] details  [bold]v[/] advance  [bold]1[/]/[bold]2[/]/[bold]3[/] view  [bold]r[/] refresh  [bold]q[/] quit[/]"
+		};
 	}
 
 	private void Notify(string message, string style = "yellow")
@@ -350,6 +442,7 @@ internal sealed class InteractiveSession
 	private async Task RefreshAsync()
 	{
 		await ReloadRunsAsync();
+		await ReplanAsync();
 
 		var statuses = new List<ComponentStatus>();
 		foreach (var component in monorepo.Components)
@@ -378,7 +471,11 @@ internal sealed class InteractiveSession
 		componentStatus = statuses;
 	}
 
-	private async Task ReloadRunsAsync() => storedRuns = await store.ListLatestAsync();
+	private async Task ReloadRunsAsync()
+	{
+		storedRuns = await store.ListLatestAsync();
+		storedIntegrations = await integrationStore.ListLatestAsync();
+	}
 
 	// ----- components -----
 
@@ -434,7 +531,7 @@ internal sealed class InteractiveSession
 			console.Write(new Panel(Markup.Escape(log)).Header("Git tree").Border(BoxBorder.Rounded));
 			WriteRunsOf(selected.Name);
 			WriteNotice();
-			console.MarkupLine("[grey][bold]t[/] create annotated tag  [bold]r[/] refresh  [bold]esc[/] back  [bold]1[/]/[bold]2[/] view[/]");
+			console.MarkupLine("[grey][bold]t[/] create annotated tag  [bold]r[/] refresh  [bold]esc[/] back  [bold]1[/]/[bold]2[/]/[bold]3[/] view[/]");
 
 			var key = await NextKeyAsync();
 			notice = null;
@@ -540,7 +637,7 @@ internal sealed class InteractiveSession
 			Screen("Dependency graph", "a component nests the components below it");
 			console.Write(new Panel(Markup.Escape(graph.RenderText())).Border(BoxBorder.Rounded));
 			WriteNotice();
-			console.MarkupLine("[grey][bold]m[/] export as Markdown (Mermaid)  [bold]v[/] export as SVG  [bold]esc[/] back  [bold]1[/]/[bold]2[/] view[/]");
+			console.MarkupLine("[grey][bold]m[/] export as Markdown (Mermaid)  [bold]v[/] export as SVG  [bold]esc[/] back  [bold]1[/]/[bold]2[/]/[bold]3[/] view[/]");
 
 			var key = await NextKeyAsync();
 			notice = null;
@@ -652,7 +749,7 @@ internal sealed class InteractiveSession
 
 			WriteOutput(key);
 			WriteNotice();
-			console.MarkupLine("[grey][bold]x[/] stop  [bold]m[/] more actions  [bold]r[/] refresh  [bold]esc[/] back  [bold]1[/]/[bold]2[/] view[/]");
+			console.MarkupLine("[grey][bold]x[/] stop  [bold]i[/] integrate its results  [bold]m[/] more actions  [bold]r[/] refresh  [bold]esc[/] back  [bold]1[/]/[bold]2[/]/[bold]3[/] view[/]");
 
 			var pressed = await NextKeyAsync();
 			notice = null;
@@ -665,6 +762,20 @@ internal sealed class InteractiveSession
 			{
 				case 'x':
 					Stop(current);
+					break;
+				case 'i':
+					if (metadata is not null && IntegrationPlanner.HasResults(metadata))
+					{
+						chosenRuns.Add(metadata.RunId);
+						await ReloadRunsAsync();
+						await ReplanAsync();
+						view = View.Integration;
+						candidateIndex = Math.Max(0, Candidates().ToList().FindIndex(run => run.RunId == metadata.RunId));
+						Notify($"Run {RunMetadata.ShortKey(metadata.RunId)} is chosen for integration; choose more with space, then press 'i'.", "green");
+						return;
+					}
+
+					Notify("This run has no result pushed to any component; there is nothing to integrate.");
 					break;
 				case 'm':
 					var action = await ChooseAsync("Run actions", [.. LifecycleStubs, "Back"]);
@@ -804,13 +915,311 @@ internal sealed class InteractiveSession
 		return $"{agentCommand.Trim()}{flags} \"{fullPrompt.Replace("\"", "\\\"")}\"";
 	}
 
+	// ----- integration control panel -----
+
+	/// <summary>Runs whose results can be integrated, oldest first - the order the integration considers them in.</summary>
+	private IReadOnlyList<RunMetadata> Candidates() =>
+		storedRuns.Where(IntegrationPlanner.HasResults).OrderBy(run => run.Created, StringComparer.Ordinal).ToList();
+
+	private void RenderIntegration()
+	{
+		var candidates = Candidates();
+		candidateIndex = Clamp(candidateIndex, candidates.Count);
+		console.Write(IntegrationPanel.Candidates(candidates, chosenRuns, candidateIndex));
+
+		var live = integrations.Current;
+		if (live is { IsLive: true } || (live is not null && chosenRuns.Count == 0))
+		{
+			// A running integration takes over the middle of the panel; a finished one stays there until the next
+			// choice, so its outcome can be read without opening it.
+			var components = live.Snapshot?.Components ?? plan;
+			var title = live.IsLive
+				? $"[deepskyblue1]Integrating[/] [grey]{RunBoard.Elapsed(live.Elapsed)}[/]"
+				: $"Last integration: {IntegrationPanel.StatusMarkup(live.Snapshot?.Status ?? "failed")}";
+			console.Write(IntegrationPanel.Steps(components, title, live.ActiveComponent, live.ActiveRunId, frame));
+			console.MarkupLine($"[grey]{Markup.Escape(live.Message)}[/]");
+			if (live.IsLive && live.LastOutput is not null)
+			{
+				console.MarkupLine($"[grey]resolver:[/] {Markup.Escape(live.LastOutput)}");
+			}
+		}
+		else if (planError is not null)
+		{
+			console.Write(new Panel($"[red]{Markup.Escape(planError)}[/]").Header("Triage").Border(BoxBorder.Rounded));
+		}
+		else if (plan.Count > 0)
+		{
+			console.Write(IntegrationPanel.Steps(plan, "Triage [grey](git merges SYNTAX steps first, then the resolver the SEMANTIC ones; * = your choice)[/]", null, null, frame));
+			console.MarkupLine($"{IntegrationPanel.Summary(plan)}  [grey]resolver:[/] {Markup.Escape(resolver ?? monorepo.Resolver)}");
+		}
+		else
+		{
+			console.MarkupLine("[grey]Choose the runs to integrate; the triage of their results appears here.[/]");
+		}
+
+		console.Write(IntegrationPanel.History(storedIntegrations));
+	}
+
+	private async Task ToggleCandidateAsync()
+	{
+		var candidates = Candidates();
+		if (candidates.Count == 0)
+		{
+			Notify("No agentic run has pushed a result yet; there is nothing to integrate.");
+			return;
+		}
+
+		var run = candidates[Clamp(candidateIndex, candidates.Count)];
+		if (!chosenRuns.Remove(run.RunId))
+		{
+			chosenRuns.Add(run.RunId);
+		}
+
+		await ReplanAsync();
+	}
+
+	private async Task ToggleAllCandidatesAsync()
+	{
+		var candidates = Candidates();
+		if (candidates.All(run => chosenRuns.Contains(run.RunId)))
+		{
+			chosenRuns.Clear();
+		}
+		else
+		{
+			chosenRuns.UnionWith(candidates.Select(run => run.RunId));
+		}
+
+		await ReplanAsync();
+	}
+
+	/// <summary>
+	/// Recomputes the triage of the chosen runs. It only reads git (and writes unreferenced objects), so it is cheap
+	/// enough to run on every choice, which keeps the panel showing exactly what <c>i</c> would do.
+	/// </summary>
+	private async Task ReplanAsync()
+	{
+		var candidates = Candidates();
+		chosenRuns.IntersectWith(candidates.Select(run => run.RunId));
+		planError = null;
+		plan = [];
+		if (chosenRuns.Count == 0)
+		{
+			return;
+		}
+
+		try
+		{
+			var touched = candidates.Where(run => chosenRuns.Contains(run.RunId))
+				.SelectMany(run => run.Components.Where(component => component.ResultStatus == ResultStatus.Pushed).Select(component => component.Name))
+				.ToHashSet(StringComparer.Ordinal);
+			plan = await IntegrationPlanner.PlanAsync(monorepo, ChosenRuns(), new IntegrationChoices
+			{
+				// A base chosen for a component none of the chosen runs touch is kept for later, not an error.
+				Onto = onto.Where(entry => touched.Contains(entry.Key)).ToDictionary(StringComparer.Ordinal),
+				Strategies = strategies
+			});
+		}
+		catch (Exception ex) when (ex is IntegrationException or GitException)
+		{
+			planError = ex.Message;
+		}
+	}
+
+	private IReadOnlyList<RunMetadata> ChosenRuns() => Candidates().Where(run => chosenRuns.Contains(run.RunId)).ToList();
+
+	private async Task ChooseOntoAsync()
+	{
+		if (plan.Count == 0)
+		{
+			Notify("Choose the runs to integrate first; their components can then be put onto another base.");
+			return;
+		}
+
+		var component = await ChooseAsync("Integrate which component onto another base?", plan.Select(entry => entry.Name).ToList());
+		var refs = await GitRef.ListAsync(GitClient.In(monorepo.SourceRepoDir(component)));
+		const string defaultBranch = "Default branch";
+		var targets = refs.Where(reference => reference.Kind is GitRefKind.Branch or GitRefKind.AnnotatedTag)
+			.Where(reference => !reference.Name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal))
+			.Select(reference => reference.Name).ToList();
+		var target = await ChooseAsync($"Base for {Markup.Escape(component)}", [defaultBranch, .. targets]);
+		if (target == defaultBranch)
+		{
+			onto.Remove(component);
+		}
+		else
+		{
+			onto[component] = target;
+		}
+
+		await ReplanAsync();
+		Notify($"'{component}' integrates onto {(target == defaultBranch ? "its default branch" : target)}.", "green");
+	}
+
+	private async Task OverrideStrategyAsync()
+	{
+		var steps = plan.SelectMany(component => component.Steps.Select(step => (Component: component.Name, Step: step)))
+			.Where(entry => entry.Step.Triage != Triage.UpToDate).ToList();
+		if (steps.Count == 0)
+		{
+			Notify(plan.Count == 0 ? "Choose the runs to integrate first." : "Every chosen result is already integrated; there is no strategy to choose.");
+			return;
+		}
+
+		var labels = steps.Select(entry => $"{entry.Component} · {RunMetadata.ShortKey(entry.Step.RunId)} · {entry.Step.Triage} · {entry.Step.Strategy} · {entry.Step.Rationale}").ToList();
+		var picked = steps[labels.IndexOf(await ChooseAsync("Override the strategy of which step?", labels))];
+
+		// Git cannot merge a conflict on its own, so a conflicting step can only go to the resolver or be skipped.
+		const string triage = "Let the triage decide";
+		var options = picked.Step.Triage == Triage.Conflict
+			? new List<string> { nameof(MergeStrategy.Semantic), nameof(MergeStrategy.Skip), triage }
+			: [nameof(MergeStrategy.Syntactic), nameof(MergeStrategy.Semantic), nameof(MergeStrategy.Skip), triage];
+		var choice = await ChooseAsync($"Strategy for {RunMetadata.ShortKey(picked.Step.RunId)} in {Markup.Escape(picked.Component)}", options);
+		var key = (picked.Component, picked.Step.RunId);
+		if (choice == triage)
+		{
+			strategies.Remove(key);
+		}
+		else
+		{
+			strategies[key] = Enum.Parse<MergeStrategy>(choice);
+		}
+
+		await ReplanAsync();
+	}
+
+	private async Task IntegrateAsync()
+	{
+		if (integrations.IsLive)
+		{
+			Notify("An integration is already running; wait for it or stop it with 'x'.");
+			return;
+		}
+
+		if (planError is not null || plan.Count == 0)
+		{
+			Notify(planError ?? "Choose the runs to integrate first (space, or 'a' for all).");
+			return;
+		}
+
+		if (plan.SelectMany(component => component.Steps).All(step => step.Strategy == MergeStrategy.Skip || step.Triage == Triage.UpToDate))
+		{
+			Notify("Every chosen result is skipped or already integrated; there is nothing to do.");
+			return;
+		}
+
+		Screen("Integrate", Markup.Remove(IntegrationPanel.Summary(plan)));
+		console.Write(IntegrationPanel.Steps(plan, "Plan", null, null, frame));
+		if (plan.SelectMany(component => component.Steps).Any(step => step.Strategy == MergeStrategy.Semantic))
+		{
+			resolver = await console.PromptAsync(new TextPrompt<string>("Resolver command [grey](gets the semantic brief on stdin)[/]:").DefaultValue(resolver ?? monorepo.Resolver));
+		}
+
+		if (!await console.PromptAsync(new ConfirmationPrompt("Integrate?")))
+		{
+			return;
+		}
+
+		integrations.Start(ChosenRuns(), plan, resolver ?? monorepo.Resolver);
+		chosenRuns.Clear();
+		plan = [];
+		Notify("Integrating in the background; the panel follows it. 'x' stops it.", "green");
+	}
+
+	private void StopIntegration()
+	{
+		Notify(integrations.Cancel()
+			? "Stopping the integration: a resolver at work is killed and nothing further is published."
+			: "No integration is running in this session.", integrations.IsLive ? "red" : "yellow");
+	}
+
+	private async Task<IntegrationRecord?> ChooseIntegrationAsync(string title, Func<IntegrationRecord, bool> filter)
+	{
+		var records = storedIntegrations.Where(filter).ToList();
+		if (records.Count == 0)
+		{
+			return null;
+		}
+
+		var labels = records.Select(record => $"{IntegrationRecord.ShortKey(record.IntegrationId)} {record.Status} · runs {string.Join(", ", record.Runs.Select(RunMetadata.ShortKey))}").ToList();
+		return records[labels.IndexOf(await ChooseAsync(title, labels))];
+	}
+
+	private async Task AdvanceAsync()
+	{
+		var record = await ChooseIntegrationAsync("Advance the base branches to which integration?",
+			record => record.Status is "completed" or "partial" && record.Components.Any(component => component.ResultStatus == ResultStatus.Pushed && !component.Advanced));
+		if (record is null)
+		{
+			Notify("No finished integration has results left to advance a branch to.");
+			return;
+		}
+
+		var targets = string.Join(", ", record.Components.Where(component => component.ResultStatus == ResultStatus.Pushed && !component.Advanced)
+			.Select(component => $"{component.Name}:{component.BaseRef}"));
+		if (!await console.PromptAsync(new ConfirmationPrompt($"Fast-forward {Markup.Escape(targets)} to {Markup.Escape(IntegrationRecord.TagName(record.IntegrationId, 0))}?")))
+		{
+			return;
+		}
+
+		var outcome = await IntegrationRunner.AdvanceAsync(new GitClient(monorepo.Root), monorepo, record);
+		await RefreshAsync();
+		Notify(outcome.Message, outcome.Ok ? "green" : "red");
+	}
+
+	private async Task IntegrationDetailAsync()
+	{
+		var record = await ChooseIntegrationAsync("Open which integration?", _ => true);
+		if (record is null)
+		{
+			Notify("No integration has been recorded yet.");
+			return;
+		}
+
+		while (true)
+		{
+			Screen($"Integration {IntegrationRecord.ShortKey(record.IntegrationId)}", record.IntegrationId);
+			var summary = new Grid().AddColumn().AddColumn();
+			summary.AddRow("Status", IntegrationPanel.StatusMarkup(record.Status));
+			summary.AddRow("Runs", Markup.Escape(string.Join(", ", record.Runs)));
+			summary.AddRow("Resolver", Markup.Escape(record.Resolver));
+			summary.AddRow("Created", Markup.Escape(record.Created));
+			summary.AddRow("Finished", Markup.Escape(record.Finished ?? "-"));
+			summary.AddRow("Workspace", Markup.Escape(record.WorkspacePath));
+			summary.AddRow("Record", $"{IntegrationRecord.TagName(record.IntegrationId, record.Lineage)} in {Markup.Escape(integrationStore.RepoDir)}");
+			console.Write(summary);
+			console.Write(IntegrationPanel.Steps(record.Components, "Steps", null, null, frame));
+
+			var notes = record.AllSteps.Where(step => step.Note is not null || step.Brief is not null).ToList();
+			foreach (var step in notes)
+			{
+				console.MarkupLine($"[bold]{RunMetadata.ShortKey(step.RunId)}[/] {Markup.Escape(step.Note ?? "")}{(step.Brief is null ? "" : $" [grey]brief: {Markup.Escape(step.Brief)}[/]")}");
+			}
+
+			if (integrations.Current is { Snapshot: { } live } && live.IntegrationId == record.IntegrationId && integrations.OutputTail() is { Count: > 0 } output)
+			{
+				console.Write(new Panel(Markup.Escape(string.Join('\n', output.TakeLast(15))))
+					.Header($"Resolver output (last {Math.Min(15, output.Count)} of {output.Count} lines)").Border(BoxBorder.Rounded));
+			}
+
+			WriteNotice();
+			console.MarkupLine("[grey][bold]esc[/] back  [bold]1[/]/[bold]2[/]/[bold]3[/] view[/]");
+			var key = await NextKeyAsync();
+			notice = null;
+			if (SwitchesView(key) || IsBack(key))
+			{
+				return;
+			}
+		}
+	}
+
 	// ----- helpers -----
 
 	private async Task HelpAsync()
 	{
 		Screen("Keys", "the frontend is driven by single keys; prompts are used only for data entry");
 		var keys = new Table().Border(TableBorder.Rounded).AddColumns("Key", "Does");
-		keys.AddRow("1 / 2", "switch between the components board and the agentic-runs board, from any screen");
+		keys.AddRow("1 / 2 / 3", "switch between the components board, the agentic-runs board and the integration panel, from any screen");
 		keys.AddRow("arrows / tab", "move the selection between the rectangles");
 		keys.AddRow("enter", "open the selected component or run");
 		keys.AddRow("n", "start an agentic run; it runs in the background and the board stays usable");
@@ -819,7 +1228,11 @@ internal sealed class InteractiveSession
 		keys.AddRow("g", "the dependency tree, with the Mermaid and SVG exports");
 		keys.AddRow("r / F5", "reload the components and run records from git");
 		keys.AddRow("esc", "leave a detail screen");
-		keys.AddRow("q", "quit (offers to stop runs that are still going)");
+		keys.AddRow("q", "quit (offers to stop runs and an integration that are still going)");
+		keys.AddRow("3: space / a", "choose a run's results for integration / choose all or none");
+		keys.AddRow("3: o / s / c", "integrate a component onto another branch or tag / override a step's strategy / clear both");
+		keys.AddRow("3: i / x", "integrate: git's syntax-based merge first, then the resolver for semantic merges / stop it");
+		keys.AddRow("3: d / v", "an integration's steps, notes and briefs / advance its base branches to the result");
 		console.Write(keys);
 		await PauseAsync();
 	}
@@ -834,6 +1247,9 @@ internal sealed class InteractiveSession
 				return true;
 			case '2':
 				view = View.Runs;
+				return true;
+			case '3':
+				view = View.Integration;
 				return true;
 			default:
 				return false;

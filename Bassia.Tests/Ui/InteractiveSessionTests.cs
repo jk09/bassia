@@ -1,5 +1,6 @@
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Integration;
 using Bassia.Ui;
 using Spectre.Console.Testing;
 
@@ -17,6 +18,7 @@ public class InteractiveSessionTests
 		public List<(string Select, string Command)> StartedRuns { get; } = [];
 		public InteractiveSession Session { get; }
 		public RunSupervisor Supervisor { get; }
+		public IntegrationSupervisor Integrations { get; }
 		public Monorepo Monorepo { get; }
 
 		public Harness(MonorepoFixture fixture, Func<string, string, AgentRunContext, Task<AgentRunOutcome>>? startRun = null)
@@ -36,7 +38,8 @@ public class InteractiveSessionTests
 				return (startRun ?? ((s, c, x) => AgentCommand.StartRunAsync(git, Monorepo, s, c, x)))(select, command, context);
 			});
 
-			Session = new InteractiveSession(Console, Monorepo, store, Supervisor)
+			Integrations = new IntegrationSupervisor((runs, plan, resolver, context) => IntegrationRunner.RunAsync(git, Monorepo, runs, plan, resolver, context));
+			Session = new InteractiveSession(Console, Monorepo, store, Supervisor, Integrations)
 			{
 				// A script that forgets to quit must fail the test, not hang the run.
 				IdleTimeout = TimeSpan.FromSeconds(30)
@@ -86,8 +89,11 @@ public class InteractiveSessionTests
 		public async ValueTask DisposeAsync()
 		{
 			Supervisor.CancelAll();
+			Integrations.Cancel();
 			await Supervisor.WhenAllSettledAsync();
+			await Integrations.WhenSettledAsync();
 			Supervisor.Dispose();
+			Integrations.Dispose();
 		}
 	}
 
@@ -210,7 +216,7 @@ public class InteractiveSessionTests
 
 		await using var harness = new Harness(fixture);
 		harness.Press('2').Enter();
-		foreach (var stub in new[] { "Suspend", "Resume", "Hand off", "Integrate results" })
+		foreach (var stub in new[] { "Suspend", "Resume", "Hand off" })
 		{
 			harness.Press('m').Text(stub);
 		}
@@ -219,7 +225,7 @@ public class InteractiveSessionTests
 
 		Assert.Contains("example@v0", output);
 		Assert.Contains(RunMetadata.TagName(runId, 0), output);
-		foreach (var stub in new[] { "Suspend", "Resume", "Hand off", "Integrate results" })
+		foreach (var stub in new[] { "Suspend", "Resume", "Hand off" })
 		{
 			Assert.Contains($"Not implemented yet: {stub}.", output);
 		}
@@ -371,6 +377,166 @@ public class InteractiveSessionTests
 
 		Assert.Contains("switch between the components board", output);
 		Assert.Contains("kills the agent process tree", output);
+	}
+
+	// ----- integration control panel -----
+
+	private static IntegrationStore IntegrationStoreOf(MonorepoFixture fixture) =>
+		new(new RunMetadataStore(new GitClient(fixture.Root), fixture.RunsRepo));
+
+	/// <summary>Waits until the integration the panel started has ended.</summary>
+	private static async Task IntegratedAsync(Harness harness)
+	{
+		await WaitForAsync(() => harness.Integrations.Current is { IsLive: false });
+		await harness.Integrations.WhenSettledAsync();
+	}
+
+	[Fact]
+	public async Task IntegrationPanel_ShowsTheTriageOfTheChosenRunsWithoutChangingAnything()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		var first = await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		await fixture.RunWritingAsync("example", "other.txt", "other");
+		var refsBefore = await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "for-each-ref");
+		await using var harness = new Harness(fixture).Press('3', 'a', 'q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains("3 Integration (3 chosen)", output);
+		Assert.Contains("Triage", output);
+		Assert.Contains("SYNTAX", output);
+		Assert.Contains("SEMANTIC", output);
+		Assert.Contains("conflict", output);
+		Assert.Contains($"same.txt vs {RunMetadata.ShortKey(first)}", output);
+		Assert.Contains("2 by git (syntax)", output);
+		Assert.Contains("1 by the resolver (semantic)", output);
+		Assert.Contains(RunMetadata.ShortKey(second), output);
+		Assert.Equal(refsBefore, await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "for-each-ref"));
+		Assert.Empty(await IntegrationStoreOf(fixture).ListLatestAsync());
+	}
+
+	[Fact]
+	public async Task IntegrationPanel_IntegratesInTheBackgroundGitFirstThenTheResolver()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		await using var harness = new Harness(fixture);
+		harness.Press('3', 'a', 'i').Text(TestEnvironment.WriteFileCommand("same.txt", "merged"), "y");
+
+		var running = harness.RunAsync();
+		await IntegratedAsync(harness);
+		harness.Press('q');
+		var output = await running;
+
+		Assert.Contains("Integrating in the background", output);
+		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
+		Assert.Equal("completed", record.Status);
+		Assert.Equal([StepOutcome.Merged, StepOutcome.Resolved], record.AllSteps.Select(step => step.Outcome));
+		Assert.Equal("merged", (await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "show", $"{IntegrationRecord.TagName(record.IntegrationId, 0)}:same.txt")).Trim());
+		// The finished integration stays on the panel, and the history lists it.
+		Assert.Contains("resolved", output);
+		Assert.Contains(IntegrationRecord.ShortKey(record.IntegrationId), output);
+	}
+
+	[Fact]
+	public async Task IntegrationPanel_AStrategyOverrideSkipsAStep()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "a.txt", "a");
+		var second = await fixture.RunWritingAsync("example", "b.txt", "b");
+		await using var harness = new Harness(fixture);
+		harness.Press('3', 'a', 's').Text(RunMetadata.ShortKey(second), "Skip");
+		harness.Press('i').Text("y");
+
+		var running = harness.RunAsync();
+		await IntegratedAsync(harness);
+		harness.Press('q');
+		var output = await running;
+
+		Assert.Contains("SKIP", output);
+		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
+		Assert.Equal(StepOutcome.Skipped, record.AllSteps.Single(step => step.RunId == second).Outcome);
+		Assert.Equal("README.md\na.txt", (await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "ls-tree", "--name-only", "-r",
+			IntegrationRecord.TagName(record.IntegrationId, 0))).Replace("\r", ""));
+	}
+
+	[Fact]
+	public async Task IntegrationPanel_StopKillsTheResolverAndPublishesNothing()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		await using var harness = new Harness(fixture);
+		harness.Press('3', 'a', 'i').Text(TestEnvironment.SleepCommand(60), "y");
+
+		var running = harness.RunAsync();
+		await WaitForAsync(() => harness.Integrations.Current?.Message.Contains("asking the resolver") == true);
+		harness.Press('x');
+		await IntegratedAsync(harness);
+		harness.Press('q');
+		var output = await running;
+
+		Assert.Contains("Stopping the integration", output);
+		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
+		Assert.Equal("cancelled", record.Status);
+		Assert.Equal("", await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "tag", "--list", "integration/*"));
+	}
+
+	[Fact]
+	public async Task RunDetail_IntegrateKey_ChoosesTheRunOnTheIntegrationPanel()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		var run = await fixture.RunWritingAsync("example", "a.txt", "a");
+		await using var harness = new Harness(fixture).Press('2').Enter().Press('i', 'q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains($"Run {RunMetadata.ShortKey(run)} is chosen for integration", output);
+		Assert.Contains("3 Integration (1 chosen)", output);
+		Assert.Contains("fast-forward", output);
+	}
+
+	[Fact]
+	public async Task IntegrationPanel_AdvanceFastForwardsTheBaseBranch()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "a.txt", "a");
+		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", "all")).ExitCode);
+		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
+		await using var harness = new Harness(fixture).Press('3', 'v').Text(IntegrationRecord.ShortKey(record.IntegrationId), "y").Press('q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains("Advanced example:main", output);
+		Assert.Equal(await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "rev-parse", $"{IntegrationRecord.TagName(record.IntegrationId, 0)}^{{commit}}"),
+			await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "rev-parse", "main"));
+	}
+
+	[Fact]
+	public async Task IntegrationPanel_DetailsShowTheStepsAndTheirBriefs()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", "all", "-resolve", TestEnvironment.WriteFileCommand("same.txt", "merged"))).ExitCode);
+		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
+		await using var harness = new Harness(fixture).Press('3', 'd').Text(IntegrationRecord.ShortKey(record.IntegrationId)).Press('q', 'q');
+
+		var output = await harness.RunAsync();
+
+		Assert.Contains($"Integration {IntegrationRecord.ShortKey(record.IntegrationId)}", output);
+		Assert.Contains("brief:", output);
+		Assert.Contains(".merge.md", output);
+		Assert.Contains(IntegrationRecord.TagName(record.IntegrationId, 0), output);
 	}
 
 	/// <summary>Waits until <paramref name="runs"/> runs have been started and every one of them has ended.</summary>

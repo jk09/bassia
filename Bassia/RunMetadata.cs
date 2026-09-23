@@ -259,30 +259,15 @@ internal sealed class RunMetadataStore
 	}
 
 	/// <summary>Highest lineage index recorded for the run, or -1 when the run is unknown.</summary>
-	public async Task<int> LatestLineageAsync(string runId)
-	{
-		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.RefBase(runId)}/*"]);
-		return RunMetadata.HighestIndex(tags.Split('\n', StringSplitOptions.RemoveEmptyEntries));
-	}
+	public Task<int> LatestLineageAsync(string runId) => LatestIndexAsync(RunMetadata.RefBase(runId));
 
 	/// <summary>Every run with a record in the store, newest first, each at its latest lineage.</summary>
 	public async Task<IReadOnlyList<RunMetadata>> ListLatestAsync()
 	{
-		if (!Directory.Exists(Path.Combine(repoDir, "objects")))
-		{
-			return [];
-		}
-
-		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{RunMetadata.RefPrefix}*/*"]);
-		var runIds = tags.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-			.Select(tag => tag[RunMetadata.RefPrefix.Length..tag.LastIndexOf('/')])
-			.Distinct(StringComparer.Ordinal)
-			.Select(RunMetadata.NormalizeRunId);
-
 		var runs = new List<RunMetadata>();
-		foreach (var runId in runIds)
+		foreach (var key in await ListKeysAsync(RunMetadata.RefPrefix))
 		{
-			if (await LoadLatestAsync(runId) is { } metadata)
+			if (await LoadLatestAsync(RunMetadata.NormalizeRunId(key)) is { } metadata)
 			{
 				runs.Add(metadata);
 			}
@@ -293,13 +278,13 @@ internal sealed class RunMetadataStore
 
 	public async Task<RunMetadata?> LoadLatestAsync(string runId)
 	{
-		var lineage = await LatestLineageAsync(runId);
-		if (lineage < 0)
+		if (await ReadLatestAsync(RunMetadata.RefBase(runId), RunMetadata.FileName) is not { } found)
 		{
 			return null;
 		}
 
-		var toml = await git.RunOrThrowAsync(["show", $"{RunMetadata.TagName(runId, lineage)}:{RunMetadata.FileName}"]);
+		var (toml, lineage) = found;
+
 		var metadata = RunMetadata.FromToml(toml);
 		metadata.Lineage = lineage;
 		return metadata;
@@ -311,22 +296,70 @@ internal sealed class RunMetadataStore
 	/// </summary>
 	public async Task<string> CommitAsync(RunMetadata metadata)
 	{
-		var previous = await LatestLineageAsync(metadata.RunId);
-		metadata.Lineage = previous + 1;
+		metadata.Lineage = await LatestLineageAsync(metadata.RunId) + 1;
+		return await WriteAsync(RunMetadata.RefBase(metadata.RunId), metadata.Lineage, RunMetadata.FileName, metadata.ToToml(),
+			$"{metadata.RunId} #{metadata.Lineage}: {metadata.Status}");
+	}
 
-		var blob = await git.RunOrThrowAsync(["hash-object", "-w", "--stdin"], metadata.ToToml());
-		var tree = await git.RunOrThrowAsync(["mktree"], $"100644 blob {blob}\t{RunMetadata.FileName}\n");
+	// ----- record primitives, shared by every kind of record the store keeps (runs, integrations) -----
 
-		var message = $"{metadata.RunId} #{metadata.Lineage}: {metadata.Status}";
-		var commitArguments = new List<string> { "commit-tree", tree, "-m", message };
-		if (previous >= 0)
+	/// <summary>Highest <c>&lt;index&gt;</c> among the <c>&lt;refBase&gt;/&lt;index&gt;</c> tags, or -1 when there is none.</summary>
+	internal async Task<int> LatestIndexAsync(string refBase)
+	{
+		if (!IsInitialized)
 		{
-			var parent = await git.RunOrThrowAsync(["rev-parse", $"{RunMetadata.TagName(metadata.RunId, previous)}^{{commit}}"]);
+			return -1;
+		}
+
+		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{refBase}/*"]);
+		return RunMetadata.HighestIndex(tags.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+	}
+
+	/// <summary>The distinct <c>&lt;key&gt;</c> parts of every <c>&lt;refPrefix&gt;&lt;key&gt;/&lt;index&gt;</c> tag.</summary>
+	internal async Task<IReadOnlyList<string>> ListKeysAsync(string refPrefix)
+	{
+		if (!IsInitialized)
+		{
+			return [];
+		}
+
+		var tags = await git.RunOrThrowAsync(["tag", "--list", $"{refPrefix}*/*"]);
+		return tags.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+			.Select(tag => tag[refPrefix.Length..tag.LastIndexOf('/')])
+			.Distinct(StringComparer.Ordinal)
+			.ToList();
+	}
+
+	/// <summary>The file of the latest lineage of a record, with that lineage; null when the record is unknown.</summary>
+	internal async Task<(string Content, int Lineage)?> ReadLatestAsync(string refBase, string fileName)
+	{
+		var lineage = await LatestIndexAsync(refBase);
+		if (lineage < 0)
+		{
+			return null;
+		}
+
+		return (await git.RunOrThrowAsync(["show", $"{refBase}/{lineage}:{fileName}"]), lineage);
+	}
+
+	/// <summary>
+	/// Writes <paramref name="content"/> as <paramref name="fileName"/> in a new commit tagged
+	/// <c>&lt;refBase&gt;/&lt;lineage&gt;</c>, parented on the previous lineage's commit when there is one.
+	/// </summary>
+	internal async Task<string> WriteAsync(string refBase, int lineage, string fileName, string content, string message)
+	{
+		var blob = await git.RunOrThrowAsync(["hash-object", "-w", "--stdin"], content);
+		var tree = await git.RunOrThrowAsync(["mktree"], $"100644 blob {blob}\t{fileName}\n");
+
+		var commitArguments = new List<string> { "commit-tree", tree, "-m", message };
+		if (lineage > 0)
+		{
+			var parent = await git.RunOrThrowAsync(["rev-parse", $"{refBase}/{lineage - 1}^{{commit}}"]);
 			commitArguments.AddRange(["-p", parent]);
 		}
 
 		var commit = await git.RunOrThrowAsync(commitArguments);
-		var tag = RunMetadata.TagName(metadata.RunId, metadata.Lineage);
+		var tag = $"{refBase}/{lineage}";
 		await git.RunOrThrowAsync(["tag", "-a", tag, "-m", message, commit]);
 		return tag;
 	}

@@ -123,6 +123,10 @@ internal static class TestEnvironment
 
 	public static string FailingCommand => OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3";
 
+	/// <summary>Shell command that copies its stdin to <paramref name="path"/> - how a test sees what a resolver was handed.</summary>
+	public static string CaptureStdinCommand(string path) =>
+		OperatingSystem.IsWindows() ? $"more > \"{path}\"" : $"cat > '{path}'";
+
 	/// <summary>
 	/// Shell command that blocks for <paramref name="seconds"/>, standing in for an agent that is still working.
 	/// On Windows it pings rather than calling <c>timeout</c>, which refuses to run with stdin redirected - which
@@ -202,6 +206,17 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 
 	public Task<(int ExitCode, string Output, string Error)> AgentAsync(params string[] args) =>
 		TestEnvironment.RunInDirectoryAsync(Root, ["agent", .. args]);
+
+	public Task<(int ExitCode, string Output, string Error)> IntegrateAsync(params string[] args) =>
+		TestEnvironment.RunInDirectoryAsync(Root, ["integrate", .. args]);
+
+	/// <summary>Runs an agent over <c>&lt;component&gt;@v0</c> that writes <paramref name="content"/> to a file, and returns the run id.</summary>
+	public async Task<string> RunWritingAsync(string component, string file, string content)
+	{
+		var (exitCode, output, error) = await AgentAsync("-select", $"{component}@v0", "-run", TestEnvironment.WriteFileCommand($"{component}/{file}", content));
+		Assert.True(exitCode == 0, error);
+		return TestEnvironment.RunIdOf(output);
+	}
 
 	public ValueTask DisposeAsync()
 	{

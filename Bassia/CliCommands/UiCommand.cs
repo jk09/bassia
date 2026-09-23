@@ -2,6 +2,7 @@ namespace Bassia;
 
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Integration;
 using Bassia.Ui;
 using Spectre.Console;
 
@@ -35,13 +36,16 @@ internal static class UiCommand
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
 		using var supervisor = new RunSupervisor(
 			(select, command, context) => AgentCommand.StartRunAsync(git, monorepo, select, command, context));
-		var session = new InteractiveSession(AnsiConsole.Console, monorepo, store, supervisor);
+		using var integrations = new IntegrationSupervisor(
+			(runs, plan, resolver, context) => IntegrationRunner.RunAsync(git, monorepo, runs, plan, resolver, context));
+		var session = new InteractiveSession(AnsiConsole.Console, monorepo, store, supervisor, integrations);
 
 		// Prompts hide the cursor while they run; make sure Ctrl-C doesn't leave the terminal without one.
 		// The frontend's own runs are stopped through it too, so a Ctrl-C never leaves agent processes behind.
 		ConsoleCancelEventHandler stopEverything = (_, _) =>
 		{
 			supervisor.CancelAll();
+			integrations.Cancel();
 			AnsiConsole.Cursor.Show();
 		};
 		Console.CancelKeyPress += stopEverything;

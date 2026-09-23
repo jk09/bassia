@@ -1,6 +1,5 @@
 namespace Bassia.CliCommands.Agent;
 
-using System.Diagnostics;
 using Bassia;
 using Bassia.Git;
 
@@ -361,81 +360,19 @@ internal static class AgentCommand
 	/// a caller of <c>bassia agent</c> sees the agent's output as it happens; with one, both pipes are redirected
 	/// and delivered line by line, which is what lets the frontend run an agent behind a live screen.
 	/// </summary>
-	private static async Task<int?> RunAgentProcessAsync(Monorepo monorepo, RunMetadata metadata, AgentRunContext? context)
-	{
-		var startInfo = new ProcessStartInfo
-		{
-			WorkingDirectory = metadata.WorkspacePath,
-			UseShellExecute = false
-		};
-
-		if (OperatingSystem.IsWindows())
-		{
-			startInfo.FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe";
-			// /s keeps the quoted command intact; cmd strips only the outer quotes.
-			startInfo.Arguments = $"/d /s /c \"{metadata.Command}\"";
-		}
-		else
-		{
-			startInfo.FileName = "/bin/sh";
-			startInfo.ArgumentList.Add("-c");
-			startInfo.ArgumentList.Add(metadata.Command);
-		}
-
-		startInfo.Environment["BASSIA_ROOT"] = monorepo.Root;
-		startInfo.Environment["BASSIA_RUN_ID"] = metadata.RunId;
-		startInfo.Environment["BASSIA_RUN_DIR"] = metadata.WorkspacePath;
-
-		var onOutput = context?.OnOutput;
-		if (onOutput is not null)
-		{
-			startInfo.RedirectStandardOutput = true;
-			startInfo.RedirectStandardError = true;
-		}
-
-		using var process = Process.Start(startInfo)
-			?? throw new AgentException("Could not start the agent command.");
-
-		if (onOutput is not null)
-		{
-			process.OutputDataReceived += (_, args) => Deliver(args.Data);
-			process.ErrorDataReceived += (_, args) => Deliver(args.Data);
-			process.BeginOutputReadLine();
-			process.BeginErrorReadLine();
-		}
-
-		try
-		{
-			await process.WaitForExitAsync(context?.Cancellation ?? CancellationToken.None);
-		}
-		catch (OperationCanceledException)
-		{
-			// The command runs under a shell, so the agent itself is a grandchild: only killing the whole tree
-			// actually stops it. Then wait unconditionally, so the run folder is quiescent before the caller
-			// inspects or discards it.
-			try
+	private static Task<int?> RunAgentProcessAsync(Monorepo monorepo, RunMetadata metadata, AgentRunContext? context) =>
+		ShellCommand.RunAsync(
+			metadata.Command,
+			metadata.WorkspacePath,
+			new Dictionary<string, string>
 			{
-				process.Kill(entireProcessTree: true);
-			}
-			catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
-			{
-				// It exited between the cancellation and the kill; nothing left to stop.
-			}
-
-			await process.WaitForExitAsync(CancellationToken.None);
-			return null;
-		}
-
-		return process.ExitCode;
-
-		void Deliver(string? line)
-		{
-			if (line is not null)
-			{
-				onOutput(line);
-			}
-		}
-	}
+				["BASSIA_ROOT"] = monorepo.Root,
+				["BASSIA_RUN_ID"] = metadata.RunId,
+				["BASSIA_RUN_DIR"] = metadata.WorkspacePath
+			},
+			standardInput: null,
+			context?.OnOutput,
+			context?.Cancellation ?? CancellationToken.None);
 
 	// ----- commit / tag / push -----
 
