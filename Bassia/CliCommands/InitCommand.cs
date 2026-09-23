@@ -11,7 +11,12 @@ internal static class InitCommand
 		"[agent.commit]\n" +
 		"# Subject line of the commits an agentic run makes in a component. The body is always a TOML record of the run.\n" +
 		"# Placeholders: {run_id} (agent-run-<id>), {short_id} (first 8 digits of <id>), {summary} (from the agent command), {component}.\n" +
-		"subject = \"" + Monorepo.DefaultCommitSubject + "\"\n";
+		"subject = \"" + Monorepo.DefaultCommitSubject + "\"\n" +
+		"\n" +
+		"[integration]\n" +
+		"# Command that resolves a semantic merge during 'bassia integrate'. It runs in the component's working tree with the\n" +
+		"# merge brief on stdin (and its path in BASSIA_MERGE_BRIEF), and must leave the merge resolved but uncommitted.\n" +
+		"resolver = \"" + Monorepo.DefaultResolver + "\"\n";
 
 	private const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +

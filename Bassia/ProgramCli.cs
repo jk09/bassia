@@ -85,6 +85,9 @@ internal static class ProgramCli
 		[ArgActionMethod, ArgDescription("Materialize selected components and run an agentic command over them")]
 		public Task Agent() => RecordAsync(AgentCommand.RunAsync(SubArgs()));
 
+		[ArgActionMethod, ArgDescription("Integrate the results of agentic runs")]
+		public Task Integrate() => RecordAsync(IntegrateCommand.RunAsync(SubArgs()));
+
 		[ArgActionMethod, ArgDescription("Open the interactive frontend")]
 		public Task Ui() => RecordAsync(UiCommand.RunAsync());
 
@@ -203,6 +206,12 @@ internal static class ProgramCli
 		Console.WriteLine("                         command there, then commit, tag and push the results");
 		Console.WriteLine("  agent retry <run-id>   Retry committing/pushing components that failed in a previous run");
 		Console.WriteLine("  agent abandon <run-id> Discard a run's folder (sources of truth are untouched)");
+		Console.WriteLine("  integrate -runs <run-id>[,...]|all [-onto <component@ref>[,...]] [-plan] [-resolve <command>]");
+		Console.WriteLine("                         Merge the runs' result tags per component: git's syntax-based merge");
+		Console.WriteLine("                         first, then an LLM resolver with a semantic brief for the conflicts;");
+		Console.WriteLine("                         tags the result integration/<id>/<n> in every component");
+		Console.WriteLine("  integrate advance <integration-id>");
+		Console.WriteLine("                         Fast-forward each component's base branch to the integration");
 		Console.WriteLine("  ui                     Open the interactive frontend: a components board with the");
 		Console.WriteLine("                         dependency graph, a live board of the agentic runs, tagging,");
 		Console.WriteLine("                         and starting or stopping runs in the background");

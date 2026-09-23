@@ -117,6 +117,24 @@ path = 'D:\bassia-workspace'
 
 `Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
 
+### Integration: syntactic first, then semantic
+
+Every successful run leaves its changes in each component it touched as a result tag `agent/run-<id>/<n>` - the same name in every component. `integrate` consolidates the results of several runs, component by component, into one integration:
+
+```powershell
+dotnet run -- integrate -runs all -plan                          # the triage only; nothing changes
+dotnet run -- integrate -runs 3f2a91c4,91ab22cd                  # runs by (short) id
+dotnet run -- integrate -runs all -onto lib@v1 -skip 5e11aa00 -semantic 91ab22cd -resolve "claude -p --permission-mode acceptEdits --model opus"
+dotnet run -- integrate advance integration-<id>                 # fast-forward the base branches to the result
+```
+
+1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. The results git can merge are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `semantic` (the resolver merges it) or `skip`. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
+2. **Syntactic steps first.** Each component is merged in its own checkout under `.workspace/integration-<id>/<component>`, on the branch `integration/<id>` started at the base. Every syntactic step is a `git merge --no-ff` of the run's result tag. If one conflicts after all, it moves to the back of the semantic queue.
+3. **Semantic steps next.** For each remaining step Bassia starts the merge with `diff3` conflict markers, so the common ancestor is visible, and writes a **semantic brief**: the incoming run's prompt, baseline, command and commit records; which runs are already integrated and why; the history and diff of both sides since their common ancestor; the conflicted files; and instructions. The resolver command (by default `claude -p --permission-mode acceptEdits`, configurable as `[integration] resolver` in `config.toml`) runs in the component's working tree with the brief on stdin and these environment variables: `BASSIA_MERGE_BRIEF` (the brief's path), `BASSIA_COMPONENT`, `BASSIA_RUN_ID`, `BASSIA_INTEGRATION_ID` and `BASSIA_ROOT`. When it exits with code 0 and no conflict marker is left, Bassia commits the merge. A non-zero exit or leftover markers abort that step, which is recorded as `failed`; the other steps still go ahead.
+4. **Result.** Each merge commit's message is a subject and an `[integration]` TOML record (run, source tag, strategy, rationale, conflicts, resolver). The result is tagged `integration/<id>/<n>` - one identically named annotated tag across the components - and branch and tag are pushed to the component's source-of-truth repo. That tag is a baseline like any other: `agent -select app@integration/<id>/0,...` starts the next run from it. Nothing else moves: `integrate advance <id>` fast-forwards each component's base branch to the result, and refuses if the branch moved since the integration was built on it, or if the base was a tag.
+
+The integration's record (`integration.toml`: runs, resolver, and per component its base, every step's triage, strategy, conflicts, outcome, merge commit and brief) is committed to `.agentic-runs` next to the run records and tagged `integration/<id>/<lineage>`. Status is `completed`, `partial` (a step or component failed; what did merge is still published), or `cancelled`.
+
 ### Interactive frontend
 
 ```powershell
@@ -125,7 +143,7 @@ dotnet run -- -C R:\ ui
 
 `ui` opens a live session over the monorepo the current directory belongs to (it fails with the usual TOML error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation.
 
-It has two boards, always one keystroke apart, and each is a wallboard of rectangles carrying that item's own facts:
+It has two boards and the integration control panel, always one keystroke apart; each board is a wallboard of rectangles carrying that item's own facts:
 
 ```
 ┌─ app ──────────────────────┐   ┌─ ▸ tool ───────────────────┐   ┌─ ▸ 3f2a91c4 ⠸ ─────────────────┐
@@ -144,11 +162,12 @@ It has two boards, always one keystroke apart, and each is a wallboard of rectan
 
 - **`1` — Components**: one rectangle per component from `components.toml`, laid out in layers and joined by ASCII lines that follow `references`, so the list and the dependency graph are the same picture. A card shows its tags and branches, what it needs and what needs it, how many recorded runs touched it, and how many runs are working on it right now.
 - **`2` — Agentic runs**: one rectangle per run — the ones this session started first, then everything recorded in `.agentic-runs`. A card shows the run's short id, phase, elapsed time, components, command and the agent's latest output line; a live run animates.
+- **`3` — Integration**: the control panel for [integration](#integration-syntactic-first-then-semantic). It lists the runs that have results; `space` chooses one and `a` chooses all or none. Below that is the live triage of the chosen runs: per component, every step in execution order with its triage, strategy (`SYNTAX`, `SEMANTIC` or `SKIP`, starred when you chose it), conflicted files and the runs it collides with. `o` puts a component onto another branch or tag, `s` overrides a step's strategy (a conflicting step can only go to the resolver or be skipped), `c` clears both, and `i` confirms the resolver command and integrates in the background. While it runs the panel shows each step's outcome and the resolver's latest output line, and `x` stops it (kills a working resolver and publishes nothing further). `d` opens a recorded integration with its notes and briefs, and `v` advances its base branches. The recorded integrations are listed at the bottom.
 
-Keys: `1`/`2` switch boards from any screen, arrows move the selection, `enter` opens the selected card, `n` starts a run, `x` stops the selected run, `t` tags the selected component, `g` opens the dependency tree with its exports, `r` refreshes, `?` lists the keys and `q` quits. The detail screens behind `enter` are what the menu frontend showed:
+Keys: `1`/`2`/`3` switch views from any screen, arrows move the selection, `enter` opens the selected card, `n` starts a run, `x` stops the selected run, `t` tags the selected component, `g` opens the dependency tree with its exports, `r` refreshes, `?` lists the keys and `q` quits. The detail screens behind `enter` are what the menu frontend showed:
 
 - **A component**: its branches and tags (annotated tags marked, since only those can be selected for a run), its git tree, and every agentic run that touched it with the result tag it left. `t` runs `git tag -a` on a chosen branch, tag or commit and the view refreshes.
-- **A run**: its record, per-component results, and the tail of the agent's output for a run this session started. `x` stops it; `m` lists suspend / resume / hand off / integrate results, which are not implemented yet and report so without changing anything.
+- **A run**: its record, per-component results, and the tail of the agent's output for a run this session started. `x` stops it; `i` chooses its results on the integration panel; `m` lists suspend / resume / hand off, which are not implemented yet and report so without changing anything.
 - **The dependency tree** (`g`): the graph as a text tree, exportable as Markdown with a Mermaid block (`components.md`) or as SVG (`components.svg`).
 
 **Starting a run** (`n`) asks for components (the reference closure is completed automatically) and an annotated tag for each, then the prompt, model, effort and context; the composed `-run` command (default agent command `claude -p --permission-mode acceptEdits`) can be edited before the run starts through the same path as `bassia agent -select ... -run ...`. The wizard then hands the run to the background and the board comes straight back, so the next run can be started while the first is still going. A background run's output is captured onto its card instead of reaching the screen.

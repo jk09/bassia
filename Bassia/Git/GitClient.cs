@@ -10,6 +10,8 @@ internal sealed class GitClient(string workingDirectory)
 {
 	private readonly string workingDirectory = workingDirectory;
 
+	public string WorkingDirectory => workingDirectory;
+
     /// <summary>Returns a client bound to another working directory (e.g. a component checkout).</summary>
     public static GitClient In(string directory) => new(directory);
 

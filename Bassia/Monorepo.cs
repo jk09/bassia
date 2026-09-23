@@ -25,6 +25,12 @@ internal sealed class Monorepo
 	public const string RunsRepoFolderName = ".agentic-runs";
 	public const string DefaultCommitSubject = "agent({short_id}): {summary}";
 
+	/// <summary>
+	/// Resolver of semantic merges. The brief arrives on stdin, which is how <c>claude -p</c> takes a prompt that is too
+	/// long for a command line.
+	/// </summary>
+	public const string DefaultResolver = "claude -p --permission-mode acceptEdits";
+
 	public string Root { get; }
 	public string MetaRepoDir => Path.Combine(Root, MetaRepoFolderName);
 
@@ -37,6 +43,9 @@ internal sealed class Monorepo
 	/// </summary>
 	public string CommitSubject { get; }
 
+	/// <summary>Command that resolves a semantic merge. Configurable via <c>[integration] resolver</c> in <c>config.toml</c>.</summary>
+	public string Resolver { get; }
+
 	/// <summary>
 	/// Bare repo (<c>.agentic-runs/.git</c>) that stores agentic run metadata. It lives at the monorepo root,
 	/// next to <c>.bassia</c> and <c>.workspace</c>, not inside either of them: it isn't meta-repo content (so it
@@ -48,11 +57,12 @@ internal sealed class Monorepo
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, string commitSubject, IReadOnlyList<ComponentDefinition> components)
+	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, IReadOnlyList<ComponentDefinition> components)
 	{
 		Root = root;
 		WorkspaceDir = workspaceDir;
 		CommitSubject = commitSubject;
+		Resolver = resolver;
 		Components = components;
 	}
 
@@ -90,8 +100,15 @@ internal sealed class Monorepo
 			commitSubject = subjectTemplate;
 		}
 
+		var resolver = DefaultResolver;
+		if (config.TryGetValue("integration", out var integrationSection) && integrationSection is TomlTable integration
+			&& integration.TryGetValue("resolver", out var resolverValue) && resolverValue is string configuredResolver && !string.IsNullOrWhiteSpace(configuredResolver))
+		{
+			resolver = configuredResolver;
+		}
+
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, commitSubject, components);
+		return new Monorepo(root, workspaceDir, commitSubject, resolver, components);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>
