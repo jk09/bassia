@@ -76,8 +76,10 @@ internal sealed class RunSupervisor : IDisposable
 		{
 			run.Finish(AgentRunPhase.Cancelled, null, "Cancelled before the run was created; nothing was materialized.", null);
 		}
-		catch (Exception ex) when (ex is AgentException or MonorepoException or Git.GitException or IOException or UnauthorizedAccessException)
+		catch (Exception ex)
 		{
+			// Any failure ends the card: a card left live would keep the board animating and make quitting wait on a
+			// task that then throws into the frontend.
 			run.Finish(AgentRunPhase.Failed, null, ex.Message, null);
 		}
 		finally

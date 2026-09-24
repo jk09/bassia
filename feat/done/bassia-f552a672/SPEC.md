@@ -94,6 +94,13 @@ should only see what git could not do, and it should see it on top of everything
   explicit, compare-and-swap step, and a tag base is never moved.
 - **Components are integrated independently, without the reference junctions a run uses.** A merge changes one
   repo; nested components are integrated as their own components in the same integration.
+- **A failure stays where it happened, and is always recorded.** A step whose brief cannot be written or whose
+  resolver cannot start fails that step. Any other failure in a component fails that component. Either way the
+  integration still gets its final record, so it is never left `started` after components were pushed. A failed
+  step puts the checkout back exactly at the previous head (reset and clean), so files a failed resolver created
+  never reach the next step's commit. Only a real conflict (unmerged paths) sends a syntactic step to the resolver;
+  any other `git merge` failure fails the step with git's message. A background run or integration that fails
+  unexpectedly ends its card rather than staying live.
 - **One integration at a time in the frontend.** Two concurrent integrations over the same components would only
   race each other for the same conflicts.
 

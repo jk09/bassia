@@ -249,8 +249,11 @@ internal static class IntegrationRunner
 
 				await PublishAsync(checkout, component, sourceDir);
 			}
-			catch (GitException ex)
+			catch (Exception ex)
 			{
+				// Whatever goes wrong in one component (git, the file system, a resolver that cannot start) is that
+				// component's failure: it must never leave the integration unrecorded, stuck at 'started' while other
+				// components were already pushed.
 				component.ResultStatus = ResultStatus.Failed;
 				component.ResultError = ex.Message;
 				Report($"'{component.Name}' failed: {ex.Message}", component.Name);
@@ -287,7 +290,16 @@ internal static class IntegrationRunner
 			var merge = await checkout.RunAsync(["merge", "--quiet", "--no-ff", "--no-edit", "-m", MergeCommitMessage(component, step), step.SourceCommit]);
 			if (merge.ExitCode != 0)
 			{
-				await AbortMergeAsync(checkout);
+				// Only a conflict is the resolver's business. Anything else (no git identity, a failing hook, a locked
+				// index) would fail its merge commit just the same, so it fails the step with git's own message.
+				var conflicted = Lines((await checkout.RunAsync(["diff", "--name-only", "--diff-filter=U"])).Output).Count > 0;
+				await RestoreAsync(checkout, head);
+				if (!conflicted)
+				{
+					Fail(component, step, $"git merge failed: {(merge.Error + merge.Output).Trim()}");
+					return true;
+				}
+
 				step.Strategy = MergeStrategy.Semantic;
 				step.Triage = Triage.Conflict;
 				step.Note = "git could not merge it onto the steps before it; handed to the resolver";
@@ -316,7 +328,7 @@ internal static class IntegrationRunner
 			var merge = await checkout.RunAsync(["-c", "merge.conflictStyle=diff3", "merge", "--quiet", "--no-ff", "--no-commit", step.SourceCommit]);
 			if (merge.ExitCode is not (0 or 1) || !await MergeInProgressAsync(checkout))
 			{
-				await AbortMergeAsync(checkout);
+				await RestoreAsync(checkout, head);
 				Fail(component, step, $"git could not start the merge: {(merge.Error + merge.Output).Trim()}");
 				return;
 			}
@@ -326,27 +338,38 @@ internal static class IntegrationRunner
 			step.Conflicts.AddRange(conflicts);
 
 			var briefText = MergeBrief.Render(await BriefAsync(checkout, component, step, before, head, conflicts));
-			step.Brief = Path.Combine(record.WorkspacePath, $"{component.Name}.{Short(step)}.merge.md");
-			await File.WriteAllTextAsync(step.Brief, briefText);
-			Report(conflicts.Count == 0
-					? $"'{component.Name}': asking the resolver to review run {Short(step)} semantically."
-					: $"'{component.Name}': asking the resolver to merge run {Short(step)} ({conflicts.Count} conflicted file(s)).",
-				component.Name, step.RunId);
+			int? exitCode;
+			try
+			{
+				step.Brief = Path.Combine(record.WorkspacePath, $"{component.Name}.{Short(step)}.merge.md");
+				await File.WriteAllTextAsync(step.Brief, briefText);
+				Report(conflicts.Count == 0
+						? $"'{component.Name}': asking the resolver to review run {Short(step)} semantically."
+						: $"'{component.Name}': asking the resolver to merge run {Short(step)} ({conflicts.Count} conflicted file(s)).",
+					component.Name, step.RunId);
 
-			var exitCode = await ShellCommand.RunAsync(record.Resolver, component.Path!,
-				new Dictionary<string, string>
-				{
-					["BASSIA_ROOT"] = monorepo.Root,
-					["BASSIA_INTEGRATION_ID"] = record.IntegrationId,
-					["BASSIA_COMPONENT"] = component.Name,
-					["BASSIA_RUN_ID"] = step.RunId,
-					["BASSIA_MERGE_BRIEF"] = step.Brief
-				},
-				briefText, context?.OnOutput, Cancellation);
+				exitCode = await ShellCommand.RunAsync(record.Resolver, component.Path!,
+					new Dictionary<string, string>
+					{
+						["BASSIA_ROOT"] = monorepo.Root,
+						["BASSIA_INTEGRATION_ID"] = record.IntegrationId,
+						["BASSIA_COMPONENT"] = component.Name,
+						["BASSIA_RUN_ID"] = step.RunId,
+						["BASSIA_MERGE_BRIEF"] = step.Brief
+					},
+					briefText, context?.OnOutput, Cancellation);
+			}
+			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+			{
+				// The brief could not be written or the resolver could not be started: this step fails, the rest go on.
+				await RestoreAsync(checkout, head);
+				Fail(component, step, $"the resolver could not be run: {ex.Message}");
+				return;
+			}
 
 			if (exitCode is null)
 			{
-				await AbortMergeAsync(checkout);
+				await RestoreAsync(checkout, head);
 				step.Note = "cancelled while the resolver was working";
 				Cancelled = true;
 				return;
@@ -354,7 +377,7 @@ internal static class IntegrationRunner
 
 			if (exitCode != 0)
 			{
-				await AbortMergeAsync(checkout);
+				await RestoreAsync(checkout, head);
 				Fail(component, step, $"the resolver exited with code {exitCode}");
 				return;
 			}
@@ -372,7 +395,7 @@ internal static class IntegrationRunner
 				}
 				else
 				{
-					await checkout.RunOrThrowAsync(["reset", "--quiet", "--hard", head]);
+					await RestoreAsync(checkout, head);
 					Fail(component, step, "the resolver abandoned the merge");
 				}
 
@@ -384,7 +407,7 @@ internal static class IntegrationRunner
 			unresolved.AddRange(Lines(await checkout.RunOrThrowAsync(["diff", "--name-only", "--diff-filter=U"])).Except(unresolved));
 			if (unresolved.Count > 0)
 			{
-				await AbortMergeAsync(checkout);
+				await RestoreAsync(checkout, head);
 				Fail(component, step, $"conflicts remain in {string.Join(", ", unresolved)}");
 				return;
 			}
@@ -491,12 +514,21 @@ internal static class IntegrationRunner
 	private static async Task<bool> MergeInProgressAsync(GitClient checkout) =>
 		(await checkout.RunAsync(["rev-parse", "--quiet", "--verify", "MERGE_HEAD"])).ExitCode == 0;
 
-	private static async Task AbortMergeAsync(GitClient checkout)
+	/// <summary>
+	/// Puts the checkout back exactly at <paramref name="head"/>: no merge in progress, no staged or modified files and
+	/// no untracked ones. <c>git merge --abort</c> alone keeps files a failed resolver created, and the next step's
+	/// <c>git add --all</c> would then commit them into the integration.
+	/// </summary>
+	private static async Task RestoreAsync(GitClient checkout, string head)
 	{
 		if (await MergeInProgressAsync(checkout))
 		{
-			await checkout.RunOrThrowAsync(["merge", "--abort"]);
+			// reset --hard below clears the merge state too; the abort is just the tidy way when it works.
+			await checkout.RunAsync(["merge", "--abort"]);
 		}
+
+		await checkout.RunOrThrowAsync(["reset", "--quiet", "--hard", head]);
+		await checkout.RunOrThrowAsync(["clean", "--quiet", "-d", "--force", "-x"]);
 	}
 
 	private static bool HasConflictMarkers(string path) =>
