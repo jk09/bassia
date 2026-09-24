@@ -23,6 +23,18 @@ Before each agentic run, create a specification and base all following work on i
 
 Do **not** create a specification for minor tasks that can be resolved quickly and pushed straight to `main` (e.g. typo fixes, small doc or instruction edits, one-line bug fixes, trivial tooling tweaks). Use `n/a` as the spec reference for those.
 
+### Pull request and auto-merge
+
+Finish each spec-based agentic run with a pull request instead of pushing to `main`:
+
+1. Commit on a feature branch (see **Commits**), push it, and open a pull request against `main` whose title is the commit subject and whose body links the specification.
+2. Enable auto-merge on the pull request (merge commit), so it merges into `main` as soon as all of its checks pass. If auto-merge cannot be enabled, watch the pull request and merge it yourself once every check has passed.
+3. Do not notify the user about a pull request that is progressing or merges cleanly. Notify the user only when:
+    - a check fails, naming the failing check and its cause, or
+    - the pull request has a merge conflict with `main`, naming the conflicting files.
+
+   In both cases, leave the pull request unmerged until the failure or conflict is resolved.
+
 ### Commits
 
 Commit the working tree after each agentic run (i.e. once the requested change is complete), using this commit message format:
