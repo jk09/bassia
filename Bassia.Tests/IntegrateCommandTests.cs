@@ -360,4 +360,103 @@ public class IntegrateCommandTests
 		Assert.Equal("say \"hi\"\nplease", copied.Rationale);
 		Assert.Equal(["a.txt"], copied.Conflicts);
 	}
+
+	/// <summary>
+	/// A resolver that behaves differently for one run: for <paramref name="runId"/> it runs <paramref name="special"/>,
+	/// for every other run it writes <c>same.txt</c> as <c>merged</c>.
+	/// </summary>
+	private static string ResolverFor(string runId, string special) =>
+		OperatingSystem.IsWindows()
+			? $"if \"%BASSIA_RUN_ID%\"==\"{runId}\" ({special}) else (echo merged> same.txt)"
+			: $"if [ \"$BASSIA_RUN_ID\" = \"{runId}\" ]; then {special}; else echo merged > same.txt; fi";
+
+	[Fact]
+	public async Task Integrate_BriefThatCannotBeWritten_FailsThatStepAndStillRecordsTheIntegration()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		var third = await fixture.RunWritingAsync("example", "same.txt", "from-third");
+
+		// While resolving the second run, the resolver puts a folder where the third run's brief has to be written.
+		var blockBrief = OperatingSystem.IsWindows()
+			? $"mkdir ..\\example.{RunMetadata.ShortKey(third)}.merge.md & echo merged> same.txt"
+			: $"mkdir ../example.{RunMetadata.ShortKey(third)}.merge.md && echo merged > same.txt";
+		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", "all", "-resolve", ResolverFor(second, blockBrief));
+
+		Assert.Equal(1, exitCode);
+		Assert.Contains("status = \"partial\"", error);
+		var record = await SingleIntegrationAsync(fixture);
+		Assert.Equal("partial", record.Status);
+		var steps = Assert.Single(record.Components).Steps;
+		Assert.Equal(StepOutcome.Resolved, steps.Single(step => step.RunId == second).Outcome);
+		var failed = steps.Single(step => step.RunId == third);
+		Assert.Equal(StepOutcome.Failed, failed.Outcome);
+		Assert.StartsWith("the resolver could not be run:", failed.Note);
+
+		// What did merge is published, and advance accepts the finished integration.
+		Assert.Equal("merged", (await ShowAsync(fixture, "example", Tag(record), "same.txt")).Trim());
+		Assert.Equal(0, (await fixture.IntegrateAsync("advance", record.IntegrationId)).ExitCode);
+	}
+
+	[Fact]
+	public async Task Integrate_FilesAFailedResolverLeftBehind_AreNotCommittedByTheNextStep()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		var third = await fixture.RunWritingAsync("example", "same.txt", "from-third");
+		var strayAndFail = OperatingSystem.IsWindows() ? "echo stray> stray.txt & exit /b 4" : "echo stray > stray.txt; exit 4";
+
+		var (exitCode, _, _) = await fixture.IntegrateAsync("-runs", "all", "-resolve", ResolverFor(second, strayAndFail));
+
+		Assert.Equal(1, exitCode);
+		var record = await SingleIntegrationAsync(fixture);
+		Assert.Equal(StepOutcome.Failed, record.AllSteps.Single(step => step.RunId == second).Outcome);
+		Assert.Equal(StepOutcome.Resolved, record.AllSteps.Single(step => step.RunId == third).Outcome);
+		Assert.Equal("README.md\nsame.txt", (await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "ls-tree", "--name-only", "-r", Tag(record))).Replace("\r", ""));
+	}
+
+	[Fact]
+	public async Task Integrate_GitMergeFailingForAnotherReasonThanAConflict_FailsTheStepWithGitsMessageAndSkipsTheResolver()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "a.txt", "a");
+		await fixture.RunWritingAsync("example", "b.txt", "b");
+
+		// A pre-merge-commit hook, installed through a global git config, refuses every merge commit git makes.
+		var hooks = Path.Combine(fixture.Root, "hooks");
+		Directory.CreateDirectory(hooks);
+		var hook = Path.Combine(hooks, "pre-merge-commit");
+		await File.WriteAllTextAsync(hook, "#!/bin/sh\necho blocked by the hook >&2\nexit 1\n");
+		if (!OperatingSystem.IsWindows())
+		{
+			File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		}
+
+		var globalConfig = Path.Combine(fixture.Root, "gitconfig");
+		await File.WriteAllTextAsync(globalConfig, $"[core]\n\thooksPath = {hooks.Replace('\\', '/')}\n");
+		var stdin = Path.Combine(fixture.Root, "resolver-called.md");
+		var previous = Environment.GetEnvironmentVariable("GIT_CONFIG_GLOBAL");
+		Environment.SetEnvironmentVariable("GIT_CONFIG_GLOBAL", globalConfig);
+		(int ExitCode, string Output, string Error) result;
+		try
+		{
+			result = await fixture.IntegrateAsync("-runs", "all", "-resolve", TestEnvironment.CaptureStdinCommand(stdin));
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("GIT_CONFIG_GLOBAL", previous);
+		}
+
+		Assert.Equal(1, result.ExitCode);
+		Assert.False(File.Exists(stdin), "the resolver was called for a merge that did not conflict");
+		var steps = (await SingleIntegrationAsync(fixture)).AllSteps.ToList();
+		Assert.All(steps, step => Assert.Equal(StepOutcome.Failed, step.Outcome));
+		Assert.All(steps, step => Assert.Equal(MergeStrategy.Syntactic, step.Strategy));
+		Assert.All(steps, step => Assert.Contains("blocked by the hook", step.Note));
+	}
 }

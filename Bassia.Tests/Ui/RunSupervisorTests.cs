@@ -140,4 +140,18 @@ public class RunSupervisorTests
 			await Task.Delay(20);
 		}
 	}
+
+	[Fact]
+	public async Task Start_AnUnexpectedFailure_EndsTheCardAsFailed()
+	{
+		using var supervisor = new RunSupervisor((_, _, _) => throw new InvalidOperationException("boom"));
+
+		supervisor.Start("app@v0", "echo hi");
+		await supervisor.WhenAllSettledAsync();
+
+		var card = Assert.Single(supervisor.Cards());
+		Assert.False(card.IsLive);
+		Assert.Equal(AgentRunPhase.Failed, card.Phase);
+		Assert.Equal("boom", card.Message);
+	}
 }

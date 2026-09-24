@@ -105,8 +105,10 @@ internal sealed class IntegrationSupervisor : IDisposable
 		{
 			Update(current => current with { Message = "Cancelled before the integration was recorded; nothing changed.", IsLive = false, Finished = DateTimeOffset.UtcNow });
 		}
-		catch (Exception ex) when (ex is IntegrationException or MonorepoException or Git.GitException or IOException or UnauthorizedAccessException)
+		catch (Exception ex)
 		{
+			// Whatever the failure, the card must end: a card left live would refuse every later integration and make
+			// quitting wait on it, and a task that faults would throw into whoever awaits it.
 			Update(current => current with { Message = ex.Message, IsLive = false, Finished = DateTimeOffset.UtcNow });
 		}
 		finally
