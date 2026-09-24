@@ -88,6 +88,9 @@ internal static class ProgramCli
 		[ArgActionMethod, ArgDescription("Integrate the results of agentic runs")]
 		public Task Integrate() => RecordAsync(IntegrateCommand.RunAsync(SubArgs()));
 
+		[ArgActionMethod, ArgDescription("Serve the web dashboard")]
+		public Task Web() => RecordAsync(WebCommand.RunAsync(SubArgs()));
+
 		[ArgActionMethod, ArgDescription("Open the interactive frontend")]
 		public Task Ui() => RecordAsync(UiCommand.RunAsync());
 
@@ -215,6 +218,10 @@ internal static class ProgramCli
 		Console.WriteLine("  ui                     Open the interactive frontend: a components board with the");
 		Console.WriteLine("                         dependency graph, a live board of the agentic runs, tagging,");
 		Console.WriteLine("                         and starting or stopping runs in the background");
+		Console.WriteLine("  web [--port <n>] [--no-open]");
+		Console.WriteLine("                         Serve the web dashboard on 127.0.0.1 (default port 8080): components");
+		Console.WriteLine("                         and their graph, a timeline across dependent components, agentic runs");
+		Console.WriteLine("                         started from a prompt and streamed live, and integrations");
 		Console.WriteLine("  help                   Show this help");
 	}
 }

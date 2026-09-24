@@ -174,6 +174,44 @@ Keys: `1`/`2`/`3` switch views from any screen, arrows move the selection, `ente
 
 **Stopping a run** (`x`) kills the agent's whole process tree, records the run with status `cancelled` and keeps its run folder for inspection; nothing is committed into any component, and `bassia agent retry` refuses a cancelled run the same way it refuses a failed one. Quitting while runs are still going offers to stop them and waits, rather than orphaning the agent processes.
 
+### Web dashboard
+
+```powershell
+dotnet run -- -C R:\ web                 # http://127.0.0.1:8080/, opened in the browser
+dotnet run -- -C R:\ web --port 9000 --no-open
+```
+
+`web` serves a dashboard over the monorepo, in the spirit of [Fossil](https://fossil-scm.org)'s built-in web
+interface. It listens on 127.0.0.1 only. If the port is taken it uses the next free one, and it prints the URL. It
+runs until Ctrl-C, which also stops (and records as `cancelled`) any run it started. Every page is plain HTML with
+a menu, and works without JavaScript; the script only makes live parts update in place.
+
+- **Home**: counts of components, live, completed and failed runs, and integrations. Below them are the component
+  graph (the same SVG as the graph export in `bassia ui`, with every box a link) and the latest runs and
+  integrations.
+- **Components**: each component with what it needs, what uses it, its annotated tags, branches and runs. A
+  component's page lists its branches and tags, and the runs that touched it with their result tags.
+- **Timeline**: one chronological list of commits across the components you choose. Each commit shows its
+  component, hash, subject, refs and author. The components a choice depends on join it automatically, so a
+  library comes along with the application that references it. The whole monorepo is never logged: without a
+  choice the page asks for one, and each component's log is read only as far as the current page needs (`?n=` sets
+  the page size). Agent and integration tags link to the run or integration that made them, and every commit opens
+  with its full message and diffstat.
+- **Runs**: the runs started from this dashboard, updating live, then every recorded run. A run's page shows its
+  record and results. For a live run it also streams the agent's output as it happens and has a **Stop** button.
+- **New run**: a Claude-like prompt. Tick the components and pick an annotated tag for each; components they
+  depend on join at the tag chosen for them. Then write the prompt, where enter sends and shift+enter adds a line,
+  and optionally choose the model, effort and extra context. The composed `-run` command is previewed. Type your
+  own command to run exactly that. Sending starts the run in the background, through the same path as `bassia
+  agent`, and opens its live page.
+- **Integrations**: every integration with its runs and result tags. Each opens to its per-component steps
+  (triage, strategy, conflicts, outcome) and the paths of its semantic briefs. **Preview triage** shows how
+  chosen runs would integrate, like `integrate -plan`; performing an integration stays with `bassia integrate`
+  and `bassia ui`.
+
+Forms carry a per-server token, and requests must be addressed to `127.0.0.1` or `localhost`. So a web page
+open in the same browser can neither start runs through the dashboard nor read it through DNS rebinding.
+
 ## Build
 
 ```powershell
