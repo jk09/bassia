@@ -12,6 +12,19 @@ The `Bassia` initially consists of a command-line frontend written in .NET which
 
 ## Agentic workflow
 
+### Specification first
+
+Before each agentic run, create a specification and base all following work on it:
+
+1. Run `./feat/new-feature.ps1` to create `feat/proposed/bassia-<id>/SPEC.md` from `feat/template.md` (see `feat/README.md`). If the request continues an existing feature record under `feat/`, update that record instead of creating a new one.
+2. Fill in the specification from the request and the codebase: outcome, context, verifiable acceptance criteria, approach, and validation.
+3. List any open questions that cannot be reasonably inferred from the request or the codebase, and ask the user to resolve them before implementing. Record the answers under **Decisions**.
+4. Move the record to `feat/active/` when implementation starts, implement against its acceptance criteria, and keep its **Progress** and checkboxes current. Move it to `feat/done/` once every acceptance criterion is verified.
+
+Do **not** create a specification for minor tasks that can be resolved quickly and pushed straight to `main` (e.g. typo fixes, small doc or instruction edits, one-line bug fixes, trivial tooling tweaks). Use `n/a` as the spec reference for those.
+
+### Commits
+
 Commit the working tree after each agentic run (i.e. once the requested change is complete), using this commit message format:
 
 ```
