@@ -116,8 +116,12 @@ internal sealed class ComponentGraph
 
 	private static string MermaidId(string name) => "c_" + Regex.Replace(name, "[^A-Za-z0-9_]", "_");
 
-	/// <summary>A standalone SVG: components as boxes in layers (a component sits below everything that references it), references as arrows.</summary>
-	public string ToSvg()
+	/// <summary>
+	/// A standalone SVG: components as boxes in layers (a component sits below everything that references it),
+	/// references as arrows. With <paramref name="link"/>, every box is a hyperlink to the URL it returns for the
+	/// component, which is how the web dashboard makes the graph its navigation.
+	/// </summary>
+	public string ToSvg(Func<string, string>? link = null)
 	{
 		const int boxWidth = 160, boxHeight = 40, horizontalGap = 40, verticalGap = 80, margin = 30;
 
@@ -164,8 +168,17 @@ internal sealed class ComponentGraph
 		foreach (var component in components)
 		{
 			var (x, y) = positions[component.Name];
+			if (link is not null)
+			{
+				svg.Append(CultureInfo.InvariantCulture, $"  <a href=\"{Xml(link(component.Name))}\">\n");
+			}
+
 			svg.Append(CultureInfo.InvariantCulture, $"  <rect x=\"{x}\" y=\"{y}\" width=\"{boxWidth}\" height=\"{boxHeight}\" rx=\"6\" fill=\"#eef3fb\" stroke=\"#3b5b8f\" stroke-width=\"1.5\"/>\n");
 			svg.Append(CultureInfo.InvariantCulture, $"  <text x=\"{x + boxWidth / 2}\" y=\"{y + boxHeight / 2 + 5}\" text-anchor=\"middle\" fill=\"#1c2b45\">{Xml(component.Name)}</text>\n");
+			if (link is not null)
+			{
+				svg.Append("  </a>\n");
+			}
 		}
 
 		svg.Append("</svg>\n");
