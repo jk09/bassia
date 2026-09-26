@@ -9,10 +9,11 @@ public class AgentCommandTests
 	[Fact]
 	public async Task Agent_WithoutArguments_ReturnsUsage()
 	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("agent");
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("run", "start");
 
-		Assert.Equal(1, exitCode);
-		Assert.Contains("Usage: bassia agent -select", error);
+		Assert.Equal(2, exitCode);
+		Assert.Contains("-select is required", error);
+		Assert.Contains("Usage: bassia run start -select", error);
 	}
 
 	[Fact]
@@ -20,7 +21,7 @@ public class AgentCommandTests
 	{
 		using var directory = new TempDirectory();
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(directory.Path, "agent", "-select", "example@v0", "-run", "echo");
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(directory.Path, "run", "start", "-select", "example@v0", "-run", "echo");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("is not inside a Bassia monorepo", error);
@@ -32,7 +33,7 @@ public class AgentCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "missing@v0", "-run", "echo");
+		var (exitCode, _, error) = await monorepo.RunStartAsync("-select", "missing@v0", "-run", "echo");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("Component 'missing' is not registered", error);
@@ -48,7 +49,7 @@ public class AgentCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", $"example@{commitIsh}", "-run", "echo");
+		var (exitCode, _, error) = await monorepo.RunStartAsync("-select", $"example@{commitIsh}", "-run", "echo");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains(expectedError, error);
@@ -62,7 +63,7 @@ public class AgentCommandTests
 		await monorepo.AddComponentAsync("example");
 		var baseline = await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "rev-parse", "v0^{commit}");
 
-		var (exitCode, output, error) = await monorepo.AgentAsync(
+		var (exitCode, output, error) = await monorepo.RunStartAsync(
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "class Hello {}"));
 
 		Assert.True(exitCode == 0, error);
@@ -112,7 +113,7 @@ public class AgentCommandTests
 		await monorepo.AddComponentAsync("example");
 		await File.AppendAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml"), "\n[agent.commit]\nsubject = \"[{component}] {summary} ({run_id})\"\n");
 
-		var (exitCode, output, error) = await monorepo.AgentAsync(
+		var (exitCode, output, error) = await monorepo.RunStartAsync(
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "x"));
 
 		Assert.True(exitCode == 0, error);
@@ -127,8 +128,8 @@ public class AgentCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 
-		var (firstExit, first, firstError) = await monorepo.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/one.txt", "1"));
-		var (secondExit, second, secondError) = await monorepo.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/two.txt", "2"));
+		var (firstExit, first, firstError) = await monorepo.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/one.txt", "1"));
+		var (secondExit, second, secondError) = await monorepo.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/two.txt", "2"));
 
 		Assert.True(firstExit == 0, firstError);
 		Assert.True(secondExit == 0, secondError);
@@ -152,7 +153,7 @@ public class AgentCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 
-		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "example@v0", "-run", "echo hello");
+		var (exitCode, output, error) = await monorepo.RunStartAsync("-select", "example@v0", "-run", "echo hello");
 
 		Assert.True(exitCode == 0, error);
 		Assert.Contains("status = \"completed\"", output);
@@ -169,7 +170,7 @@ public class AgentCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 
-		var (exitCode, output, error) = await monorepo.AgentAsync(
+		var (exitCode, output, error) = await monorepo.RunStartAsync(
 			"-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/hello.cs", "x"));
 		Assert.True(exitCode == 0, error);
 		var runId = TestEnvironment.RunIdOf(output);
@@ -211,7 +212,7 @@ public class AgentCommandTests
 			TestEnvironment.WriteFileCommand("a/script1.cs", "1"),
 			TestEnvironment.WriteFileCommand("a/b_lib/script2.cs", "2"),
 			TestEnvironment.WriteFileCommand("a/b_lib/c_lib/script3.cs", "3"));
-		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "a@v0,b@v0,c@v0", "-run", command);
+		var (exitCode, output, error) = await monorepo.RunStartAsync("-select", "a@v0,b@v0,c@v0", "-run", command);
 
 		Assert.True(exitCode == 0, error);
 		var runId = TestEnvironment.RunIdOf(output);
@@ -251,7 +252,7 @@ public class AgentCommandTests
 		await monorepo.AddComponentAsync("lib");
 		await monorepo.SetReferencesAsync("app", "lib");
 
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0", "-run", "echo");
+		var (exitCode, _, error) = await monorepo.RunStartAsync("-select", "app@v0", "-run", "echo");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("-select must cover the full component closure", error);
@@ -268,7 +269,7 @@ public class AgentCommandTests
 		await monorepo.SetReferencesAsync("app", "lib");
 		await monorepo.SetReferencesAsync("lib", "app");
 
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0", "-run", "echo");
+		var (exitCode, _, error) = await monorepo.RunStartAsync("-select", "app@v0", "-run", "echo");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("cyclic component reference: app -> lib -> app", error);
@@ -281,7 +282,7 @@ public class AgentCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "example@v0", "-run", TestEnvironment.FailingCommand);
+		var (exitCode, _, error) = await monorepo.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.FailingCommand);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("exited with code 3", error);
@@ -333,7 +334,7 @@ public class AgentCommandTests
 		Assert.Contains(steps, step => step.Phase == AgentRunPhase.Preparing);
 		Assert.Contains(steps, step => step.Phase == AgentRunPhase.Cancelled);
 
-		var (retryExitCode, _, retryError) = await monorepo.AgentAsync("retry", outcome.Metadata.RunId);
+		var (retryExitCode, _, retryError) = await monorepo.BassiaAsync("run", "retry", outcome.Metadata.RunId);
 		Assert.Equal(1, retryExitCode);
 		Assert.Contains("has status 'cancelled'", retryError);
 	}
@@ -377,7 +378,7 @@ public class AgentCommandTests
 		}
 
 		var command = TestEnvironment.WriteFileCommand("app/a.txt", "a") + " && " + TestEnvironment.WriteFileCommand("app/lib/l.txt", "l");
-		var (exitCode, _, error) = await monorepo.AgentAsync("-select", "app@v0,lib@v0", "-run", command);
+		var (exitCode, _, error) = await monorepo.RunStartAsync("-select", "app@v0,lib@v0", "-run", command);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("status = \"partial\"", error);
@@ -390,7 +391,7 @@ public class AgentCommandTests
 
 		// retry accepts the bare <id> as well as the full run id.
 		File.Delete(hook);
-		var (retryExitCode, retryOutput, retryError) = await monorepo.AgentAsync("retry", RunMetadata.Key(runId));
+		var (retryExitCode, retryOutput, retryError) = await monorepo.BassiaAsync("run", "retry", RunMetadata.Key(runId));
 
 		Assert.True(retryExitCode == 0, retryError);
 		Assert.Contains("status = \"completed\"", retryOutput);
@@ -407,11 +408,11 @@ public class AgentCommandTests
 		await monorepo.AddComponentAsync("lib");
 		await monorepo.SetReferencesAsync("app", "lib");
 		var command = TestEnvironment.WriteFileCommand("app/a.txt", "a") + " && " + TestEnvironment.WriteFileCommand("app/lib/l.txt", "l");
-		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "app@v0,lib@v0", "-run", command);
+		var (exitCode, output, error) = await monorepo.RunStartAsync("-select", "app@v0,lib@v0", "-run", command);
 		Assert.True(exitCode == 0, error);
 		var runId = TestEnvironment.RunIdOf(output);
 
-		var (abandonExitCode, abandonOutput, abandonError) = await monorepo.AgentAsync("abandon", runId);
+		var (abandonExitCode, abandonOutput, abandonError) = await monorepo.BassiaAsync("run", "abandon", runId);
 
 		Assert.True(abandonExitCode == 0, abandonError);
 		Assert.Contains("abandoned", abandonOutput);
@@ -419,7 +420,7 @@ public class AgentCommandTests
 		Assert.Contains(RunMetadata.TagName(runId, 0), await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "tag", "--list"));
 		Assert.Contains("status = \"abandoned\"", await TestEnvironment.GitAsync(monorepo.RunsRepo, "show", $"{RunMetadata.TagName(runId, 2)}:run.toml"));
 
-		var (again, _, againError) = await monorepo.AgentAsync("abandon", runId);
+		var (again, _, againError) = await monorepo.BassiaAsync("run", "abandon", runId);
 		Assert.Equal(1, again);
 		Assert.Contains("already abandoned", againError);
 	}
@@ -429,7 +430,7 @@ public class AgentCommandTests
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
-		var (exitCode, output, error) = await monorepo.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/one.txt", "1"));
+		var (exitCode, output, error) = await monorepo.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/one.txt", "1"));
 		Assert.True(exitCode == 0, error);
 		var runId = TestEnvironment.RunIdOf(output);
 		var checkout = Bassia.Git.GitClient.In(monorepo.Checkout(runId, "example"));

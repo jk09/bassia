@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 /// <summary>
 /// The component reference graph of a monorepo as drawn by the frontend: a console rendering, and Mermaid/SVG
 /// exports for Markdown viewers and browsers. Tolerates a cyclic graph (drawn with a marker) so the frontend
-/// can still show what <c>components.toml</c> contains when <c>bassia agent</c> would reject it.
+/// can still show what <c>components.toml</c> contains when <c>bassia run start</c> would reject it.
 /// </summary>
 internal sealed class ComponentGraph
 {
@@ -42,8 +42,10 @@ internal sealed class ComponentGraph
 		referrers.TryGetValue(name, out var list) ? list : [];
 
 	/// <summary>Tree-style text: each root expanded through its references. A component reached twice is drawn twice; a cycle is cut with a marker.</summary>
-	public string RenderText()
+	/// <remarks>With <paramref name="ascii"/> the branches are drawn with <c>|-- `--</c> instead of box-drawing characters.</remarks>
+	public string RenderText(bool ascii = false)
 	{
+		var glyphs = ascii ? AsciiGlyphs : BoxGlyphs;
 		var builder = new StringBuilder();
 		if (components.Count == 0)
 		{
@@ -53,19 +55,24 @@ internal sealed class ComponentGraph
 		foreach (var root in Roots())
 		{
 			builder.Append(root.Name).Append('\n');
-			RenderChildren(builder, root, "", new HashSet<string>(StringComparer.Ordinal) { root.Name });
+			RenderChildren(builder, root, "", new HashSet<string>(StringComparer.Ordinal) { root.Name }, glyphs);
 		}
 
 		return builder.ToString().TrimEnd('\n');
 	}
 
-	private void RenderChildren(StringBuilder builder, ComponentDefinition component, string indent, HashSet<string> path)
+	private sealed record TreeGlyphs(string Branch, string Last, string Continue, string Blank);
+
+	private static readonly TreeGlyphs BoxGlyphs = new("├─ ", "└─ ", "│  ", "   ");
+	private static readonly TreeGlyphs AsciiGlyphs = new("|-- ", "`-- ", "|   ", "    ");
+
+	private void RenderChildren(StringBuilder builder, ComponentDefinition component, string indent, HashSet<string> path, TreeGlyphs glyphs)
 	{
 		for (var i = 0; i < component.References.Count; i++)
 		{
 			var reference = component.References[i];
 			var last = i == component.References.Count - 1;
-			builder.Append(indent).Append(last ? "└─ " : "├─ ").Append(reference.Name);
+			builder.Append(indent).Append(last ? glyphs.Last : glyphs.Branch).Append(reference.Name);
 			if (reference.Path != reference.Name)
 			{
 				builder.Append("  (at ").Append(reference.Path).Append(')');
@@ -85,7 +92,7 @@ internal sealed class ComponentGraph
 			}
 
 			builder.Append('\n');
-			RenderChildren(builder, target, indent + (last ? "   " : "│  "), path);
+			RenderChildren(builder, target, indent + (last ? glyphs.Blank : glyphs.Continue), path, glyphs);
 			path.Remove(reference.Name);
 		}
 	}

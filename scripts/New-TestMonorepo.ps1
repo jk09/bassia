@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
 Creates a throwaway Bassia monorepo for hand-checking: a random folder in the temp directory, initialized with
-`bassia init`, with the jk09/example component added and its HEAD tagged so `bassia agent -select` can use it.
+`bassia init`, with the jk09/example component added and its HEAD tagged so `bassia run start -select` can use it.
 
 .OUTPUTS
 The monorepo's root path, so it can be captured: $r = ./scripts/New-TestMonorepo.ps1
@@ -19,10 +19,10 @@ $root = Join-Path ([IO.Path]::GetTempPath()) "bassia-$([guid]::NewGuid().ToStrin
 $null = New-Item -ItemType Directory -Path $root
 
 $null = Invoke-Bassia init $root
-$component = Invoke-Bassia -C $root add-component $ComponentUrl
+$component = Invoke-Bassia -C $root component add -url $ComponentUrl
 $componentDir = $component.path
 
-& git -C $componentDir tag -a $Tag -m "baseline for bassia agent hand-checks"
+& git -C $componentDir tag -a $Tag -m "baseline for bassia run hand-checks"
 if ($LASTEXITCODE -ne 0) { throw "git tag failed in '$componentDir'" }
 
 Write-Host ''

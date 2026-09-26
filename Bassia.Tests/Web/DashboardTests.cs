@@ -100,7 +100,7 @@ public class DashboardTests
 	public async Task Component_ShowsItsRefsRunsAndReferences()
 	{
 		await using var fixture = await ThreeComponentsAsync();
-		var run = await fixture.AgentAsync("-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/a.txt", "a"));
+		var run = await fixture.RunStartAsync("-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/a.txt", "a"));
 		var runId = TestEnvironment.RunIdOf(run.Output);
 		await using var host = await Host.StartAsync(fixture);
 
@@ -142,7 +142,7 @@ public class DashboardTests
 		Assert.Equal(["app", "lib"], unit);
 
 		// Four commits: the two initial ones, then one result per component from a run over the unit.
-		var run = await fixture.AgentAsync("-select", "app@v0,lib@v0", "-run",
+		var run = await fixture.RunStartAsync("-select", "app@v0,lib@v0", "-run",
 			$"{TestEnvironment.WriteFileCommand("app/a.txt", "a")} && {TestEnvironment.WriteFileCommand("lib/l.txt", "l")}");
 		Assert.Equal(0, run.ExitCode);
 
@@ -267,7 +267,7 @@ public class DashboardTests
 		await fixture.AddComponentAsync("example");
 		var first = await fixture.RunWritingAsync("example", "same.txt", "from-first");
 		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", first, "-resolve", TestEnvironment.FailingCommand)).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", first, "-resolve", TestEnvironment.FailingCommand)).ExitCode);
 		var record = Assert.Single(await new Bassia.Integration.IntegrationStore(new RunMetadataStore(new GitClient(fixture.Root), fixture.RunsRepo)).ListLatestAsync());
 		await using var host = await Host.StartAsync(fixture);
 

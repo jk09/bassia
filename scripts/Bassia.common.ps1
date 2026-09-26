@@ -91,7 +91,7 @@ function ConvertFrom-BassiaToml {
 # Runs bassia with the given arguments. stderr (progress lines, or the TOML error) streams to the console; stdout is
 # the TOML result, returned as an object. A non-zero exit code throws.
 #
-# `bassia agent` lets the agent command inherit stdout, so its output precedes the result. The result is the block
+# `bassia run start` lets the agent command inherit stdout, so its output precedes the result. The result is the block
 # starting at the last marker line; anything before it is echoed as agent output.
 function Invoke-Bassia {
 	Write-Host "> bassia $($args -join ' ')" -ForegroundColor DarkGray

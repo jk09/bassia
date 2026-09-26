@@ -61,5 +61,29 @@ public class TomlResultTests
 		Assert.Equal("first line\nsecond line", Parse(text)["error"]);
 	}
 
+	[Fact]
+	public void Serialize_WritesTextAsALiteralBlockThatReadsAsDrawn()
+	{
+		const string graph = "app\n`-- lib  (at vendor\\lib)\n    \"quoted\"";
+		var text = TomlResult.Serialize(new Dictionary<string, object?>
+		{
+			["graph"] = new TomlText(graph),
+			["component"] = new List<Dictionary<string, object?>> { new() { ["name"] = "app", ["stat"] = new TomlText("a | 1 +\nb | 2 -") } }
+		});
+
+		Assert.Contains("graph = '''\n" + graph + "\n'''", text);
+		var table = Parse(text);
+		Assert.Equal(graph + "\n", table["graph"]);
+		Assert.Equal("a | 1 +\nb | 2 -\n", ((TomlTable)((TomlTableArray)table["component"])[0])["stat"]);
+	}
+
+	[Fact]
+	public void Serialize_FallsBackToABasicStringForTextALiteralCannotHold()
+	{
+		var text = TomlResult.Serialize(new Dictionary<string, object?> { ["output"] = new TomlText("it's '''quoted'''\nline two") });
+
+		Assert.Equal("it's '''quoted'''\nline two", Parse(text)["output"]);
+	}
+
 	private static TomlTable Parse(string text) => TomlSerializer.Deserialize<TomlTable>(text)!;
 }

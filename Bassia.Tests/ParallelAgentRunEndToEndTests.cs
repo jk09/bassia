@@ -83,7 +83,7 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		for (var index = 1; index <= 2; index++)
 		{
 			var name = $"hello{index}";
-			var added = AssertOk(await BassiaAsync(root, "add-component", ComponentUrl, name), "add-component");
+			var added = AssertOk(await BassiaAsync(root, "component", "add", "-url", ComponentUrl, "-name", name), "component add");
 			Assert.Equal(name, added["name"]);
 
 			var source = Path.Combine(root, name);
@@ -118,7 +118,7 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		// ----- 4. one agentic run per component, started at the same time, each pinned to its baseline tag -----
 
 		var started = plans
-			.Select(plan => BassiaAsync(root, "agent", "-select", $"{plan.Name}@{plan.BaseTag}", "-run", plan.AgentCommand))
+			.Select(plan => BassiaAsync(root, "run", "start", "-select", $"{plan.Name}@{plan.BaseTag}", "-run", plan.AgentCommand))
 			.ToArray();
 		var results = await Task.WhenAll(started);
 

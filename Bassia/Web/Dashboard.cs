@@ -153,7 +153,7 @@ internal sealed class Dashboard
 		body.Append("<div data-live-src=\"/fragment/live-runs\">").Append(LiveRunsTable()).Append("</div>");
 		body.Append("<h2>Components</h2>");
 		body.Append(monorepo.Components.Count == 0
-			? Notice("components.toml is empty; register one with 'bassia add-component <url>'.")
+			? Notice("components.toml is empty; register one with 'bassia component add -url <url>'.")
 			: $"<div class=\"graph\">{graph.ToSvg(ComponentHref)}</div><p class=\"muted\">Click a component to open it; <a href=\"/graph.svg\">graph.svg</a> is the same picture as a file.</p>");
 		body.Append("<h2>Latest runs</h2>").Append(RunsTable(runs.Take(8).ToList()));
 		body.Append("<h2>Latest integrations</h2>").Append(IntegrationsTable(recorded.Take(5).ToList()));
@@ -616,18 +616,18 @@ internal sealed class Dashboard
 			<button>Send ➤</button>
 			</div>
 			<div class="bar">
-			<label>Agent <input type="text" name="agent" size="40" value="{E(Value("agent", InteractiveSession.DefaultAgentCommand))}"></label>
+			<label>Agent <input type="text" name="agent" size="40" value="{E(Value("agent", monorepo.AgentCommand))}"></label>
 			<input class="grow" type="text" id="preview" name="command" value="{E(Value("command"))}" placeholder="the command is composed from the fields above">
 			</div>
-			<div class="hint">Leave the command empty to compose it from the prompt; type one to run exactly that. It runs in the run folder, exactly as <code>bassia agent -select … -run …</code>.</div>
+			<div class="hint">Leave the command empty to compose it from the prompt; type one to run exactly that. It runs in the run folder, exactly as <code>bassia run start -select … -run …</code>.</div>
 			</div>
 			</form>
 			""");
 		return body.ToString();
 	}
 
-	private static string Compose(IQueryCollection fields) => InteractiveSession.ComposeCommand(
-		string.IsNullOrWhiteSpace(fields["agent"]) ? InteractiveSession.DefaultAgentCommand : fields["agent"].ToString(),
+	private string Compose(IQueryCollection fields) => InteractiveSession.ComposeCommand(
+		string.IsNullOrWhiteSpace(fields["agent"]) ? monorepo.AgentCommand : fields["agent"].ToString(),
 		string.IsNullOrWhiteSpace(fields["model"]) ? null : fields["model"].ToString(),
 		string.IsNullOrWhiteSpace(fields["effort"]) ? null : fields["effort"].ToString(),
 		fields["prompt"].ToString(),
@@ -688,7 +688,7 @@ internal sealed class Dashboard
 	{
 		var candidates = (await store.ListLatestAsync()).Where(IntegrationPlanner.HasResults).OrderBy(run => run.Created, StringComparer.Ordinal).ToList();
 		var body = new StringBuilder(IntegrationsTable(await integrations.ListLatestAsync()));
-		body.Append("<h2>Preview a triage</h2><p class=\"muted\">Choose runs with results to see how they would integrate: which steps git merges by syntax, which go to the resolver for a semantic merge. Nothing changes; integrate with <code>bassia integrate</code> or view 3 of <code>bassia ui</code>.</p>");
+		body.Append("<h2>Preview a triage</h2><p class=\"muted\">Choose runs with results to see how they would integrate: which steps git merges by syntax, which go to the resolver for a semantic merge. Nothing changes; integrate with <code>bassia integration start</code> or view 3 of <code>bassia ui</code>.</p>");
 		if (candidates.Count == 0)
 		{
 			body.Append(Notice("No run has pushed a result yet."));
@@ -732,7 +732,7 @@ internal sealed class Dashboard
 		}
 
 		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs);
-		var command = $"bassia integrate -runs {string.Join(",", runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => RunMetadata.ShortKey(run.RunId)))}";
+		var command = $"bassia integration start -runs {string.Join(",", runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => RunMetadata.ShortKey(run.RunId)))}";
 		var body = $"""
 			<p>{E(Markup(plan))}. Nothing was changed. To integrate: <code>{E(command)}</code>, or view 3 of <code>bassia ui</code>.</p>
 			{StepsTable(plan)}

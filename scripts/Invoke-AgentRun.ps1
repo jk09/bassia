@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Runs `bassia agent` in a monorepo created by New-TestMonorepo.ps1, driving Claude Code non-interactively with the
+Runs `bassia run start` in a monorepo created by New-TestMonorepo.ps1, driving Claude Code non-interactively with the
 given prompt.
 
 .EXAMPLE
@@ -30,7 +30,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Monorepo '.bassia') -PathType Conta
 # The -run value is handed to cmd.exe, which strips only the outer quotes, so the prompt keeps its own.
 $command = "$Agent `"$($Prompt.Replace('"', '\"'))`""
 
-$result = Invoke-Bassia -C $Monorepo agent -select $Select -run $command
+$result = Invoke-Bassia -C $Monorepo run start -select $Select -run $command
 
 Write-Host ''
 Write-Host "Run $($result.run_id): $($result.status)"
