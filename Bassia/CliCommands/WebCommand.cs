@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
+using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
 using Bassia.Ui;
@@ -21,27 +22,10 @@ internal static class WebCommand
 	/// <summary>How many ports after the requested one are tried when it is taken.</summary>
 	private const int PortAttempts = 20;
 
-	private const string Usage = "Usage: bassia web [--port <n>] [--no-open]";
-
-	public static async Task<int> RunAsync(string[] args)
+	public static async Task<int> RunAsync(Invocation invocation)
 	{
-		var port = DefaultPort;
-		var open = true;
-		for (var i = 0; i < args.Length; i++)
-		{
-			switch (args[i])
-			{
-				case "--port" when i + 1 < args.Length && int.TryParse(args[i + 1], NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value is > 0 and < 65536:
-					port = value;
-					i++;
-					break;
-				case "--no-open":
-					open = false;
-					break;
-				default:
-					return ProgramCli.WriteResult(false, "web", $"Unknown or incomplete argument '{args[i]}'.\n{Usage}");
-			}
-		}
+		var port = invocation.Int("port", DefaultPort, 1, 65535);
+		var open = !invocation.Has("no-open");
 
 		var root = Monorepo.FindRoot(Environment.CurrentDirectory);
 		if (root is null)
@@ -61,11 +45,11 @@ internal static class WebCommand
 
 		if (FreePort(port) is not { } free)
 		{
-			return ProgramCli.WriteResult(false, "web", $"No free port in {port}-{port + PortAttempts - 1} on 127.0.0.1; choose one with --port.");
+			return ProgramCli.WriteResult(false, "web", $"No free port in {port}-{port + PortAttempts - 1} on 127.0.0.1; choose one with -port.");
 		}
 
 		var git = new GitClient(root);
-		using var supervisor = new RunSupervisor((select, command, context) => AgentCommand.StartRunAsync(git, monorepo, select, command, context));
+		using var supervisor = new RunSupervisor((select, command, context) => RunCommands.StartHostedAsync(git, monorepo, select, command, context));
 		var url = $"http://127.0.0.1:{free}/";
 		await using var app = new Dashboard(monorepo, supervisor).Build(url);
 		await app.StartAsync();

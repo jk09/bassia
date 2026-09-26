@@ -211,6 +211,46 @@ internal sealed class CharCanvas
 		return builder.ToString();
 	}
 
+	/// <summary>
+	/// The canvas as plain 7-bit ASCII, without styles: box-drawing characters become <c>+ - |</c>, the arrow head
+	/// <c>v</c>, and the few symbols the cards use their nearest ASCII look-alike. Trailing blanks are dropped per row.
+	/// </summary>
+	public string ToAscii()
+	{
+		var builder = new StringBuilder();
+		for (var y = 0; y < Height; y++)
+		{
+			var line = new StringBuilder();
+			for (var x = 0; x < Width; x++)
+			{
+				line.Append(Ascii(chars[y, x]));
+			}
+
+			builder.Append(line.ToString().TrimEnd());
+			if (y < Height - 1)
+			{
+				builder.Append('\n');
+			}
+		}
+
+		return builder.ToString();
+	}
+
+	/// <summary>The ASCII stand-in for one canvas character.</summary>
+	internal static char Ascii(char value) => value switch
+	{
+		'─' or '╴' or '╶' => '-',
+		'│' or '╵' or '╷' => '|',
+		'▼' => 'v',
+		'●' => '*',
+		'▸' => '>',
+		'·' => '-',
+		'…' => '~',
+		_ when value != ' ' && LineChars.Contains(value) => '+',
+		_ when value > '~' => '?',
+		_ => value
+	};
+
 	private static void Flush(StringBuilder builder, StringBuilder run, string? style)
 	{
 		if (run.Length == 0)

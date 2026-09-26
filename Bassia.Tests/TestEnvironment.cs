@@ -115,7 +115,7 @@ internal static class TestEnvironment
 		return (await output).Trim();
 	}
 
-	/// <summary>Shell command (for <c>bassia agent -run</c>) that writes <paramref name="content"/> to a file relative to the run folder.</summary>
+	/// <summary>Shell command (for <c>bassia run start -run</c>) that writes <paramref name="content"/> to a file relative to the run folder.</summary>
 	public static string WriteFileCommand(string relativePath, string content) =>
 		OperatingSystem.IsWindows()
 			? $"echo {content}> {relativePath.Replace('/', '\\')}"
@@ -146,7 +146,7 @@ internal static class TestEnvironment
 
 /// <summary>
 /// A throw-away Bassia monorepo with source repositories for components created on demand. Each component's
-/// upstream lives in <c>&lt;temp&gt;/upstream/&lt;name&gt;</c>; <c>add-component</c> clones it as the bare
+/// upstream lives in <c>&lt;temp&gt;/upstream/&lt;name&gt;</c>; <c>component add</c> clones it as the bare
 /// source-of-truth repo at <c>&lt;temp&gt;/root/&lt;name&gt;/.git</c>, exactly like a GitHub-hosted component.
 /// </summary>
 internal sealed class MonorepoFixture : IAsyncDisposable
@@ -160,7 +160,8 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 	public string SourceRepo(string component) => Path.Combine(Root, component);
 	public string RunDir(string runId) => Path.Combine(Workspace, runId);
 	public string Checkout(string runId, string component) => Path.Combine(RunDir(runId), component);
-	public bool HasRunDirs => Directory.Exists(Workspace) && Directory.EnumerateDirectories(Workspace).Any();
+	/// <summary>Run or integration folders in the workspace; the job folder <c>.jobs</c> does not count.</summary>
+	public bool HasRunDirs => Directory.Exists(Workspace) && Directory.EnumerateDirectories(Workspace).Any(directory => !Path.GetFileName(directory).StartsWith('.'));
 
 	public static async Task<MonorepoFixture> CreateAsync()
 	{
@@ -181,7 +182,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 		await TestEnvironment.GitAsync(upstream, "add", "--all");
 		await TestEnvironment.GitAsync(upstream, "commit", "--quiet", "-m", "Initial commit");
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(Root, "add-component", upstream);
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(Root, "component", "add", "-url", upstream);
 		Assert.True(exitCode == 0, error);
 		await TestEnvironment.GitAsync(SourceRepo(name), "tag", "-a", tag, "-m", "baseline");
 	}
@@ -204,16 +205,20 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 		await File.WriteAllLinesAsync(path, lines);
 	}
 
-	public Task<(int ExitCode, string Output, string Error)> AgentAsync(params string[] args) =>
-		TestEnvironment.RunInDirectoryAsync(Root, ["agent", .. args]);
+	/// <summary>Runs any bassia command line in the monorepo root.</summary>
+	public Task<(int ExitCode, string Output, string Error)> BassiaAsync(params string[] args) =>
+		TestEnvironment.RunInDirectoryAsync(Root, args);
 
-	public Task<(int ExitCode, string Output, string Error)> IntegrateAsync(params string[] args) =>
-		TestEnvironment.RunInDirectoryAsync(Root, ["integrate", .. args]);
+	public Task<(int ExitCode, string Output, string Error)> RunStartAsync(params string[] args) =>
+		TestEnvironment.RunInDirectoryAsync(Root, ["run", "start", .. args]);
+
+	public Task<(int ExitCode, string Output, string Error)> IntegrationStartAsync(params string[] args) =>
+		TestEnvironment.RunInDirectoryAsync(Root, ["integration", "start", .. args]);
 
 	/// <summary>Runs an agent over <c>&lt;component&gt;@v0</c> that writes <paramref name="content"/> to a file, and returns the run id.</summary>
 	public async Task<string> RunWritingAsync(string component, string file, string content)
 	{
-		var (exitCode, output, error) = await AgentAsync("-select", $"{component}@v0", "-run", TestEnvironment.WriteFileCommand($"{component}/{file}", content));
+		var (exitCode, output, error) = await RunStartAsync("-select", $"{component}@v0", "-run", TestEnvironment.WriteFileCommand($"{component}/{file}", content));
 		Assert.True(exitCode == 0, error);
 		return TestEnvironment.RunIdOf(output);
 	}

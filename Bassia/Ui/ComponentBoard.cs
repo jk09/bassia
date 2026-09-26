@@ -1,5 +1,7 @@
 namespace Bassia.Ui;
 
+using Bassia.Git;
+
 /// <summary>
 /// What the components wallboard shows about one component beyond its registration. The git-derived parts are
 /// read once per refresh, not per repaint: the board animates, but a component's tags do not change four times
@@ -8,6 +10,36 @@ namespace Bassia.Ui;
 internal sealed record ComponentStatus(ComponentDefinition Definition, bool HasRepo, int AnnotatedTags, int Branches, string? LatestTag, int RecordedRuns)
 {
 	public string Name => Definition.Name;
+
+	/// <summary>The status of every registered component; <paramref name="runs"/> are the recorded runs to count.</summary>
+	public static async Task<IReadOnlyList<ComponentStatus>> ReadAllAsync(Monorepo monorepo, IReadOnlyList<RunMetadata> runs)
+	{
+		var statuses = new List<ComponentStatus>();
+		foreach (var component in monorepo.Components)
+		{
+			var recorded = runs.Count(run => run.Components.Any(entry => entry.Name == component.Name));
+			var sourceDir = monorepo.SourceRepoDir(component.Name);
+			if (!Directory.Exists(sourceDir))
+			{
+				statuses.Add(new ComponentStatus(component, HasRepo: false, 0, 0, null, recorded));
+				continue;
+			}
+
+			try
+			{
+				var refs = await GitRef.ListAsync(GitClient.In(sourceDir));
+				var tags = refs.Where(reference => reference.Kind == GitRefKind.AnnotatedTag).ToList();
+				statuses.Add(new ComponentStatus(component, HasRepo: true, tags.Count,
+					refs.Count(reference => reference.Kind == GitRefKind.Branch), tags.LastOrDefault()?.Name, recorded));
+			}
+			catch (GitException)
+			{
+				statuses.Add(new ComponentStatus(component, HasRepo: false, 0, 0, null, recorded));
+			}
+		}
+
+		return statuses;
+	}
 }
 
 /// <summary>
@@ -64,9 +96,18 @@ internal sealed class ComponentBoard
 	{
 		if (components.Count == 0)
 		{
-			return "[grey](no components registered; run 'bassia add-component <url>' first)[/]";
+			return "[grey](no components registered; run 'bassia component add -url <url>' first)[/]";
 		}
 
+		return Draw(selected, activeRuns).ToMarkup();
+	}
+
+	/// <summary>The board as plain ASCII, without a selection: the picture <c>bassia graph</c> prints.</summary>
+	public string RenderAscii(IReadOnlyDictionary<string, int> activeRuns) =>
+		components.Count == 0 ? "(no components registered)" : Draw(-1, activeRuns).ToAscii();
+
+	private CharCanvas Draw(int selected, IReadOnlyDictionary<string, int> activeRuns)
+	{
 		var canvas = new CharCanvas(Width, height);
 
 		// Edges first: a card is opaque, so a line that would cut through a rectangle disappears under it.
@@ -82,7 +123,7 @@ internal sealed class ComponentBoard
 			DrawCard(canvas, component, i == selected, active);
 		}
 
-		return canvas.ToMarkup();
+		return canvas;
 	}
 
 	private void DrawReferences(CharCanvas canvas, ComponentDefinition component)

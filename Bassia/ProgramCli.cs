@@ -1,102 +1,103 @@
 namespace Bassia;
 
 using System.ComponentModel;
+using Bassia.Cli;
 using Bassia.CliCommands.Agent;
-
-
 using Bassia.Git;
-using PowerArgs;
+using Bassia.Integration;
 
 internal static class ProgramCli
 {
-	// bassia's subcommands (commit, add-component, agent) parse their own arguments by hand: their grammars - nested
-	// subcommands, "-run" swallowing the rest of the command line verbatim - don't fit PowerArgs' declarative
-	// argument binding. PowerArgs' action framework is used only to route the first argument to the matching
-	// CliActions method below, which then reads its share of the untouched original arguments from here. Only
-	// that first token is ever handed to PowerArgs: giving it the subcommand's own arguments too makes it parse
-	// them against the (parameterless) action method, which throws UnexpectedArgException on inputs its
-	// declarative binder can't make sense of - e.g. a bare token with no preceding flag, which is exactly what a
-	// shell produces when it flattens a comma-separated array argument (`-select 'a', 'b'`) into extra words.
-	private static string[] rawArgs = [];
-	private static int exitCode;
-
+	/// <summary>
+	/// Runs one command line: <c>bassia [-C &lt;path&gt;] &lt;command&gt; [&lt;subcommand&gt;] [-switch [value]]...</c>. The command
+	/// and its subcommand are looked up in <see cref="CommandTable"/>, the rest is parsed against that command's
+	/// switches, and the handler prints a TOML result. Exit codes: 0 success, 1 failure, 2 a command line that does
+	/// not parse (an unknown command, subcommand or switch, or a missing value).
+	/// </summary>
 	public static async Task<int> RunAsync(string[] args)
 	{
 		var (remainingArgs, workingDirectoryError) = ConsumeWorkingDirectoryOption(args);
 		if (workingDirectoryError is not null)
 		{
-			Console.Error.WriteLine(workingDirectoryError);
-			return 2;
+			return UsageError("bassia", workingDirectoryError);
 		}
 
 		args = remainingArgs;
-
 		if (args.Length == 0 || IsHelp(args[0]))
 		{
-			PrintHelp();
-			return 0;
+			return Help.Show(args.Skip(1).ToList());
 		}
 
-		rawArgs = args;
-		exitCode = 0;
+		var name = args[0];
+		if (CommandTable.Replaced.TryGetValue(name, out var replacement))
+		{
+			return UsageError(name.ToLowerInvariant(), $"{replacement} Run 'bassia help' for every command.");
+		}
+
+		var group = CommandTable.Group(name);
+		if (group.Count == 0)
+		{
+			return UsageError(name.ToLowerInvariant(), $"Unknown command '{name.ToLowerInvariant()}'. Run 'bassia help' for every command.");
+		}
+
+		CommandSpec spec;
+		var rest = args[1..];
+		if (group.Count == 1 && group[0].Sub is null)
+		{
+			spec = group[0];
+		}
+		else
+		{
+			var subcommands = string.Join(", ", group.Select(command => command.Sub));
+			if (rest.Length == 0 || IsHelp(rest[0]))
+			{
+				return Help.Show([group[0].Name]);
+			}
+
+			spec = group.FirstOrDefault(command => string.Equals(command.Sub, rest[0], StringComparison.OrdinalIgnoreCase))!;
+			if (spec is null)
+			{
+				return UsageError(group[0].Name, $"'bassia {group[0].Name}' has no subcommand '{rest[0]}'; it has {subcommands}. Run 'bassia help {group[0].Name}'.");
+			}
+
+			rest = rest[1..];
+		}
+
+		if (spec.Name == "help")
+		{
+			return Help.Show(rest.Where(word => !IsHelp(word) && word != "-command" && word != "--command").ToList());
+		}
 
 		try
 		{
-			await Args.InvokeActionAsync<CliActions>(args[0]);
-			return exitCode;
+			var invocation = Invocation.Parse(spec, rest);
+			return invocation.HelpRequested
+				? Help.Show(spec.Sub is null ? [spec.Name] : [spec.Name, spec.Sub])
+				: await spec.Handler(invocation);
 		}
-		catch (UnknownActionArgException)
+		catch (CliUsageException ex)
 		{
-			return UnknownCommand(args[0].ToLowerInvariant());
+			return UsageError(ex.Command, ex.Message);
 		}
 		catch (Win32Exception)
 		{
-			Console.Error.WriteLine("Git was not found. Install Git and ensure it is available on PATH.");
-			return 1;
+			return WriteResult(false, spec.FullName, "Git was not found. Install Git and ensure it is available on PATH.");
+		}
+		catch (Exception ex) when (IsReportable(ex))
+		{
+			return WriteResult(false, spec.FullName, ex.Message);
 		}
 	}
 
-	// PowerArgs' action framework: matches bassia's first command-line argument (case-insensitively) to one of
-	// these methods. AllowUnexpectedArgs lets the rest of the command line - including "-"-prefixed tokens such
-	// as commit's "-m" or agent's "-select"/"-run" - pass through unvalidated, since SubArgs() below hands it to
-	// the same hand-written parsers the CLI used before this rewrite. Each action delegates to its own service
-	// class, which constructs whatever GitClient it needs itself.
-	[AllowUnexpectedArgs, ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
-	public sealed class CliActions
+	/// <summary>The failures a command reports as its TOML error rather than as a crash.</summary>
+	internal static bool IsReportable(Exception ex) =>
+		ex is AgentException or MonorepoException or GitException or IntegrationException or IOException or UnauthorizedAccessException;
+
+	/// <summary>A command line that does not parse: a TOML error on stderr, exit code 2.</summary>
+	internal static int UsageError(string command, string message)
 	{
-		[ArgActionMethod, ArgDescription("Show the working tree status")]
-		public Task Status() => RecordAsync(StatusCommand.RunAsync());
-
-		[ArgActionMethod, ArgDescription("Show the latest commits")]
-		public Task Log() => RecordAsync(LogCommand.RunAsync());
-
-		[ArgActionMethod, ArgDescription("List local branches")]
-		public Task Branch() => RecordAsync(BranchCommand.RunAsync());
-
-		[ArgActionMethod, ArgDescription("Create a commit")]
-		public Task Commit() => RecordAsync(CommitCommand.RunAsync(SubArgs()));
-
-		[ArgActionMethod, ArgDescription("Initialize a Bassia monorepo")]
-		public Task Init() => RecordAsync(InitCommand.RunAsync(SubArgs()));
-
-		[ArgActionMethod, ArgShortcut("add-component"), ArgDescription("Register a component")]
-		public Task AddComponent() => RecordAsync(AddComponentCommand.RunAsync(SubArgs()));
-
-		[ArgActionMethod, ArgDescription("Materialize selected components and run an agentic command over them")]
-		public Task Agent() => RecordAsync(AgentCommand.RunAsync(SubArgs()));
-
-		[ArgActionMethod, ArgDescription("Integrate the results of agentic runs")]
-		public Task Integrate() => RecordAsync(IntegrateCommand.RunAsync(SubArgs()));
-
-		[ArgActionMethod, ArgDescription("Serve the web dashboard")]
-		public Task Web() => RecordAsync(WebCommand.RunAsync(SubArgs()));
-
-		[ArgActionMethod, ArgDescription("Open the interactive frontend")]
-		public Task Ui() => RecordAsync(UiCommand.RunAsync());
-
-		private static string[] SubArgs() => rawArgs[1..];
-
-		private static async Task RecordAsync(Task<int> command) => exitCode = await command;
+		WriteResult(false, command, message);
+		return 2;
 	}
 
 	internal static int WriteResult(bool ok, string command, string message, IReadOnlyDictionary<string, object?>? data = null)
@@ -112,6 +113,11 @@ internal static class ProgramCli
 		{
 			foreach (var (key, value) in data)
 			{
+				if (payload.ContainsKey(key) || key is "ok" or "command" or "message" or "error")
+				{
+					throw new InvalidOperationException($"A result's data may not set '{key}', which every result reserves.");
+				}
+
 				payload[key] = value;
 			}
 		}
@@ -129,22 +135,6 @@ internal static class ProgramCli
 		return ok ? 0 : 1;
 	}
 
-	internal static async Task<int> RunGitAsync(GitClient git, IReadOnlyList<string> arguments)
-	{
-		var result = await git.RunAsync(arguments);
-		if (!string.IsNullOrEmpty(result.Output))
-		{
-			Console.Write(result.Output);
-		}
-
-		if (result.ExitCode != 0 && !string.IsNullOrEmpty(result.Error))
-		{
-			Console.Error.Write(result.Error);
-		}
-
-		return result.ExitCode;
-	}
-
 	// Mirrors "git -C <path>": run as if bassia had started in <path>. May repeat; each occurrence resolves
 	// relative to the directory left by the previous one, matching git's chaining behavior.
 	private static (string[] Args, string? Error) ConsumeWorkingDirectoryOption(string[] args)
@@ -154,7 +144,7 @@ internal static class ProgramCli
 		{
 			if (index + 1 >= args.Length)
 			{
-				return (args, "Usage: bassia -C <path> <command> ...");
+				return (args, "-C requires a path. Usage: bassia -C <path> <command> ...");
 			}
 
 			var path = args[index + 1];
@@ -179,49 +169,5 @@ internal static class ProgramCli
 		return (args[index..], null);
 	}
 
-	private static bool IsHelp(string argument) => argument is "-h" or "--help" or "help";
-
-	private static int UnknownCommand(string command)
-	{
-		Console.Error.WriteLine($"Unknown command '{command}'. Run 'bassia --help' for usage.");
-		return 2;
-	}
-
-	private static void PrintHelp()
-	{
-		Console.WriteLine("bassia - a Git-based version control CLI");
-		Console.WriteLine();
-		Console.WriteLine("Usage: bassia [-C <path>] <command>");
-		Console.WriteLine();
-		Console.WriteLine("  -C <path>              Run as if bassia was started in <path> instead of the current directory");
-		Console.WriteLine();
-		Console.WriteLine("Commands:");
-		Console.WriteLine("  status                 Show the working tree status");
-		Console.WriteLine("  log                    Show the latest commits");
-		Console.WriteLine("  branch                 List local branches");
-		Console.WriteLine("  commit -m \"message\"  Create a commit");
-		Console.WriteLine("  init [directory]       Initialize a Bassia monorepo (default: the current empty folder)");
-		Console.WriteLine("  add-component <url> [name]");
-		Console.WriteLine("                         Clone a repo as a bare Bassia monorepo component");
-		Console.WriteLine("  agent -select <component@tag>[,<component@tag>...] -run <command>");
-		Console.WriteLine("                         Materialize the selected components (the full reference closure,");
-		Console.WriteLine("                         each at an annotated tag) in an isolated run folder, run the agent");
-		Console.WriteLine("                         command there, then commit, tag and push the results");
-		Console.WriteLine("  agent retry <run-id>   Retry committing/pushing components that failed in a previous run");
-		Console.WriteLine("  agent abandon <run-id> Discard a run's folder (sources of truth are untouched)");
-		Console.WriteLine("  integrate -runs <run-id>[,...]|all [-onto <component@ref>[,...]] [-plan] [-resolve <command>]");
-		Console.WriteLine("                         Merge the runs' result tags per component: git's syntax-based merge");
-		Console.WriteLine("                         first, then an LLM resolver with a semantic brief for the conflicts;");
-		Console.WriteLine("                         tags the result integration/<id>/<n> in every component");
-		Console.WriteLine("  integrate advance <integration-id>");
-		Console.WriteLine("                         Fast-forward each component's base branch to the integration");
-		Console.WriteLine("  ui                     Open the interactive frontend: a components board with the");
-		Console.WriteLine("                         dependency graph, a live board of the agentic runs, tagging,");
-		Console.WriteLine("                         and starting or stopping runs in the background");
-		Console.WriteLine("  web [--port <n>] [--no-open]");
-		Console.WriteLine("                         Serve the web dashboard on 127.0.0.1 (default port 8080): components");
-		Console.WriteLine("                         and their graph, a timeline across dependent components, agentic runs");
-		Console.WriteLine("                         started from a prompt and streamed live, and integrations");
-		Console.WriteLine("  help                   Show this help");
-	}
+	private static bool IsHelp(string argument) => argument is "-h" or "--help" or "-help" or "help";
 }

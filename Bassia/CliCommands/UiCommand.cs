@@ -1,5 +1,6 @@
 namespace Bassia;
 
+using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
 using Bassia.Integration;
@@ -9,7 +10,7 @@ using Spectre.Console;
 /// <summary><c>bassia ui</c>: the interactive frontend over the monorepo the current directory belongs to.</summary>
 internal static class UiCommand
 {
-	public static async Task<int> RunAsync()
+	public static async Task<int> RunAsync(Invocation invocation)
 	{
 		var root = Monorepo.FindRoot(Environment.CurrentDirectory);
 		if (root is null)
@@ -35,9 +36,9 @@ internal static class UiCommand
 		var git = new GitClient(root);
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
 		using var supervisor = new RunSupervisor(
-			(select, command, context) => AgentCommand.StartRunAsync(git, monorepo, select, command, context));
+			(select, command, context) => RunCommands.StartHostedAsync(git, monorepo, select, command, context));
 		using var integrations = new IntegrationSupervisor(
-			(runs, plan, resolver, context) => IntegrationRunner.RunAsync(git, monorepo, runs, plan, resolver, context));
+			(runs, plan, resolver, context) => IntegrationCommands.StartHostedAsync(git, monorepo, runs, plan, resolver, context));
 		var session = new InteractiveSession(AnsiConsole.Console, monorepo, store, supervisor, integrations);
 
 		// Prompts hide the cursor while they run; make sure Ctrl-C doesn't leave the terminal without one.

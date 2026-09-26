@@ -1,12 +1,18 @@
 namespace Bassia;
 
+using Bassia.Cli;
 using Bassia.Git;
 
 /// <summary><c>bassia init</c>: initializes a Bassia monorepo.</summary>
 internal static class InitCommand
 {
 	private const string DefaultConfigToml =
-		"# Bassia meta-repo configuration\n" +
+		"# Bassia meta-repo configuration. Read and change it with 'bassia config list|get|set'.\n" +
+		"\n" +
+		"[agent]\n" +
+		"# Agent command of a run started from a prompt ('bassia run start -prompt ...', 'bassia ui', 'bassia web');\n" +
+		"# the prompt is appended as one quoted argument.\n" +
+		"command = \"" + Monorepo.DefaultAgentCommand + "\"\n" +
 		"\n" +
 		"[agent.commit]\n" +
 		"# Subject line of the commits an agentic run makes in a component. The body is always a TOML record of the run.\n" +
@@ -14,7 +20,7 @@ internal static class InitCommand
 		"subject = \"" + Monorepo.DefaultCommitSubject + "\"\n" +
 		"\n" +
 		"[integration]\n" +
-		"# Command that resolves a semantic merge during 'bassia integrate'. It runs in the component's working tree with the\n" +
+		"# Command that resolves a semantic merge during 'bassia integration start'. It runs in the component's working tree with the\n" +
 		"# merge brief on stdin (and its path in BASSIA_MERGE_BRIEF), and must leave the merge resolved but uncommitted.\n" +
 		"resolver = \"" + Monorepo.DefaultResolver + "\"\n";
 
@@ -25,14 +31,9 @@ internal static class InitCommand
 		"# name = \"component_1\"\n" +
 		"# url = \"https://github.com/myrepo/component_1.git\"\n";
 
-	public static async Task<int> RunAsync(string[] args)
+	public static async Task<int> RunAsync(Invocation invocation)
 	{
-		if (args.Length > 1)
-		{
-			return ProgramCli.WriteResult(false, "init", "Usage: bassia init [directory]");
-		}
-
-		var root = Path.GetFullPath(args.Length == 1 ? args[0] : Environment.CurrentDirectory);
+		var root = Path.GetFullPath(invocation.Get("path") ?? Environment.CurrentDirectory);
 		var metaRepoDir = Path.Combine(root, ".bassia");
 		var workspaceDir = Path.Combine(root, ".workspace");
 
@@ -43,7 +44,7 @@ internal static class InitCommand
 
 		if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
 		{
-			return ProgramCli.WriteResult(false, "init", $"'{root}' is not empty. Run 'bassia init' in an empty folder or volume.");
+			return ProgramCli.WriteResult(false, "init", $"'{root}' is not empty. Run 'bassia init' in an empty folder or volume, or name one with -path.");
 		}
 
 		Directory.CreateDirectory(metaRepoDir);
@@ -65,10 +66,11 @@ internal static class InitCommand
 			return ProgramCli.WriteResult(false, "init", $"git commit failed: {commitResult.Error.Trim()}");
 		}
 
-		return ProgramCli.WriteResult(true, "init", $"Initialized Bassia monorepo at '{root}'.", new Dictionary<string, object?>
+		return ProgramCli.WriteResult(true, "init", $"Initialized Bassia monorepo at '{root}'. Add components with 'bassia component add -url <url>'.", new Dictionary<string, object?>
 		{
 			["path"] = root,
-			["meta_repo"] = metaRepoDir
+			["meta_repo"] = metaRepoDir,
+			["workspace"] = workspaceDir
 		});
 	}
 }

@@ -8,7 +8,9 @@ public class ProgramCliTests
 		var (exitCode, output, error) = await TestEnvironment.RunAsync();
 
 		Assert.Equal(0, exitCode);
-		Assert.Contains("bassia - a Git-based version control CLI", output);
+		Assert.StartsWith(TomlResult.Marker, output);
+		Assert.Contains("command = \"help\"", output);
+		Assert.Contains("bassia - a Git-based monorepo", output);
 		Assert.Empty(error);
 	}
 
@@ -21,7 +23,7 @@ public class ProgramCliTests
 		var (exitCode, output, _) = await TestEnvironment.RunAsync(helpArgument);
 
 		Assert.Equal(0, exitCode);
-		Assert.Contains("Usage: bassia [-C <path>] <command>", output);
+		Assert.Contains("usage = \"bassia [-C <path>] <command> [<subcommand>]", output);
 	}
 
 	[Fact]
@@ -33,13 +35,18 @@ public class ProgramCliTests
 		Assert.Contains("Unknown command 'frobnicate'", error);
 	}
 
-	[Fact]
-	public async Task RunAsync_CommitWithoutMessage_ReturnsUsageError()
+	[Theory]
+	[InlineData("commit", "'bassia commit' was removed")]
+	[InlineData("branch", "'bassia component show -name <component>'")]
+	[InlineData("agent", "'bassia run start -select <component@tag,...> -run <command>'")]
+	[InlineData("add-component", "'bassia component add -url <url> [-name <name>]'")]
+	[InlineData("integrate", "'bassia integration plan|start|advance'")]
+	public async Task RunAsync_ReplacedCommand_FailsNamingItsSuccessor(string command, string successor)
 	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("commit");
+		var (exitCode, _, error) = await TestEnvironment.RunAsync(command, "-m", "x");
 
 		Assert.Equal(2, exitCode);
-		Assert.Contains("Usage: bassia commit -m", error);
+		Assert.Contains(successor, error);
 	}
 
 	[Fact]
@@ -127,16 +134,16 @@ public class ProgramCliTests
 		var (exitCode, _, error) = await TestEnvironment.RunAsync("-C");
 
 		Assert.Equal(2, exitCode);
-		Assert.Contains("Usage: bassia -C <path>", error);
+		Assert.Contains("-C requires a path", error);
 	}
 
 	[Fact]
 	public async Task RunAsync_AddComponentWithoutArguments_ReturnsUsageError()
 	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("add-component");
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("component", "add");
 
-		Assert.Equal(1, exitCode);
-		Assert.Contains("Usage: bassia add-component", error);
+		Assert.Equal(2, exitCode);
+		Assert.Contains("Usage: bassia component add -url <url>", error);
 	}
 
 	[Fact]
@@ -145,10 +152,10 @@ public class ProgramCliTests
 		using var workspace = new TempDirectory();
 
 		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(
-			workspace.Path, "add-component", "https://example.invalid/component_1.git");
+			workspace.Path, "component", "add", "-url", "https://example.invalid/component_1.git");
 
 		Assert.Equal(1, exitCode);
-		Assert.Contains("is not a Bassia monorepo", error);
+		Assert.Contains("is not inside a Bassia monorepo", error);
 	}
 
 	[Fact]
@@ -165,7 +172,7 @@ public class ProgramCliTests
 		await TestEnvironment.GitAsync(upstream, "add", "--all");
 		await TestEnvironment.GitAsync(upstream, "commit", "--quiet", "-m", "Initial commit");
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "add-component", upstream, "component_1");
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(workspace.Path, "component", "add", upstream, "-name", "component_1");
 		Assert.True(exitCode == 0, error);
 
 		var metaRepoDir = Path.Combine(workspace.Path, ".bassia");

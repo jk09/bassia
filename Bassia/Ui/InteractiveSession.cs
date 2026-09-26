@@ -19,7 +19,7 @@ using Spectre.Console;
 /// </summary>
 internal sealed class InteractiveSession
 {
-	public const string DefaultAgentCommand = "claude -p --permission-mode acceptEdits";
+	public const string DefaultAgentCommand = Monorepo.DefaultAgentCommand;
 
 	/// <summary>
 	/// Lifecycle actions the run model does not support yet. <c>Stop</c> used to be among them, and so did
@@ -47,7 +47,7 @@ internal sealed class InteractiveSession
 	private bool quit;
 	private string? notice;
 	private string noticeStyle = "yellow";
-	private string agentCommand = DefaultAgentCommand;
+	private string agentCommand;
 	private IReadOnlyList<ComponentStatus> componentStatus = [];
 	private IReadOnlyList<RunMetadata> storedRuns = [];
 
@@ -66,6 +66,7 @@ internal sealed class InteractiveSession
 	{
 		this.console = console;
 		this.monorepo = monorepo;
+		agentCommand = monorepo.AgentCommand;
 		this.store = store;
 		this.supervisor = supervisor;
 		this.integrations = integrations;
@@ -444,31 +445,7 @@ internal sealed class InteractiveSession
 		await ReloadRunsAsync();
 		await ReplanAsync();
 
-		var statuses = new List<ComponentStatus>();
-		foreach (var component in monorepo.Components)
-		{
-			var runs = storedRuns.Count(run => run.Components.Any(entry => entry.Name == component.Name));
-			var sourceDir = monorepo.SourceRepoDir(component.Name);
-			if (!Directory.Exists(sourceDir))
-			{
-				statuses.Add(new ComponentStatus(component, HasRepo: false, 0, 0, null, runs));
-				continue;
-			}
-
-			try
-			{
-				var refs = await GitRef.ListAsync(GitClient.In(sourceDir));
-				var tags = refs.Where(reference => reference.Kind == GitRefKind.AnnotatedTag).ToList();
-				statuses.Add(new ComponentStatus(component, HasRepo: true, tags.Count,
-					refs.Count(reference => reference.Kind == GitRefKind.Branch), tags.LastOrDefault()?.Name, runs));
-			}
-			catch (GitException)
-			{
-				statuses.Add(new ComponentStatus(component, HasRepo: false, 0, 0, null, runs));
-			}
-		}
-
-		componentStatus = statuses;
+		componentStatus = await ComponentStatus.ReadAllAsync(monorepo, storedRuns);
 	}
 
 	private async Task ReloadRunsAsync()
@@ -491,14 +468,14 @@ internal sealed class InteractiveSession
 	{
 		if (SelectedComponent() is not { } selected)
 		{
-			Notify("No components are registered; run 'bassia add-component <url>' first.");
+			Notify("No components are registered; run 'bassia component add -url <url>' first.");
 			return;
 		}
 
 		var sourceDir = monorepo.SourceRepoDir(selected.Name);
 		if (!Directory.Exists(sourceDir))
 		{
-			await ShowErrorAsync($"Component '{selected.Name}' has no local repository at '{sourceDir}'. Run 'bassia add-component' first.");
+			await ShowErrorAsync($"Component '{selected.Name}' has no local repository at '{sourceDir}'. Run 'bassia component add' first.");
 			return;
 		}
 
@@ -598,7 +575,7 @@ internal sealed class InteractiveSession
 		var sourceDir = monorepo.SourceRepoDir(selected.Name);
 		if (!Directory.Exists(sourceDir))
 		{
-			await ShowErrorAsync($"Component '{selected.Name}' has no local repository at '{sourceDir}'. Run 'bassia add-component' first.");
+			await ShowErrorAsync($"Component '{selected.Name}' has no local repository at '{sourceDir}'. Run 'bassia component add' first.");
 			return;
 		}
 
@@ -743,7 +720,7 @@ internal sealed class InteractiveSession
 				WriteComponents(metadata);
 				if (metadata.Status == "partial")
 				{
-					console.MarkupLine($"[yellow]Some components failed:[/] run [bold]bassia agent retry {metadata.RunId}[/] or [bold]bassia agent abandon {metadata.RunId}[/].");
+					console.MarkupLine($"[yellow]Some components failed:[/] run [bold]bassia run retry {RunMetadata.ShortKey(metadata.RunId)}[/] or [bold]bassia run abandon {RunMetadata.ShortKey(metadata.RunId)}[/].");
 				}
 			}
 
@@ -836,7 +813,7 @@ internal sealed class InteractiveSession
 		Screen("Start an agentic run", "select components at annotated tags, then describe the task");
 		if (monorepo.Components.Count == 0)
 		{
-			await ShowErrorAsync("No components are registered; run 'bassia add-component' first.");
+			await ShowErrorAsync("No components are registered; run 'bassia component add' first.");
 			return;
 		}
 
@@ -854,7 +831,7 @@ internal sealed class InteractiveSession
 			var sourceDir = monorepo.SourceRepoDir(component.Name);
 			if (!Directory.Exists(sourceDir))
 			{
-				await ShowErrorAsync($"Component '{component.Name}' has no local repository at '{sourceDir}'. Run 'bassia add-component' first.");
+				await ShowErrorAsync($"Component '{component.Name}' has no local repository at '{sourceDir}'. Run 'bassia component add' first.");
 				return;
 			}
 
@@ -880,7 +857,7 @@ internal sealed class InteractiveSession
 		var command = await console.PromptAsync(new TextPrompt<string>("Command to run [grey](edit if needed)[/]:")
 			.DefaultValue(ComposeCommand(agentCommand, model, effort, prompt, context)));
 
-		console.Write(new Panel($"[bold]bassia agent -select[/] {Markup.Escape(select)} [bold]-run[/] {Markup.Escape(command)}").Border(BoxBorder.Rounded));
+		console.Write(new Panel($"[bold]bassia run start -select[/] {Markup.Escape(select)} [bold]-run[/] {Markup.Escape(command)}").Border(BoxBorder.Rounded));
 		if (!await console.PromptAsync(new ConfirmationPrompt("Start this run?")))
 		{
 			return;

@@ -31,6 +31,6 @@ public class UiCommandTests
 	{
 		var (_, output, _) = await TestEnvironment.RunAsync("help");
 
-		Assert.Contains("  ui ", output);
+		Assert.Contains("name = \"ui\"", output);
 	}
 }

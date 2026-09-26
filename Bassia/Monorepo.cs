@@ -31,6 +31,9 @@ internal sealed class Monorepo
 	/// </summary>
 	public const string DefaultResolver = "claude -p --permission-mode acceptEdits";
 
+	/// <summary>Agent command a run composed from a prompt starts with (<c>bassia run start -prompt</c>, the frontends).</summary>
+	public const string DefaultAgentCommand = "claude -p --permission-mode acceptEdits";
+
 	public string Root { get; }
 	public string MetaRepoDir => Path.Combine(Root, MetaRepoFolderName);
 
@@ -46,6 +49,9 @@ internal sealed class Monorepo
 	/// <summary>Command that resolves a semantic merge. Configurable via <c>[integration] resolver</c> in <c>config.toml</c>.</summary>
 	public string Resolver { get; }
 
+	/// <summary>Agent command for runs composed from a prompt. Configurable via <c>[agent] command</c> in <c>config.toml</c>.</summary>
+	public string AgentCommand { get; }
+
 	/// <summary>
 	/// Bare repo (<c>.agentic-runs/.git</c>) that stores agentic run metadata. It lives at the monorepo root,
 	/// next to <c>.bassia</c> and <c>.workspace</c>, not inside either of them: it isn't meta-repo content (so it
@@ -57,12 +63,13 @@ internal sealed class Monorepo
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, IReadOnlyList<ComponentDefinition> components)
+	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string agentCommand, IReadOnlyList<ComponentDefinition> components)
 	{
 		Root = root;
 		WorkspaceDir = workspaceDir;
 		CommitSubject = commitSubject;
 		Resolver = resolver;
+		AgentCommand = agentCommand;
 		Components = components;
 	}
 
@@ -107,8 +114,15 @@ internal sealed class Monorepo
 			resolver = configuredResolver;
 		}
 
+		var agentCommand = DefaultAgentCommand;
+		if (config.TryGetValue("agent", out var agentTable) && agentTable is TomlTable agentConfig
+			&& agentConfig.TryGetValue("command", out var commandValue) && commandValue is string configuredCommand && !string.IsNullOrWhiteSpace(configuredCommand))
+		{
+			agentCommand = configuredCommand;
+		}
+
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, commitSubject, resolver, components);
+		return new Monorepo(root, workspaceDir, commitSubject, resolver, agentCommand, components);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>
@@ -116,7 +130,7 @@ internal sealed class Monorepo
 
 	/// <summary>
 	/// Source-of-truth repository of a component: the folder next to the meta-repo, holding either a bare
-	/// <c>.git</c> (as created by <c>add-component</c>) or a regular clone. Git resolves both.
+	/// <c>.git</c> (as created by <c>component add</c>) or a regular clone. Git resolves both.
 	/// </summary>
 	public string SourceRepoDir(string componentName) => Path.Combine(Root, componentName);
 

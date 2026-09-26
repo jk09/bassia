@@ -4,91 +4,37 @@ using Bassia;
 using Bassia.Git;
 
 /// <summary>
-/// <c>bassia agent</c>: materializes a selected monorepo state in an isolated workspace area, runs an agent
+/// <c>bassia run start</c>: materializes a selected monorepo state in an isolated workspace area, runs an agent
 /// command there, and commits/tags/pushes the resulting component changes back to the source-of-truth repos.
 /// </summary>
 internal static class AgentCommand
 {
-	public static async Task<int> RunAsync(string[] args)
-	{
-		if (args.Length == 0 || args[0] is "-h" or "--help" or "help")
-		{
-			return ProgramCli.WriteResult(false, "agent", Usage);
-		}
-
-		var git = new GitClient(Environment.CurrentDirectory);
-
-		try
-		{
-			return args[0].ToLowerInvariant() switch
-			{
-				"retry" => await RetryAsync(git, args[1..]),
-				"abandon" => await AbandonAsync(git, args[1..]),
-				_ => await StartAsync(git, args)
-			};
-		}
-		catch (Exception ex) when (ex is AgentException or MonorepoException or GitException or IOException or UnauthorizedAccessException)
-		{
-			return ProgramCli.WriteResult(false, "agent", ex.Message);
-		}
-	}
-
-	private const string Usage =
-		"Usage: bassia agent -select <component@tag>[,<component@tag>...] -run <agent command>\n" +
-		"       bassia agent retry <run-id>\n" +
-		"       bassia agent abandon <run-id>";
-
-	private static Monorepo LoadMonorepo()
+	public static Monorepo LoadMonorepo()
 	{
 		var root = Monorepo.FindRoot(Environment.CurrentDirectory)
 			?? throw new AgentException($"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' first.");
 		return Monorepo.Load(root);
 	}
 
-	// ----- bassia agent -select ... -run ... -----
-
-	private static async Task<int> StartAsync(GitClient git, string[] args)
-	{
-		var (select, command) = ParseStartArguments(args);
-		var outcome = await StartRunAsync(git, LoadMonorepo(), select, command);
-		return ProgramCli.WriteResult(outcome.Ok, "agent", outcome.Message, ResultData(outcome.Metadata, outcome.Store, outcome.MetadataTags));
-	}
+	// ----- bassia run start -select ... -run ... -----
 
 	/// <summary>
-	/// The full <c>bassia agent -select ... -run ...</c> sequence, shared by the CLI and the interactive frontend.
-	/// <paramref name="context"/> is how a caller watches and interrupts the run; without one the sequence behaves
-	/// exactly as the CLI always has (see <see cref="AgentRunContext"/>).
+	/// The full <c>bassia run start -select ... -run ...</c> sequence, shared by the CLI and the frontends.
+	/// <paramref name="context"/> is how a caller watches and interrupts the run; without one the sequence reports on
+	/// stderr and lets the agent inherit the console (see <see cref="AgentRunContext"/>). <paramref name="runId"/>
+	/// is given when the id had to be known before the run starts - a detached run reports it straight away.
 	/// </summary>
-	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null)
+	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null, string? runId = null)
 	{
 		var cancellation = context?.Cancellation ?? CancellationToken.None;
-		var selected = ComponentSelection.ParseList("-select", select);
-		foreach (var selection in selected)
-		{
-			if (monorepo.FindComponent(selection.Component) is null)
-			{
-				throw new AgentException($"Component '{selection.Component}' is not registered in components.toml.");
-			}
-		}
-
-		var closure = monorepo.Closure(selected.Select(selection => selection.Component));
-		RequireCompleteClosure(selected, closure);
-
-		// Resolve every commit-ish before touching the filesystem, so a bad selection leaves no trace.
-		var commitIshByName = selected.ToDictionary(selection => selection.Component, selection => selection.CommitIsh, StringComparer.Ordinal);
-		var resolved = new List<(ComponentDefinition Component, string CommitIsh, string Commit)>();
-		foreach (var component in closure)
-		{
-			var commitIsh = commitIshByName[component.Name];
-			resolved.Add((component, commitIsh, await ResolveCommitAsync(monorepo, component.Name, commitIsh)));
-		}
+		var (closure, resolved) = await ResolveSelectionAsync(monorepo, select);
 
 		// Up to here nothing outside git's object database has been touched, so a cancellation simply unwinds.
 		cancellation.ThrowIfCancellationRequested();
 
 		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
 		await store.EnsureRepositoryAsync();
-		var runId = RunMetadata.NewRunId();
+		runId ??= RunMetadata.NewRunId();
 		var runDir = Path.Combine(monorepo.WorkspaceDir, runId);
 		var branch = RunMetadata.RefBase(runId);
 		Directory.CreateDirectory(runDir);
@@ -165,8 +111,44 @@ internal static class AgentCommand
 		var finalTag = await store.CommitAsync(metadata);
 		var ok = metadata.Status == "completed";
 		return new AgentRunOutcome(ok,
-			ok ? CompletedMessage(metadata) : $"Agentic run '{runId}' finished with failures; run 'bassia agent retry {runId}' or 'bassia agent abandon {runId}'.",
+			ok ? CompletedMessage(metadata) : $"Agentic run '{runId}' finished with failures; run 'bassia run retry -id {runId}' or 'bassia run abandon -id {runId}'.",
 			metadata, store, [startTag, finalTag]);
+	}
+
+	/// <summary>
+	/// Checks a <c>-select</c> value and resolves every component's tag to its commit, without touching the
+	/// filesystem: every entry names a registered component and an annotated tag, and the selection covers its own
+	/// reference closure. Returns the closure in dependency order with each component's resolved commit.
+	/// </summary>
+	internal static async Task<(IReadOnlyList<ComponentDefinition> Closure, IReadOnlyList<(ComponentDefinition Component, string CommitIsh, string Commit)> Resolved)>
+		ResolveSelectionAsync(Monorepo monorepo, string select)
+	{
+		var selected = ComponentSelection.ParseList("-select", select);
+		if (selected.Count == 0)
+		{
+			throw new AgentException("-select names no component; expected <component>@<tag>[,<component>@<tag>...].");
+		}
+
+		foreach (var selection in selected)
+		{
+			if (monorepo.FindComponent(selection.Component) is null)
+			{
+				throw new AgentException($"Component '{selection.Component}' is not registered in components.toml.");
+			}
+		}
+
+		var closure = monorepo.Closure(selected.Select(selection => selection.Component));
+		RequireCompleteClosure(selected, closure);
+
+		var commitIshByName = selected.ToDictionary(selection => selection.Component, selection => selection.CommitIsh, StringComparer.Ordinal);
+		var resolved = new List<(ComponentDefinition Component, string CommitIsh, string Commit)>();
+		foreach (var component in closure)
+		{
+			var commitIsh = commitIshByName[component.Name];
+			resolved.Add((component, commitIsh, await ResolveCommitAsync(monorepo, component.Name, commitIsh)));
+		}
+
+		return (closure, resolved);
 	}
 
 	private static string CompletedMessage(RunMetadata metadata)
@@ -180,44 +162,6 @@ internal static class AgentCommand
 		// (e.g. it lacked permission to write) or wrote outside every component checkout.
 		return $"Agentic run '{metadata.RunId}' completed, but the agent command changed no component; nothing was committed. " +
 			$"Check that the command may edit files and that it writes inside a component folder of '{metadata.WorkspacePath}'.";
-	}
-
-	private static (string Select, string Command) ParseStartArguments(string[] args)
-	{
-		string? select = null;
-		string? command = null;
-
-		for (var i = 0; i < args.Length; i++)
-		{
-			switch (args[i])
-			{
-				case "-select":
-					select = string.Join(",", new[] { select, RequireValue(args, ref i) }.Where(value => value is not null));
-					break;
-				case "-run":
-					// -run takes the rest of the command line: either one quoted string or the command's own words.
-					var commandArguments = args[(i + 1)..];
-					if (commandArguments.Length == 0)
-					{
-						throw new AgentException("-run requires the agent command to run.");
-					}
-
-					command = commandArguments.Length == 1
-						? commandArguments[0]
-						: string.Join(' ', commandArguments.Select(argument => argument.Any(char.IsWhiteSpace) ? $"\"{argument}\"" : argument));
-					i = args.Length;
-					break;
-				default:
-					throw new AgentException($"Unknown argument '{args[i]}'.\n{Usage}");
-			}
-		}
-
-		if (string.IsNullOrWhiteSpace(select) || string.IsNullOrWhiteSpace(command))
-		{
-			throw new AgentException($"Both -select and -run are required.\n{Usage}");
-		}
-
-		return (select, command);
 	}
 
 	/// <summary>
@@ -245,16 +189,6 @@ internal static class AgentCommand
 			$"Add each as <component>@<tag>, for example: -select {selected[0].Component}@{selected[0].CommitIsh},{missing[0]}@<tag>.");
 	}
 
-	private static string RequireValue(string[] args, ref int index)
-	{
-		if (index + 1 >= args.Length || string.IsNullOrWhiteSpace(args[index + 1]))
-		{
-			throw new AgentException($"{args[index]} requires a value.");
-		}
-
-		return args[++index];
-	}
-
 	/// <summary>
 	/// Resolves a component's commit in its source-of-truth repo. The commit-ish must be an annotated tag, since it
 	/// is logged as the run's immutable provenance.
@@ -264,7 +198,7 @@ internal static class AgentCommand
 		var sourceDir = monorepo.SourceRepoDir(componentName);
 		if (!Directory.Exists(sourceDir))
 		{
-			throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia add-component' first.");
+			throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia component add' first.");
 		}
 
 		var source = GitClient.In(sourceDir);
@@ -357,7 +291,7 @@ internal static class AgentCommand
 	/// <summary>
 	/// Runs the agent command in the run folder and returns its exit code, or <c>null</c> when it was cancelled and
 	/// its process tree killed. Without <see cref="AgentRunContext.OnOutput"/> the process inherits this console, so
-	/// a caller of <c>bassia agent</c> sees the agent's output as it happens; with one, both pipes are redirected
+	/// a caller of <c>bassia run start</c> sees the agent's output as it happens; with one, both pipes are redirected
 	/// and delivered line by line, which is what lets the frontend run an agent behind a live screen.
 	/// </summary>
 	private static Task<int?> RunAgentProcessAsync(Monorepo monorepo, RunMetadata metadata, AgentRunContext? context) =>
@@ -472,11 +406,11 @@ internal static class AgentCommand
 	private static string OverallStatus(RunMetadata metadata) =>
 		metadata.Components.All(component => component.ResultStatus is ResultStatus.Pushed or ResultStatus.Unchanged) ? "completed" : "partial";
 
-	// ----- bassia agent retry <run-id> -----
+	// ----- bassia run retry / abandon -----
 
-	private static async Task<int> RetryAsync(GitClient git, string[] args)
+	/// <summary>Finishes the commit/tag/push sequence of a run whose earlier attempt failed part-way.</summary>
+	internal static async Task<AgentRunOutcome> RetryAsync(Monorepo monorepo, RunMetadataStore store, RunMetadata metadata)
 	{
-		var (monorepo, store, metadata) = await LoadRunAsync(git, args, "retry");
 		if (metadata.Status is "abandoned")
 		{
 			throw new AgentException($"Agentic run '{metadata.RunId}' was abandoned; nothing to retry.");
@@ -496,16 +430,14 @@ internal static class AgentCommand
 		metadata.Finished = RunMetadata.Timestamp();
 		var tag = await store.CommitAsync(metadata);
 		var ok = metadata.Status == "completed";
-		return ProgramCli.WriteResult(ok, "agent retry",
+		return new AgentRunOutcome(ok,
 			ok ? $"Agentic run '{metadata.RunId}' completed." : $"Agentic run '{metadata.RunId}' still has failed components.",
-			ResultData(metadata, store, [tag]));
+			metadata, store, [tag]);
 	}
 
-	// ----- bassia agent abandon <run-id> -----
-
-	private static async Task<int> AbandonAsync(GitClient git, string[] args)
+	/// <summary>Discards a run's folder and records the run as abandoned; what it pushed stays where it is.</summary>
+	internal static async Task<AgentRunOutcome> AbandonAsync(RunMetadataStore store, RunMetadata metadata)
 	{
-		var (_, store, metadata) = await LoadRunAsync(git, args, "abandon");
 		if (metadata.Status is "abandoned")
 		{
 			throw new AgentException($"Agentic run '{metadata.RunId}' is already abandoned.");
@@ -515,28 +447,22 @@ internal static class AgentCommand
 		metadata.Status = "abandoned";
 		metadata.Finished = RunMetadata.Timestamp();
 		var tag = await store.CommitAsync(metadata);
-		return ProgramCli.WriteResult(true, "agent abandon",
+		return new AgentRunOutcome(true,
 			$"Agentic run '{metadata.RunId}' abandoned; its run folder was discarded. Results already pushed to source-of-truth repos were left in place.",
-			ResultData(metadata, store, [tag]));
+			metadata, store, [tag]);
 	}
 
-	private static async Task<(Monorepo, RunMetadataStore, RunMetadata)> LoadRunAsync(GitClient git, string[] args, string subcommand)
+	/// <summary>Records a run whose process is gone without its final record (killed, crashed) as cancelled.</summary>
+	internal static async Task<string> RecordCancelledAsync(RunMetadataStore store, RunMetadata metadata)
 	{
-		if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
-		{
-			throw new AgentException($"Usage: bassia agent {subcommand} <run-id>");
-		}
-
-		var runId = RunMetadata.NormalizeRunId(args[0]);
-		var monorepo = LoadMonorepo();
-		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
-		var metadata = Directory.Exists(store.RepoDir) ? await store.LoadLatestAsync(runId) : null;
-		return (monorepo, store, metadata ?? throw new AgentException($"Unknown agentic run '{runId}'."));
+		metadata.Status = "cancelled";
+		metadata.Finished ??= RunMetadata.Timestamp();
+		return await store.CommitAsync(metadata);
 	}
 
 	// ----- output -----
 
-	private static Dictionary<string, object?> ResultData(RunMetadata metadata, RunMetadataStore store, IReadOnlyList<string> metadataTags) => new()
+	internal static Dictionary<string, object?> ResultData(RunMetadata metadata, RunMetadataStore store, IReadOnlyList<string> metadataTags) => new()
 	{
 		["run_id"] = metadata.RunId,
 		["status"] = metadata.Status,

@@ -7,7 +7,7 @@ using Tomlyn.Model;
 /// <summary>One progress step of an integration: what happened, and the record as it stands right after it.</summary>
 internal sealed record IntegrationProgress(string Message, IntegrationRecord Snapshot, string? Component, string? RunId);
 
-/// <summary>How a caller watches and interrupts an integration; without one it reports on stderr like <c>bassia agent</c>.</summary>
+/// <summary>How a caller watches and interrupts an integration; without one it reports on stderr like <c>bassia run start</c>.</summary>
 internal sealed class IntegrationContext
 {
 	/// <summary>Stops the integration; a resolver that is working is killed with its process tree.</summary>
@@ -38,7 +38,8 @@ internal static class IntegrationRunner
 		IReadOnlyList<RunMetadata> runs,
 		IReadOnlyList<ComponentIntegration> plan,
 		string resolver,
-		IntegrationContext? context = null)
+		IntegrationContext? context = null,
+		string? id = null)
 	{
 		var cancellation = context?.Cancellation ?? CancellationToken.None;
 		if (plan.Count == 0)
@@ -50,7 +51,7 @@ internal static class IntegrationRunner
 		var store = new IntegrationStore(new RunMetadataStore(git, monorepo.RunsRepoDir));
 		await store.EnsureRepositoryAsync();
 
-		var id = IntegrationRecord.NewId();
+		id ??= IntegrationRecord.NewId();
 		var draft = new IntegrationRecord
 		{
 			IntegrationId = id,
@@ -138,7 +139,7 @@ internal static class IntegrationRunner
 				continue;
 			}
 
-			var update = await source.RunAsync(["update-ref", "-m", $"bassia integrate advance {record.IntegrationId}",
+			var update = await source.RunAsync(["update-ref", "-m", $"bassia integration advance {record.IntegrationId}",
 				$"refs/heads/{component.BaseRef}", component.ResultCommit!, component.BaseCommit]);
 			if (update.ExitCode != 0)
 			{

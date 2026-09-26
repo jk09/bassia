@@ -36,9 +36,9 @@ public class RunMetadataStoreTests
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
-		var (_, first, error) = await monorepo.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var (_, first, error) = await monorepo.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
 		Assert.True(first.Length > 0, error);
-		var (_, _, failedError) = await monorepo.AgentAsync("-select", "example@v0", "-run", TestEnvironment.FailingCommand);
+		var (_, _, failedError) = await monorepo.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.FailingCommand);
 		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepo);
 
 		var runs = await store.ListLatestAsync();

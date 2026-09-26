@@ -136,7 +136,7 @@ public class InteractiveSessionTests
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
-		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var (_, result, error) = await fixture.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
 		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
 		await using var harness = new Harness(fixture).Press('2', 'q');
 
@@ -153,7 +153,7 @@ public class InteractiveSessionTests
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
 		await fixture.AddComponentAsync("other");
-		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var (_, result, error) = await fixture.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
 		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
 
 		await using var touchedHarness = new Harness(fixture).Enter().Press('q', 'q');
@@ -210,7 +210,7 @@ public class InteractiveSessionTests
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
-		var (_, result, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
+		var (_, result, error) = await fixture.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.WriteFileCommand("example/a.txt", "a"));
 		var runId = TestEnvironment.RunIdOf(result.Length > 0 ? result : error);
 		var tagsBefore = await TestEnvironment.GitAsync(fixture.RunsRepo, "tag", "--list");
 
@@ -509,7 +509,7 @@ public class InteractiveSessionTests
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
 		await fixture.RunWritingAsync("example", "a.txt", "a");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", "all")).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", "all")).ExitCode);
 		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
 		await using var harness = new Harness(fixture).Press('3', 'v').Text(IntegrationRecord.ShortKey(record.IntegrationId), "y").Press('q');
 
@@ -527,7 +527,7 @@ public class InteractiveSessionTests
 		await fixture.AddComponentAsync("example");
 		await fixture.RunWritingAsync("example", "same.txt", "from-first");
 		await fixture.RunWritingAsync("example", "same.txt", "from-second");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", "all", "-resolve", TestEnvironment.WriteFileCommand("same.txt", "merged"))).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", "all", "-resolve", TestEnvironment.WriteFileCommand("same.txt", "merged"))).ExitCode);
 		var record = Assert.Single(await IntegrationStoreOf(fixture).ListLatestAsync());
 		await using var harness = new Harness(fixture).Press('3', 'd').Text(IntegrationRecord.ShortKey(record.IntegrationId)).Press('q', 'q');
 

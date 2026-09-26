@@ -171,7 +171,7 @@ internal static class IntegrationPlanner
 		step.Conflicts.AddRange(probe.Conflicts);
 	}
 
-	/// <summary>The branch the component repo's <c>HEAD</c> names: what <c>add-component</c> cloned, usually <c>main</c>.</summary>
+	/// <summary>The branch the component repo's <c>HEAD</c> names: what <c>component add</c> cloned, usually <c>main</c>.</summary>
 	private static async Task<string> DefaultBranchAsync(GitClient git, string name)
 	{
 		var head = await git.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);

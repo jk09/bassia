@@ -99,7 +99,7 @@ internal sealed class ComponentIntegration
 	public string? ResultTag { get; set; }
 	public string? ResultError { get; set; }
 
-	/// <summary><see cref="BaseRef"/> was fast-forwarded to the result by <c>bassia integrate advance</c>.</summary>
+	/// <summary><see cref="BaseRef"/> was fast-forwarded to the result by <c>bassia integration advance</c>.</summary>
 	public bool Advanced { get; set; }
 }
 

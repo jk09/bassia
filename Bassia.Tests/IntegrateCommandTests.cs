@@ -21,10 +21,11 @@ public class IntegrateCommandTests
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync();
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync();
 
-		Assert.Equal(1, exitCode);
-		Assert.Contains("Usage: bassia integrate -runs", error);
+		Assert.Equal(2, exitCode);
+		Assert.Contains("-runs is required", error);
+		Assert.Contains("Usage: bassia integration start -runs", error);
 	}
 
 	[Fact]
@@ -34,7 +35,7 @@ public class IntegrateCommandTests
 		await fixture.AddComponentAsync("example");
 		await fixture.RunWritingAsync("example", "a.txt", "a");
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", "0000ffff");
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", "0000ffff");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("Unknown agentic run '0000ffff'", error);
@@ -46,10 +47,10 @@ public class IntegrateCommandTests
 	{
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
-		var (_, _, error) = await fixture.AgentAsync("-select", "example@v0", "-run", TestEnvironment.FailingCommand);
+		var (_, _, error) = await fixture.RunStartAsync("-select", "example@v0", "-run", TestEnvironment.FailingCommand);
 		var failedRun = TestEnvironment.RunIdOf(error);
 
-		var (exitCode, _, integrateError) = await fixture.IntegrateAsync("-runs", failedRun);
+		var (exitCode, _, integrateError) = await fixture.IntegrationStartAsync("-runs", failedRun);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("has no result pushed to any component", integrateError);
@@ -65,7 +66,7 @@ public class IntegrateCommandTests
 		var main = await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "rev-parse", "main");
 
 		// A resolver that fails proves git did everything on its own.
-		var (exitCode, output, error) = await fixture.IntegrateAsync("-runs", "all", "-resolve", TestEnvironment.FailingCommand);
+		var (exitCode, output, error) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", TestEnvironment.FailingCommand);
 
 		Assert.True(exitCode == 0, error);
 		Assert.Contains("status = \"completed\"", output);
@@ -105,7 +106,7 @@ public class IntegrateCommandTests
 		var stdin = Path.Combine(fixture.Root, "resolver-stdin.md");
 		var resolver = $"{TestEnvironment.CaptureStdinCommand(stdin)} && {TestEnvironment.WriteFileCommand("same.txt", "merged")}";
 
-		var (exitCode, output, error) = await fixture.IntegrateAsync("-runs", $"{first},{second}", "-resolve", resolver);
+		var (exitCode, output, error) = await fixture.IntegrationStartAsync("-runs", $"{first},{second}", "-resolve", resolver);
 
 		Assert.True(exitCode == 0, error);
 		Assert.Contains("1 result(s) merged by git, 1 resolved semantically", output);
@@ -142,7 +143,7 @@ public class IntegrateCommandTests
 		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
 		var doNothing = OperatingSystem.IsWindows() ? "exit /b 0" : "true";
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", "all", "-resolve", doNothing);
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", doNothing);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("status = \"partial\"", error);
@@ -164,7 +165,7 @@ public class IntegrateCommandTests
 		await fixture.RunWritingAsync("example", "same.txt", "from-first");
 		await fixture.RunWritingAsync("example", "same.txt", "from-second");
 
-		var (exitCode, _, _) = await fixture.IntegrateAsync("-runs", "all", "-resolve", TestEnvironment.FailingCommand);
+		var (exitCode, _, _) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", TestEnvironment.FailingCommand);
 
 		Assert.Equal(1, exitCode);
 		var failed = (await SingleIntegrationAsync(fixture)).AllSteps.Single(step => step.Outcome == StepOutcome.Failed);
@@ -181,7 +182,7 @@ public class IntegrateCommandTests
 		var third = await fixture.RunWritingAsync("example", "other.txt", "other");
 		var refsBefore = await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "for-each-ref");
 
-		var (exitCode, output, error) = await fixture.IntegrateAsync("-runs", "all", "-plan");
+		var (exitCode, output, error) = await fixture.BassiaAsync("integration", "plan", "-runs", "all");
 
 		Assert.True(exitCode == 0, error);
 		Assert.Contains("2 step(s) for git, 1 for the resolver, 0 skipped. Nothing was changed.", output);
@@ -206,7 +207,7 @@ public class IntegrateCommandTests
 		var third = await fixture.RunWritingAsync("example", "c.txt", "c");
 		var stdin = Path.Combine(fixture.Root, "review.md");
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync(
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync(
 			"-runs", "all", "-skip", RunMetadata.ShortKey(second), "-semantic", third, "-resolve", TestEnvironment.CaptureStdinCommand(stdin));
 
 		Assert.True(exitCode == 0, error);
@@ -226,12 +227,12 @@ public class IntegrateCommandTests
 		await fixture.AddComponentAsync("app");
 		await fixture.AddComponentAsync("lib");
 		await fixture.AddComponentAsync("idle");
-		var both = await fixture.AgentAsync("-select", "app@v0,lib@v0", "-run",
+		var both = await fixture.RunStartAsync("-select", "app@v0,lib@v0", "-run",
 			$"{TestEnvironment.WriteFileCommand("app/app.txt", "app")} && {TestEnvironment.WriteFileCommand("lib/lib.txt", "lib")}");
 		Assert.True(both.ExitCode == 0, both.Error);
 		await fixture.RunWritingAsync("lib", "more.txt", "more");
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", "all");
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", "all");
 
 		Assert.True(exitCode == 0, error);
 		var record = await SingleIntegrationAsync(fixture);
@@ -246,7 +247,7 @@ public class IntegrateCommandTests
 		Assert.Equal("", await TestEnvironment.GitAsync(fixture.SourceRepo("idle"), "tag", "--list", "integration/*"));
 
 		// The integration is a baseline like any other: the next run can start from it.
-		var next = await fixture.AgentAsync("-select", $"app@{Tag(record)},lib@{Tag(record)}", "-run", TestEnvironment.WriteFileCommand("lib/next.txt", "n"));
+		var next = await fixture.RunStartAsync("-select", $"app@{Tag(record)},lib@{Tag(record)}", "-run", TestEnvironment.WriteFileCommand("lib/next.txt", "n"));
 		Assert.True(next.ExitCode == 0, next.Error);
 	}
 
@@ -257,7 +258,7 @@ public class IntegrateCommandTests
 		await fixture.AddComponentAsync("example");
 		var run = await fixture.RunWritingAsync("example", "a.txt", "a");
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", run, "-onto", "example@v0");
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", run, "-onto", "example@v0");
 
 		Assert.True(exitCode == 0, error);
 		var component = Assert.Single((await SingleIntegrationAsync(fixture)).Components);
@@ -271,10 +272,10 @@ public class IntegrateCommandTests
 		await using var fixture = await MonorepoFixture.CreateAsync();
 		await fixture.AddComponentAsync("example");
 		var run = await fixture.RunWritingAsync("example", "a.txt", "a");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", run)).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", run)).ExitCode);
 		var first = await SingleIntegrationAsync(fixture);
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", run, "-onto", $"example@{Tag(first)}");
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", run, "-onto", $"example@{Tag(first)}");
 
 		Assert.True(exitCode == 0, error);
 		var second = (await Store(fixture).ListLatestAsync()).Single(record => record.IntegrationId != first.IntegrationId);
@@ -291,11 +292,11 @@ public class IntegrateCommandTests
 		await fixture.AddComponentAsync("example");
 		await fixture.RunWritingAsync("example", "a.txt", "a");
 		await fixture.RunWritingAsync("example", "b.txt", "b");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", "all")).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", "all")).ExitCode);
 		var record = await SingleIntegrationAsync(fixture);
 		var source = fixture.SourceRepo("example");
 
-		var (exitCode, output, error) = await fixture.IntegrateAsync("advance", record.IntegrationId);
+		var (exitCode, output, error) = await fixture.BassiaAsync("integration", "advance", record.IntegrationId);
 
 		Assert.True(exitCode == 0, error);
 		Assert.Contains("Advanced example:main", output);
@@ -304,9 +305,9 @@ public class IntegrateCommandTests
 
 		// An integration built on a tag has no branch to advance.
 		var third = await fixture.RunWritingAsync("example", "c.txt", "c");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", third, "-onto", "example@v0")).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", third, "-onto", "example@v0")).ExitCode);
 		var stale = (await Store(fixture).ListLatestAsync()).Single(candidate => candidate.IntegrationId != record.IntegrationId);
-		var (staleExit, _, staleError) = await fixture.IntegrateAsync("advance", stale.IntegrationId);
+		var (staleExit, _, staleError) = await fixture.BassiaAsync("integration", "advance", stale.IntegrationId);
 
 		Assert.Equal(1, staleExit);
 		Assert.Contains("is not a branch", staleError);
@@ -319,13 +320,13 @@ public class IntegrateCommandTests
 		await fixture.AddComponentAsync("example");
 		var first = await fixture.RunWritingAsync("example", "a.txt", "a");
 		var second = await fixture.RunWritingAsync("example", "b.txt", "b");
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", first)).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", first)).ExitCode);
 		var early = await SingleIntegrationAsync(fixture);
-		Assert.Equal(0, (await fixture.IntegrateAsync("-runs", second)).ExitCode);
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", second)).ExitCode);
 		var late = (await Store(fixture).ListLatestAsync()).Single(record => record.IntegrationId != early.IntegrationId);
-		Assert.Equal(0, (await fixture.IntegrateAsync("advance", late.IntegrationId)).ExitCode);
+		Assert.Equal(0, (await fixture.BassiaAsync("integration", "advance", late.IntegrationId)).ExitCode);
 
-		var (exitCode, _, error) = await fixture.IntegrateAsync("advance", early.IntegrationId);
+		var (exitCode, _, error) = await fixture.BassiaAsync("integration", "advance", early.IntegrationId);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("'main' moved since the integration", error);
@@ -383,7 +384,7 @@ public class IntegrateCommandTests
 		var blockBrief = OperatingSystem.IsWindows()
 			? $"mkdir ..\\example.{RunMetadata.ShortKey(third)}.merge.md & echo merged> same.txt"
 			: $"mkdir ../example.{RunMetadata.ShortKey(third)}.merge.md && echo merged > same.txt";
-		var (exitCode, _, error) = await fixture.IntegrateAsync("-runs", "all", "-resolve", ResolverFor(second, blockBrief));
+		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", ResolverFor(second, blockBrief));
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("status = \"partial\"", error);
@@ -397,7 +398,7 @@ public class IntegrateCommandTests
 
 		// What did merge is published, and advance accepts the finished integration.
 		Assert.Equal("merged", (await ShowAsync(fixture, "example", Tag(record), "same.txt")).Trim());
-		Assert.Equal(0, (await fixture.IntegrateAsync("advance", record.IntegrationId)).ExitCode);
+		Assert.Equal(0, (await fixture.BassiaAsync("integration", "advance", record.IntegrationId)).ExitCode);
 	}
 
 	[Fact]
@@ -410,7 +411,7 @@ public class IntegrateCommandTests
 		var third = await fixture.RunWritingAsync("example", "same.txt", "from-third");
 		var strayAndFail = OperatingSystem.IsWindows() ? "echo stray> stray.txt & exit /b 4" : "echo stray > stray.txt; exit 4";
 
-		var (exitCode, _, _) = await fixture.IntegrateAsync("-runs", "all", "-resolve", ResolverFor(second, strayAndFail));
+		var (exitCode, _, _) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", ResolverFor(second, strayAndFail));
 
 		Assert.Equal(1, exitCode);
 		var record = await SingleIntegrationAsync(fixture);
@@ -445,7 +446,7 @@ public class IntegrateCommandTests
 		(int ExitCode, string Output, string Error) result;
 		try
 		{
-			result = await fixture.IntegrateAsync("-runs", "all", "-resolve", TestEnvironment.CaptureStdinCommand(stdin));
+			result = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", TestEnvironment.CaptureStdinCommand(stdin));
 		}
 		finally
 		{
