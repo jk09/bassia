@@ -13,7 +13,8 @@ internal static class CommandTable
 		["add-component"] = "'bassia add-component' was replaced by 'bassia component add -url <url> [-name <name>]'.",
 		["integrate"] = "'bassia integrate' was replaced by 'bassia integration plan|start|advance'.",
 		["commit"] = "'bassia commit' was removed: 'bassia config set' and the 'bassia component' commands commit the meta-repo themselves; use 'git -C .bassia commit' for hand edits.",
-		["branch"] = "'bassia branch' was removed: 'bassia component show -name <component>' lists a component's branches and tags."
+		["branch"] = "'bassia branch' was removed: 'bassia component show -name <component>' lists a component's branches and tags.",
+		["ui"] = "'bassia ui' was removed: use the command line, or 'bassia web' for the web dashboard."
 	};
 
 	private static readonly SwitchSpec Id = new("id", "run-id", "The run: its full id, its <id> part, or a prefix of at least 4 digits such as the short id.", Required: true);
@@ -215,7 +216,7 @@ internal static class CommandTable
 			["bassia run wait 3f2a91c4", "bassia run wait -id 3f2a91c4 -timeout 600"],
 			RunCommands.WaitAsync, Positional: "id"),
 
-		new("run", "stop", "Stop a live run (started from any shell, detached, or in bassia ui/web): kill the agent's process tree, record the run as cancelled and keep its folder.",
+		new("run", "stop", "Stop a live run (started from any shell, detached, or in bassia web): kill the agent's process tree, record the run as cancelled and keep its folder.",
 			[Id, new("timeout", "seconds", "How long to wait for it to stop before killing its process (default: 30).")],
 			["bassia run stop 3f2a91c4"],
 			RunCommands.StopAsync, Positional: "id"),
@@ -293,11 +294,6 @@ internal static class CommandTable
 			[new("port", "n", "The port to try first (default: 8080; the next free one is used when taken)."), new("no-open", null, "Do not open the browser.")],
 			["bassia web", "bassia web -port 9000 -no-open"],
 			WebCommand.RunAsync),
-
-		new("ui", null, "Open the interactive terminal frontend: component and run wallboards, starting and stopping runs, and the integration control panel.",
-			[],
-			["bassia ui"],
-			UiCommand.RunAsync),
 
 		new("help", null, "Show help: every command, the subcommands of a command, or one command's switches and examples.",
 			[new("command", "command [subcommand]", "The command to explain; may be given without -command.")],

@@ -7,7 +7,6 @@ using System.Net.Sockets;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
-using Bassia.Ui;
 using Bassia.Web;
 using Microsoft.Extensions.Hosting;
 

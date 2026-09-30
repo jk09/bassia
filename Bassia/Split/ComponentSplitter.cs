@@ -2,7 +2,7 @@ namespace Bassia.Split;
 
 using System.Text;
 using Bassia.Git;
-using Bassia.Ui;
+using Bassia.Graph;
 using Tomlyn;
 using Tomlyn.Model;
 

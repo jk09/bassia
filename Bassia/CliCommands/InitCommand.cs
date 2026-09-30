@@ -10,7 +10,7 @@ internal static class InitCommand
 		"# Bassia meta-repo configuration. Read and change it with 'bassia config list|get|set'.\n" +
 		"\n" +
 		"[agent]\n" +
-		"# Agent command of a run started from a prompt ('bassia run start -prompt ...', 'bassia ui', 'bassia web');\n" +
+		"# Agent command of a run started from a prompt ('bassia run start -prompt ...', 'bassia web');\n" +
 		"# the prompt is appended as one quoted argument.\n" +
 		"command = \"" + Monorepo.DefaultAgentCommand + "\"\n" +
 		"\n" +

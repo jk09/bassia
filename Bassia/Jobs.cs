@@ -9,8 +9,7 @@ using Tomlyn.Model;
 /// A run or integration a <c>bassia</c> process is executing right now, as registered in the job folder. The record
 /// is what lets another <c>bassia</c> process - usually another agent - see that the work is live, read its output
 /// and stop it: the run records in <c>.agentic-runs</c> say what happened, a job says who is doing it.
-/// <see cref="Hosted"/> jobs run inside <c>bassia ui</c> or <c>bassia web</c>, whose process must never be killed to
-/// stop one of them; <see cref="Detached"/> ones in a background process of their own, with a log.
+/// <see cref="Hosted"/> jobs run inside <c>bassia web</c>, whose process must never be killed to stop one of them; <see cref="Detached"/> ones in a background process of their own, with a log.
 /// </summary>
 internal sealed record JobInfo(string Id, string Kind, int Pid, string ProcessStart, string Started, string? Log, bool Detached, bool Hosted, string? Finished);
 
@@ -121,7 +120,7 @@ internal sealed class JobRegistry(Monorepo monorepo)
 
 	/// <summary>
 	/// Kills the job's process tree: the last resort when it does not stop on request. A hosted job is never killed,
-	/// since its process is the frontend serving everything else too.
+	/// since its process is the web dashboard serving everything else too.
 	/// </summary>
 	public static void Kill(JobInfo job)
 	{

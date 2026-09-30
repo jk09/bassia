@@ -3,8 +3,8 @@ namespace Bassia;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Graph;
 using Bassia.Split;
-using Bassia.Ui;
 
 /// <summary><c>bassia component split</c> and <c>bassia component survey</c>: breaking a component up as the monorepo grows.</summary>
 internal static class SplitCommands

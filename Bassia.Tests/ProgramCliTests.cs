@@ -41,6 +41,7 @@ public class ProgramCliTests
 	[InlineData("agent", "'bassia run start -select <component@tag,...> -run <command>'")]
 	[InlineData("add-component", "'bassia component add -url <url> [-name <name>]'")]
 	[InlineData("integrate", "'bassia integration plan|start|advance'")]
+	[InlineData("ui", "'bassia web'")]
 	public async Task RunAsync_ReplacedCommand_FailsNamingItsSuccessor(string command, string successor)
 	{
 		var (exitCode, _, error) = await TestEnvironment.RunAsync(command, "-m", "x");

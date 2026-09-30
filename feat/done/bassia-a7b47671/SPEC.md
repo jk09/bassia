@@ -59,6 +59,7 @@ The user should be able to interactively select one or more components and their
 - The run's `-run` value is composed as `<agent command> [--model X] [--effort Y] "<prompt> Context: <context>"` and shown in an editable prompt before the run starts, so a flag the chosen agent CLI does not support can be removed there. The context is joined with a space, not a newline, because the value is one shell command line.
 - `ListLatestAsync` enumerates runs from the `agent/run-*/*` tags of the metadata repo and loads each run's latest lineage; there is no index to keep in sync, matching the plumbing-only store.
 - `retry` and `abandon` are not surfaced in the UI; a `partial` run shows the CLI commands to use. Wiring them is straightforward but outside this record's criteria.
+- Superseded: the terminal frontend was removed by [bassia-4df7706a](../bassia-4df7706a/SPEC.md) in favour of the command line and the web dashboard. The manual hand-check under **Validation** no longer applies; the parts other commands use (`ComponentGraph`, the component board, `RunSupervisor`) were kept and moved.
 
 ## Progress
 

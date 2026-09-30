@@ -6,7 +6,6 @@ using System.Text;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
-using Bassia.Ui;
 
 /// <summary>
 /// <c>bassia run ...</c>: starting agentic runs (in the foreground or detached), watching and stopping them,
@@ -125,8 +124,19 @@ internal static class RunCommands
 			throw invocation.Usage("Either -run <command> or -prompt <text> is required.");
 		}
 
-		return InteractiveSession.ComposeCommand(invocation.Get("agent") ?? monorepo.AgentCommand, invocation.Get("model"),
+		return ComposeCommand(invocation.Get("agent") ?? monorepo.AgentCommand, invocation.Get("model"),
 			invocation.Get("effort"), prompt, invocation.Get("context"));
+	}
+
+	/// <summary>
+	/// The <c>-run</c> value: the agent command, optional model/effort flags, and the prompt as one quoted argument.
+	/// The value is handed to the platform shell as a single line, so the context is joined with a space, not a newline.
+	/// </summary>
+	internal static string ComposeCommand(string agentCommand, string? model, string? effort, string prompt, string? context)
+	{
+		var fullPrompt = string.IsNullOrWhiteSpace(context) ? prompt.Trim() : $"{prompt.Trim()} Context: {context.Trim()}";
+		var flags = (model is null ? "" : $" --model {model}") + (effort is null ? "" : $" --effort {effort}");
+		return $"{agentCommand.Trim()}{flags} \"{fullPrompt.Replace("\"", "\\\"")}\"";
 	}
 
 	/// <summary>
@@ -192,7 +202,7 @@ internal static class RunCommands
 	}
 
 	/// <summary>
-	/// The start path of the frontends: the run is registered as a hosted job of the <c>ui</c>/<c>web</c> process,
+	/// The start path of the web dashboard: the run is registered as a hosted job of the <c>web</c> process,
 	/// so <c>bassia run show</c> sees it live and <c>bassia run stop</c> can stop it from another shell.
 	/// </summary>
 	internal static async Task<AgentRunOutcome> StartHostedAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext context)

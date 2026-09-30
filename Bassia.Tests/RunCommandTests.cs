@@ -172,7 +172,7 @@ public class RunCommandTests
 		var repo = Monorepo.Load(monorepo.Root);
 		var output = new List<string>();
 
-		// What 'bassia ui' and 'bassia web' do: the run executes inside their process, registered as a hosted job.
+		// What 'bassia web' does: the run executes inside its process, registered as a hosted job.
 		var run = RunCommands.StartHostedAsync(new Bassia.Git.GitClient(monorepo.Root), repo, "example@v0", TestEnvironment.SleepCommand(60),
 			new AgentRunContext { OnStep = _ => { }, OnOutput = line => { lock (output) output.Add(line); } });
 		var runId = await WaitForLiveRunAsync(monorepo);

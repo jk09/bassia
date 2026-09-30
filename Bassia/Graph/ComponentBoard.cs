@@ -1,11 +1,10 @@
-namespace Bassia.Ui;
+namespace Bassia.Graph;
 
 using Bassia.Git;
 
 /// <summary>
-/// What the components wallboard shows about one component beyond its registration. The git-derived parts are
-/// read once per refresh, not per repaint: the board animates, but a component's tags do not change four times
-/// a second.
+/// What the component board shows about one component beyond its registration, read from git once per
+/// rendering.
 /// </summary>
 internal sealed record ComponentStatus(ComponentDefinition Definition, bool HasRepo, int AnnotatedTags, int Branches, string? LatestTag, int RecordedRuns)
 {
@@ -43,9 +42,9 @@ internal sealed record ComponentStatus(ComponentDefinition Definition, bool HasR
 }
 
 /// <summary>
-/// The components view: one rectangle per registered component, placed in layers (a component sits below
-/// everything that references it) and connected by ASCII lines that follow <c>references</c>. It is the
-/// dependency graph and the component list in one picture, which is what the frontend lands on.
+/// The component board (<c>bassia graph -format board</c>): one rectangle per registered component, placed in
+/// layers (a component sits below everything that references it) and connected by ASCII lines that follow
+/// <c>references</c>. It is the dependency graph and the component list in one picture.
 /// </summary>
 internal sealed class ComponentBoard
 {
@@ -66,7 +65,7 @@ internal sealed class ComponentBoard
 		var order = new List<string>();
 		var row = 0;
 
-		// Each level becomes one board row, wrapped into further rows when it is wider than the terminal.
+		// Each level becomes one board row, wrapped into further rows when it is wider than the requested width.
 		foreach (var level in components.GroupBy(component => levels.TryGetValue(component.Name, out var value) ? value : 0).OrderBy(group => group.Key))
 		{
 			foreach (var chunk in level.OrderBy(component => component.Name, StringComparer.Ordinal).Chunk(perRow))
@@ -86,27 +85,20 @@ internal sealed class ComponentBoard
 		height = Math.Max(1, row * (CardHeight + VerticalGap) - VerticalGap);
 	}
 
-	/// <summary>Component names in the order the board draws them, which is the order the arrow keys walk.</summary>
+	/// <summary>Component names in the order the board draws them: by layer, then by name.</summary>
 	public IReadOnlyList<string> Order { get; }
 
 	public int Width { get; }
 
-	/// <summary>The board as Spectre markup. <paramref name="activeRuns"/> is live state and may change every frame.</summary>
-	public string Render(int selected, IReadOnlyDictionary<string, int> activeRuns)
-	{
-		if (components.Count == 0)
-		{
-			return "[grey](no components registered; run 'bassia component add -url <url>' first)[/]";
-		}
-
-		return Draw(selected, activeRuns).ToMarkup();
-	}
-
-	/// <summary>The board as plain ASCII, without a selection: the picture <c>bassia graph</c> prints.</summary>
+	/// <summary>The board as plain ASCII: the picture <c>bassia graph</c> prints.</summary>
 	public string RenderAscii(IReadOnlyDictionary<string, int> activeRuns) =>
-		components.Count == 0 ? "(no components registered)" : Draw(-1, activeRuns).ToAscii();
+		components.Count == 0 ? "(no components registered)" : Draw(activeRuns).ToAscii();
 
-	private CharCanvas Draw(int selected, IReadOnlyDictionary<string, int> activeRuns)
+	/// <summary>The board with its box-drawing characters, as <see cref="RenderAscii"/> draws it before the ASCII mapping.</summary>
+	internal string RenderText(IReadOnlyDictionary<string, int> activeRuns) =>
+		components.Count == 0 ? "(no components registered)" : Draw(activeRuns).ToText();
+
+	private CharCanvas Draw(IReadOnlyDictionary<string, int> activeRuns)
 	{
 		var canvas = new CharCanvas(Width, height);
 
@@ -116,11 +108,11 @@ internal sealed class ComponentBoard
 			DrawReferences(canvas, component.Definition);
 		}
 
-		for (var i = 0; i < Order.Count; i++)
+		foreach (var name in Order)
 		{
-			var component = components.First(candidate => candidate.Name == Order[i]);
+			var component = components.First(candidate => candidate.Name == name);
 			activeRuns.TryGetValue(component.Name, out var active);
-			DrawCard(canvas, component, i == selected, active);
+			DrawCard(canvas, component, active);
 		}
 
 		return canvas;
@@ -144,31 +136,29 @@ internal sealed class ComponentBoard
 
 			canvas.ConnectDown(
 				fromX + Anchor(i, component.References.Count), fromY + CardHeight - 1,
-				to.X + Anchor(slot, incoming), to.Y,
-				"grey");
+				to.X + Anchor(slot, incoming), to.Y);
 		}
 	}
 
 	/// <summary>Column of the <paramref name="index"/>-th of <paramref name="count"/> edges attached to a card edge.</summary>
 	private static int Anchor(int index, int count) => 1 + (index + 1) * (CardWidth - 2) / (count + 1);
 
-	private void DrawCard(CharCanvas canvas, ComponentStatus component, bool selected, int activeRuns)
+	private void DrawCard(CharCanvas canvas, ComponentStatus component, int activeRuns)
 	{
 		var (x, y) = positions[component.Name];
-		var style = !component.HasRepo ? "red" : activeRuns > 0 ? "deepskyblue1" : "grey";
-		canvas.Box(x, y, CardWidth, CardHeight, selected ? $"bold yellow" : style, (selected ? "▸ " : "") + component.Name);
+		canvas.Box(x, y, CardWidth, CardHeight, component.Name);
 
 		const int inner = CardWidth - 4;
 		var text = x + 2;
 		canvas.Text(text, y + 1, component.HasRepo
 			? $"{component.AnnotatedTags} tags · {component.Branches} branches"
-			: "no local repository", inner, component.HasRepo ? null : "red");
-		canvas.Text(text, y + 2, "needs: " + Join(component.Definition.References.Select(Describe)), inner, "grey");
-		canvas.Text(text, y + 3, "used by: " + Join(graph.ReferrersOf(component.Name).Select(referrer => referrer.Name)), inner, "grey");
+			: "no local repository", inner);
+		canvas.Text(text, y + 2, "needs: " + Join(component.Definition.References.Select(Describe)), inner);
+		canvas.Text(text, y + 3, "used by: " + Join(graph.ReferrersOf(component.Name).Select(referrer => referrer.Name)), inner);
 		canvas.Text(text, y + 4, activeRuns > 0
 			? $"● {activeRuns} running · {component.RecordedRuns} runs"
 			: $"{component.RecordedRuns} runs · {component.LatestTag ?? "no tag"}",
-			inner, activeRuns > 0 ? "deepskyblue1" : "grey");
+			inner);
 	}
 
 	private static string Describe(ComponentReference reference) =>

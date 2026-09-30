@@ -1,10 +1,10 @@
-namespace Bassia.Ui;
+namespace Bassia.Web;
 
 using Bassia.CliCommands.Agent;
 
 /// <summary>
-/// One run as the wallboard draws it: an immutable snapshot, so the renderer never reads fields a background run
-/// is writing. A live run and a run read back from <c>.agentic-runs</c> produce the same shape.
+/// One run as the dashboard shows it: an immutable snapshot, so a page never reads fields a background run is
+/// writing. A live run and a run read back from <c>.agentic-runs</c> produce the same shape.
 /// </summary>
 internal sealed record RunCard(
 	string Key,
@@ -19,21 +19,34 @@ internal sealed record RunCard(
 	bool IsLive,
 	string? LastOutput)
 {
-	/// <summary>The short id once the run has one, otherwise the placeholder the frontend gave it while starting.</summary>
+	/// <summary>The short id once the run has one, otherwise the placeholder the dashboard gave it while starting.</summary>
 	public string Label => RunId is null ? Key : RunMetadata.ShortKey(RunId);
 
 	public TimeSpan Elapsed => (Finished ?? DateTimeOffset.UtcNow) - Started;
+
+	internal static string ElapsedText(TimeSpan elapsed) => elapsed < TimeSpan.Zero
+		? "0:00"
+		: elapsed.TotalHours >= 1
+			? $"{(int)elapsed.TotalHours}:{elapsed.Minutes:00}:{elapsed.Seconds:00}"
+			: $"{elapsed.Minutes}:{elapsed.Seconds:00}";
+
+	internal static string PhaseText(AgentRunPhase phase) => phase switch
+	{
+		AgentRunPhase.Agent => "RUNNING",
+		AgentRunPhase.Unknown => "UNKNOWN",
+		_ => phase.ToString().ToUpperInvariant()
+	};
 }
 
 /// <summary>
-/// Owns the agentic runs the frontend started, each as a background task over the same
+/// Owns the agentic runs the web dashboard started, each as a background task over the same
 /// <see cref="AgentCommand.StartRunAsync"/> the CLI calls. Starting returns as soon as the task is scheduled,
-/// which is what lets the frontend stay responsive and run several agents at once; every run keeps its latest
-/// phase, progress line and a tail of the agent's output for its card, and can be cancelled individually.
+/// which is what lets the dashboard stay responsive and run several agents at once; every run keeps its latest
+/// phase, progress line and a tail of the agent's output for its page, and can be cancelled individually.
 /// </summary>
 internal sealed class RunSupervisor : IDisposable
 {
-	/// <summary>Kept per run for its detail view; enough to see what the agent is doing, not a transcript.</summary>
+	/// <summary>Kept per run for its page; enough to see what the agent is doing, not a transcript.</summary>
 	public const int OutputTailLength = 200;
 
 	private readonly Func<string, string, AgentRunContext, Task<AgentRunOutcome>> start;
@@ -78,8 +91,8 @@ internal sealed class RunSupervisor : IDisposable
 		}
 		catch (Exception ex)
 		{
-			// Any failure ends the card: a card left live would keep the board animating and make quitting wait on a
-			// task that then throws into the frontend.
+			// Any failure ends the card: a card left live would keep its page streaming and make stopping wait on a
+			// task that then throws into the dashboard.
 			run.Finish(AgentRunPhase.Failed, null, ex.Message, null);
 		}
 		finally
@@ -91,7 +104,7 @@ internal sealed class RunSupervisor : IDisposable
 		}
 	}
 
-	/// <summary>Every run this frontend started, newest first.</summary>
+	/// <summary>Every run this dashboard started, newest first.</summary>
 	public IReadOnlyList<RunCard> Cards()
 	{
 		lock (gate)
@@ -105,8 +118,8 @@ internal sealed class RunSupervisor : IDisposable
 	public int LiveCount => Cards().Count(card => card.IsLive);
 
 	/// <summary>
-	/// True once (per call) after any run has finished. The frontend uses it to reload the stored run records
-	/// exactly when they changed, instead of polling git on every repaint.
+	/// True once (per call) after any run has finished, so a caller can reload the stored run records exactly when
+	/// they changed, instead of polling git.
 	/// </summary>
 	public bool ConsumeSettled()
 	{
@@ -176,8 +189,8 @@ internal sealed class RunSupervisor : IDisposable
 	}
 
 	/// <summary>
-	/// The mutable side of a run. Its fields are written by the run's own task and read by the render loop, so
-	/// every access goes through its lock and the renderer only ever sees a <see cref="RunCard"/>.
+	/// The mutable side of a run. Its fields are written by the run's own task and read by the dashboard's requests,
+	/// so every access goes through its lock and a request only ever sees a <see cref="RunCard"/>.
 	/// </summary>
 	private sealed class LiveRun : IDisposable
 	{

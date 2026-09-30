@@ -1,12 +1,11 @@
-namespace Bassia.Ui;
+namespace Bassia.Graph;
 
 using System.Text;
-using Spectre.Console;
 
 /// <summary>
-/// A fixed-size grid of characters, each with an optional Spectre style, rendered to markup in one piece. The
-/// wallboards need to draw *between* their rectangles - dependency edges that cross gaps and each other - which
-/// no table or panel layout can express, so they lay their cards out on this instead.
+/// A fixed-size grid of characters, rendered to text in one piece. The component board needs to draw *between* its
+/// rectangles - dependency edges that cross gaps and each other - which no table layout can express, so it lays its
+/// cards out on this instead.
 ///
 /// Box-drawing characters are merged rather than overwritten: a line crossing another line yields the character
 /// with both sets of arms (<c>┬</c>, <c>┼</c>, ...), so several edges into one component read as a single tree.
@@ -20,14 +19,12 @@ internal sealed class CharCanvas
 	private const string LineChars = " ╵╷│╴┘┐┤╶└┌├─┴┬┼";
 
 	private readonly char[,] chars;
-	private readonly string?[,] styles;
 
 	public CharCanvas(int width, int height)
 	{
 		Width = Math.Max(1, width);
 		Height = Math.Max(1, height);
 		chars = new char[Height, Width];
-		styles = new string?[Height, Width];
 		for (var y = 0; y < Height; y++)
 		{
 			for (var x = 0; x < Width; x++)
@@ -42,26 +39,25 @@ internal sealed class CharCanvas
 
 	private bool Inside(int x, int y) => x >= 0 && y >= 0 && x < Width && y < Height;
 
-	public void Set(int x, int y, char value, string? style = null)
+	public void Set(int x, int y, char value)
 	{
 		if (Inside(x, y))
 		{
 			chars[y, x] = value;
-			styles[y, x] = style;
 		}
 	}
 
 	/// <summary>Writes text left to right, clipped at the canvas edge.</summary>
-	public void Text(int x, int y, string text, string? style = null)
+	public void Text(int x, int y, string text)
 	{
 		for (var i = 0; i < text.Length; i++)
 		{
-			Set(x + i, y, text[i], style);
+			Set(x + i, y, text[i]);
 		}
 	}
 
 	/// <summary>Writes text clipped to <paramref name="width"/>, with an ellipsis when it does not fit.</summary>
-	public void Text(int x, int y, string text, int width, string? style = null) => Text(x, y, Fit(text, width), style);
+	public void Text(int x, int y, string text, int width) => Text(x, y, Fit(text, width));
 
 	/// <summary>Truncates to <paramref name="width"/>, marking the cut with a single-character ellipsis.</summary>
 	public static string Fit(string text, int width)
@@ -71,7 +67,7 @@ internal sealed class CharCanvas
 	}
 
 	/// <summary>A line character, merged with whatever line character is already there.</summary>
-	private void Line(int x, int y, int arms, string? style)
+	private void Line(int x, int y, int arms)
 	{
 		if (!Inside(x, y))
 		{
@@ -85,40 +81,39 @@ internal sealed class CharCanvas
 		}
 
 		chars[y, x] = LineChars[arms];
-		styles[y, x] = style;
 	}
 
 	/// <summary>Rows <paramref name="fromY"/>..<paramref name="toY"/> inclusive; an inverted range draws nothing.</summary>
-	public void VerticalLine(int x, int fromY, int toY, string? style = null)
+	public void VerticalLine(int x, int fromY, int toY)
 	{
 		for (var y = fromY; y <= toY; y++)
 		{
-			Line(x, y, Up | Down, style);
+			Line(x, y, Up | Down);
 		}
 	}
 
 	/// <summary>Columns <paramref name="fromX"/>..<paramref name="toX"/> inclusive; an inverted range draws nothing.</summary>
-	public void HorizontalLine(int y, int fromX, int toX, string? style = null)
+	public void HorizontalLine(int y, int fromX, int toX)
 	{
 		for (var x = fromX; x <= toX; x++)
 		{
-			Line(x, y, Left | Right, style);
+			Line(x, y, Left | Right);
 		}
 	}
 
 	/// <summary>A rectangle with <paramref name="title"/> inlaid in its top edge, drawn over anything beneath it.</summary>
-	public void Box(int x, int y, int width, int height, string? style = null, string? title = null)
+	public void Box(int x, int y, int width, int height, string? title = null)
 	{
 		for (var column = x; column < x + width; column++)
 		{
-			Set(column, y, '─', style);
-			Set(column, y + height - 1, '─', style);
+			Set(column, y, '─');
+			Set(column, y + height - 1, '─');
 		}
 
 		for (var row = y; row < y + height; row++)
 		{
-			Set(x, row, '│', style);
-			Set(x + width - 1, row, '│', style);
+			Set(x, row, '│');
+			Set(x + width - 1, row, '│');
 			for (var column = x + 1; column < x + width - 1; column++)
 			{
 				if (row > y && row < y + height - 1)
@@ -128,14 +123,14 @@ internal sealed class CharCanvas
 			}
 		}
 
-		Set(x, y, '┌', style);
-		Set(x + width - 1, y, '┐', style);
-		Set(x, y + height - 1, '└', style);
-		Set(x + width - 1, y + height - 1, '┘', style);
+		Set(x, y, '┌');
+		Set(x + width - 1, y, '┐');
+		Set(x, y + height - 1, '└');
+		Set(x + width - 1, y + height - 1, '┘');
 
 		if (!string.IsNullOrEmpty(title))
 		{
-			Text(x + 2, y, " " + Fit(title, width - 6) + " ", style);
+			Text(x + 2, y, " " + Fit(title, width - 6) + " ");
 		}
 	}
 
@@ -144,7 +139,7 @@ internal sealed class CharCanvas
 	/// down with an arrow head. The horizontal leg runs one row above the target, so edges into the same component
 	/// merge into one line that forks just above it.
 	/// </summary>
-	public void ConnectDown(int fromX, int fromY, int toX, int toY, string? style = null)
+	public void ConnectDown(int fromX, int fromY, int toX, int toY)
 	{
 		if (toY - 1 <= fromY)
 		{
@@ -153,7 +148,7 @@ internal sealed class CharCanvas
 
 		if (fromX == toX)
 		{
-			VerticalLine(fromX, fromY + 1, toY - 2, style);
+			VerticalLine(fromX, fromY + 1, toY - 2);
 		}
 		else
 		{
@@ -161,61 +156,26 @@ internal sealed class CharCanvas
 			// adds its own arm instead of leaving a stub pointing nowhere.
 			var lane = Math.Max(fromY + 1, toY - 2);
 			var (leaving, arriving) = toX > fromX ? (Right, Left) : (Left, Right);
-			VerticalLine(fromX, fromY + 1, lane - 1, style);
-			Line(fromX, lane, Up | leaving, style);
-			HorizontalLine(lane, Math.Min(fromX, toX) + 1, Math.Max(fromX, toX) - 1, style);
-			Line(toX, lane, Down | arriving, style);
-			VerticalLine(toX, lane + 1, toY - 2, style);
+			VerticalLine(fromX, fromY + 1, lane - 1);
+			Line(fromX, lane, Up | leaving);
+			HorizontalLine(lane, Math.Min(fromX, toX) + 1, Math.Max(fromX, toX) - 1);
+			Line(toX, lane, Down | arriving);
+			VerticalLine(toX, lane + 1, toY - 2);
 		}
 
-		Set(toX, toY - 1, '▼', style);
+		Set(toX, toY - 1, '▼');
 	}
 
-	/// <summary>
-	/// The whole canvas as Spectre markup, one line per row, with neighbouring cells of the same style wrapped in
-	/// one tag. Trailing blanks are dropped per row so the markup does not carry the padding to the right of the
-	/// widest card.
-	/// </summary>
-	public string ToMarkup()
-	{
-		var builder = new StringBuilder();
-		for (var y = 0; y < Height; y++)
-		{
-			var end = Width - 1;
-			while (end >= 0 && chars[y, end] == ' ')
-			{
-				end--;
-			}
-
-			var run = new StringBuilder();
-			string? runStyle = null;
-
-			for (var x = 0; x <= end; x++)
-			{
-				if (styles[y, x] != runStyle)
-				{
-					Flush(builder, run, runStyle);
-					runStyle = styles[y, x];
-				}
-
-				run.Append(chars[y, x]);
-			}
-
-			Flush(builder, run, runStyle);
-			if (y < Height - 1)
-			{
-				builder.Append('\n');
-			}
-		}
-
-		return builder.ToString();
-	}
+	/// <summary>The canvas as text, one line per row, with trailing blanks dropped per row.</summary>
+	public string ToText() => Render(value => value);
 
 	/// <summary>
-	/// The canvas as plain 7-bit ASCII, without styles: box-drawing characters become <c>+ - |</c>, the arrow head
-	/// <c>v</c>, and the few symbols the cards use their nearest ASCII look-alike. Trailing blanks are dropped per row.
+	/// The canvas as plain 7-bit ASCII: box-drawing characters become <c>+ - |</c>, the arrow head <c>v</c>, and the
+	/// few symbols the cards use their nearest ASCII look-alike. Trailing blanks are dropped per row.
 	/// </summary>
-	public string ToAscii()
+	public string ToAscii() => Render(Ascii);
+
+	private string Render(Func<char, char> map)
 	{
 		var builder = new StringBuilder();
 		for (var y = 0; y < Height; y++)
@@ -223,7 +183,7 @@ internal sealed class CharCanvas
 			var line = new StringBuilder();
 			for (var x = 0; x < Width; x++)
 			{
-				line.Append(Ascii(chars[y, x]));
+				line.Append(map(chars[y, x]));
 			}
 
 			builder.Append(line.ToString().TrimEnd());
@@ -250,16 +210,4 @@ internal sealed class CharCanvas
 		_ when value > '~' => '?',
 		_ => value
 	};
-
-	private static void Flush(StringBuilder builder, StringBuilder run, string? style)
-	{
-		if (run.Length == 0)
-		{
-			return;
-		}
-
-		var text = Markup.Escape(run.ToString());
-		builder.Append(style is null ? text : $"[{style}]{text}[/]");
-		run.Clear();
-	}
 }

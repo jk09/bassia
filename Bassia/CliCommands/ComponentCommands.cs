@@ -3,7 +3,7 @@ namespace Bassia;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
-using Bassia.Ui;
+using Bassia.Graph;
 
 /// <summary><c>bassia component ...</c> and <c>bassia graph</c>: the registered components and their dependencies.</summary>
 internal static class ComponentCommands

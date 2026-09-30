@@ -184,21 +184,6 @@ internal static class IntegrationCommands
 			});
 	}
 
-	/// <summary>The integration path of <c>bassia ui</c>, registered as a hosted job so the command line can see and stop it.</summary>
-	internal static async Task<IntegrationOutcome> StartHostedAsync(GitClient git, Monorepo monorepo, IReadOnlyList<RunMetadata> runs,
-		IReadOnlyList<ComponentIntegration> plan, string resolver, IntegrationContext context)
-	{
-		var id = IntegrationRecord.NewId();
-		using var job = new JobRegistry(monorepo).Attach(id, JobKind, hosted: true);
-		using var linked = CancellationTokenSource.CreateLinkedTokenSource(context.Cancellation, job.Cancellation);
-		return await IntegrationRunner.RunAsync(git, monorepo, runs, plan, resolver, new IntegrationContext
-		{
-			Cancellation = linked.Token,
-			OnProgress = context.OnProgress,
-			OnOutput = context.OnOutput
-		}, id);
-	}
-
 	// ----- finding an integration -----
 
 	private sealed record Found(Monorepo Monorepo, IntegrationStore Store, JobRegistry Jobs, string Id, IntegrationRecord? Record, JobInfo? Job)
