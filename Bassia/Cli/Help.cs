@@ -50,13 +50,7 @@ internal static class Help
 				["result"] = "A result opens with the line '# bassia result', then ok, command, message (or error), then the command's data. When a command " +
 					"streams other output first (run start without -detach), parse from the last '# bassia result' line.",
 				["table"] = new TomlText(AsciiTable.Render(["COMMAND", "SUMMARY"],
-					CommandTable.Commands.Select(command => (IReadOnlyList<string>)[command.FullName, command.Summary]), 160)),
-				["entry"] = CommandTable.Commands.Select(command => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
-				{
-					["name"] = command.FullName,
-					["summary"] = command.Summary,
-					["usage"] = command.UsageLine
-				}).ToList()
+					CommandTable.Commands.Select(command => (IReadOnlyList<string>)[command.FullName, command.Summary]), 160))
 			});
 
 	private static int Group(string name, IReadOnlyList<CommandSpec> group) =>

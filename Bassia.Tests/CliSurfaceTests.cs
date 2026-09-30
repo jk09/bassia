@@ -60,9 +60,10 @@ public class CliSurfaceTests
 		var (exitCode, output, _) = await TestEnvironment.RunAsync("help");
 
 		Assert.Equal(0, exitCode);
-		var names = Tables(Result(output), "entry").Select(entry => (string)entry["name"]).ToList();
-		Assert.Equal(CommandTable.Commands.Select(command => command.FullName), names);
-		Assert.Contains("COMMAND", (string)Result(output)["table"]);
+		var table = (string)Result(output)["table"];
+		Assert.Contains("COMMAND", table);
+		Assert.All(CommandTable.Commands, command => Assert.Contains(command.FullName, table));
+		Assert.Empty(Tables(Result(output), "entry"));
 	}
 
 	[Theory]
