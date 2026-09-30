@@ -9,8 +9,8 @@
 
 ## Command line
 
-`bassia` is operated mainly by AI agents, so the command line is its primary interface: everything `bassia ui` and
-`bassia web` can do has a command, and every command answers in TOML.
+`bassia` is operated mainly by AI agents, so the command line is its primary interface: everything `bassia web` can
+do has a command, and every command answers in TOML.
 
 ```
 bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
@@ -38,10 +38,10 @@ its usage, every switch and examples. Help is TOML too.
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-limit <n>] [-page <n>]` |
 | Agentic runs | `run start -select <c@tag>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
-| Frontends | `ui`, `web [-port <n>] [-no-open]` |
+| Web dashboard | `web [-port <n>] [-no-open]` |
 
-The commands this replaced - `agent`, `add-component`, `integrate`, `commit` and `branch` - fail with exit code 2 and
-name their successor.
+The commands this replaced - `agent`, `add-component`, `integrate`, `commit`, `branch` and `ui` - fail with exit code
+2 and name their successor.
 
 A typical agent session over a fresh monorepo:
 
@@ -122,7 +122,7 @@ checked first (a mistake is reported at once), then the run continues in a backg
 the caller's standard handles, and the result — `run_id`, `pid`, `log` — is printed immediately. `integration start
 -detach` works the same way.
 
-Whoever executes a run or integration - a foreground `bassia`, a detached one, or `bassia ui`/`bassia web` - registers
+Whoever executes a run or integration - a foreground `bassia`, a detached one, or `bassia web` - registers
 it as a job in `<workspace>/.jobs/`. That is what lets another process, usually another agent:
 
 - see that it is **live** (`run list -status live`, `run show`: `live`, `pid`, `last_output`, and an ASCII `card`),
@@ -130,7 +130,7 @@ it as a job in `<workspace>/.jobs/`. That is what lets another process, usually 
 - **wait** for it (`run wait`, `integration wait`, with an optional `-timeout`),
 - **stop** it (`run stop`, `integration stop`): the job is asked to stop, which kills the agent's (or resolver's)
   process tree and records the work as `cancelled`; a job that does not react within `-timeout` seconds has its
-  process killed - never the process of `bassia ui`/`bassia web`, which stop their own runs.
+  process killed - never the process of `bassia web`, which stops its own runs.
 
 A run recorded as `started` whose process is gone (killed, crashed, machine restarted) shows as `stale`; `run stop`
 records it as `cancelled`.
@@ -143,7 +143,7 @@ each change to the meta-repo:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `workspace.path` | `.workspace` | Folder of the run and integration checkouts (and of `.jobs`) |
-| `agent.command` | `claude -p --permission-mode acceptEdits` | Agent command of a run started from `-prompt`, `bassia ui` or `bassia web` |
+| `agent.command` | `claude -p --permission-mode acceptEdits` | Agent command of a run started from `-prompt` or `bassia web` |
 | `agent.commit.subject` | `agent({short_id}): {summary}` | Subject of a run's result commits |
 | `integration.resolver` | `claude -p --permission-mode acceptEdits` | Command that resolves a semantic merge |
 
@@ -300,45 +300,6 @@ bassia integration advance <id>                                  # fast-forward 
 
 The integration's record (`integration.toml`: runs, resolver, and per component its base, every step's triage, strategy, conflicts, outcome, merge commit and brief) is committed to `.agentic-runs` next to the run records and tagged `integration/<id>/<lineage>`. Status is `completed`, `partial` (a step or component failed; what did merge is still published), or `cancelled`.
 
-### Interactive frontend
-
-```powershell
-bassia -C R:\ ui
-```
-
-`ui` opens a live session over the monorepo the current directory belongs to (it fails with the usual TOML error outside one, or when the terminal is not interactive). It is a layer over the same model and commands as above, not a second implementation.
-
-It has two boards and the integration control panel, always one keystroke apart; each board is a wallboard of rectangles carrying that item's own facts:
-
-```
-┌─ app ──────────────────────┐   ┌─ ▸ tool ───────────────────┐   ┌─ ▸ 3f2a91c4 ⠸ ─────────────────┐
-│ 3 tags · 2 branches        │   │ 3 tags · 2 branches        │   │ RUNNING                   1:35 │
-│ needs: lib, ui@vendor/ui   │   │ needs: lib                 │   │ app, lib                       │
-│ used by: -                 │   │ used by: -                 │   │ ░░░▓▓░░░░░░░                   │
-│ 7 runs · v1.2              │   │ 7 runs · v1.2              │   │ add the changelog              │
-└────────────────────────────┘   └────────────────────────────┘   │ editing CHANGELOG.md           │
-          │        │                            │                 └────────────────────────────────┘
-          │        ├────────────────────────────┤
-          ▼        ▼                            ▼
-┌─ lib ──────────────────────┐   ┌─ ui ───────────────────────┐
-│ ● 2 running · 7 runs       │   │ 7 runs · v1.2              │
-└────────────────────────────┘   └────────────────────────────┘
-```
-
-- **`1` — Components**: one rectangle per component from `components.toml`, laid out in layers and joined by ASCII lines that follow `references`, so the list and the dependency graph are the same picture. A card shows its tags and branches, what it needs and what needs it, how many recorded runs touched it, and how many runs are working on it right now.
-- **`2` — Agentic runs**: one rectangle per run — the ones this session started first, then everything recorded in `.agentic-runs`. A card shows the run's short id, phase, elapsed time, components, command and the agent's latest output line; a live run animates.
-- **`3` — Integration**: the control panel for [integration](#integration-syntactic-first-then-semantic). It lists the runs that have results; `space` chooses one and `a` chooses all or none. Below that is the live triage of the chosen runs: per component, every step in execution order with its triage, strategy (`SYNTAX`, `SEMANTIC` or `SKIP`, starred when you chose it), conflicted files and the runs it collides with. `o` puts a component onto another branch or tag, `s` overrides a step's strategy (a conflicting step can only go to the resolver or be skipped), `c` clears both, and `i` confirms the resolver command and integrates in the background. While it runs the panel shows each step's outcome and the resolver's latest output line, and `x` stops it (kills a working resolver and publishes nothing further). `d` opens a recorded integration with its notes and briefs, and `v` advances its base branches. The recorded integrations are listed at the bottom.
-
-Keys: `1`/`2`/`3` switch views from any screen, arrows move the selection, `enter` opens the selected card, `n` starts a run, `x` stops the selected run, `t` tags the selected component, `g` opens the dependency tree with its exports, `r` refreshes, `?` lists the keys and `q` quits. The detail screens behind `enter` are what the menu frontend showed:
-
-- **A component**: its branches and tags (annotated tags marked, since only those can be selected for a run), its git tree, and every agentic run that touched it with the result tag it left. `t` runs `git tag -a` on a chosen branch, tag or commit and the view refreshes.
-- **A run**: its record, per-component results, and the tail of the agent's output for a run this session started. `x` stops it; `i` chooses its results on the integration panel; `m` lists suspend / resume / hand off, which are not implemented yet and report so without changing anything.
-- **The dependency tree** (`g`): the graph as a text tree, exportable as Markdown with a Mermaid block (`components.md`) or as SVG (`components.svg`).
-
-**Starting a run** (`n`) asks for components (the reference closure is completed automatically) and an annotated tag for each, then the prompt, model, effort and context; the composed `-run` command (default agent command `claude -p --permission-mode acceptEdits`) can be edited before the run starts through the same path as `bassia run start -select ... -run ...`. The wizard then hands the run to the background and the board comes straight back, so the next run can be started while the first is still going. A background run's output is captured onto its card instead of reaching the screen.
-
-**Stopping a run** (`x`) kills the agent's whole process tree, records the run with status `cancelled` and keeps its run folder for inspection; nothing is committed into any component, and `bassia run retry` refuses a cancelled run the same way it refuses a failed one. Runs and integrations started here are registered as jobs, so `bassia run stop` from another shell stops them too. Quitting while runs are still going offers to stop them and waits, rather than orphaning the agent processes.
-
 ### Web dashboard
 
 ```powershell
@@ -352,7 +313,7 @@ runs until Ctrl-C, which also stops (and records as `cancelled`) any run it star
 a menu, and works without JavaScript; the script only makes live parts update in place.
 
 - **Home**: counts of components, live, completed and failed runs, and integrations. Below them are the component
-  graph (the same SVG as the graph export in `bassia ui`, with every box a link) and the latest runs and
+  graph (the same SVG as `bassia graph -format svg`, with every box a link) and the latest runs and
   integrations.
 - **Components**: each component with what it needs, what uses it, its annotated tags, branches and runs. A
   component's page lists its branches and tags, and the runs that touched it with their result tags.
@@ -372,7 +333,7 @@ a menu, and works without JavaScript; the script only makes live parts update in
 - **Integrations**: every integration with its runs and result tags. Each opens to its per-component steps
   (triage, strategy, conflicts, outcome) and the paths of its semantic briefs. **Preview triage** shows how
   chosen runs would integrate, like `integration plan`; performing an integration stays with `bassia integration
-  start` and `bassia ui`.
+  start`.
 
 Forms carry a per-server token, and requests must be addressed to `127.0.0.1` or `localhost`. So a web page
 open in the same browser can neither start runs through the dashboard nor read it through DNS rebinding.

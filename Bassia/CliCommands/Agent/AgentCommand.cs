@@ -292,7 +292,7 @@ internal static class AgentCommand
 	/// Runs the agent command in the run folder and returns its exit code, or <c>null</c> when it was cancelled and
 	/// its process tree killed. Without <see cref="AgentRunContext.OnOutput"/> the process inherits this console, so
 	/// a caller of <c>bassia run start</c> sees the agent's output as it happens; with one, both pipes are redirected
-	/// and delivered line by line, which is what lets the frontend run an agent behind a live screen.
+	/// and delivered line by line, which is what lets the web dashboard run an agent behind a live page.
 	/// </summary>
 	private static Task<int?> RunAgentProcessAsync(Monorepo monorepo, RunMetadata metadata, AgentRunContext? context) =>
 		ShellCommand.RunAsync(
@@ -487,8 +487,8 @@ internal static class AgentCommand
 
 	/// <summary>
 	/// One progress step. Without a context - the scriptable CLI - it is the <c>bassia: ...</c> stderr line the
-	/// command has always written; with one it goes to the caller instead, which is how the frontend keeps the
-	/// running commentary of several parallel runs off its screen and on their cards.
+	/// command has always written; with one it goes to the caller instead, which is how the web dashboard keeps
+	/// the running commentary of several parallel runs off its console and on their pages.
 	/// </summary>
 	private static void Report(AgentRunContext? context, string runId, AgentRunPhase phase, string message)
 	{

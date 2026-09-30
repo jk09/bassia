@@ -64,7 +64,7 @@ internal static class IntegrationRunner
 			.OrderBy(runId => runs.FirstOrDefault(run => run.RunId == runId)?.Created, StringComparer.Ordinal));
 		draft.Components.AddRange(plan);
 
-		// The plan belongs to the caller (the frontend keeps drawing it); the integration works on its own copy.
+		// The plan belongs to the caller, which may keep showing it; the integration works on its own copy.
 		var record = draft.Clone();
 		var tags = new List<string> { await store.CommitAsync(record) };
 		Directory.CreateDirectory(record.WorkspacePath);

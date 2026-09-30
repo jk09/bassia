@@ -1,12 +1,12 @@
-namespace Bassia.Ui;
+namespace Bassia.Graph;
 
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
 /// <summary>
-/// The component reference graph of a monorepo as drawn by the frontend: a console rendering, and Mermaid/SVG
-/// exports for Markdown viewers and browsers. Tolerates a cyclic graph (drawn with a marker) so the frontend
+/// The component reference graph of a monorepo as drawn by the CLI and the web dashboard: a text rendering, and
+/// Mermaid/SVG exports for Markdown viewers and browsers. Tolerates a cyclic graph (drawn with a marker) so both
 /// can still show what <c>components.toml</c> contains when <c>bassia run start</c> would reject it.
 /// </summary>
 internal sealed class ComponentGraph

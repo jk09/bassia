@@ -4,8 +4,8 @@ using System.Text;
 using System.Text.Json;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Graph;
 using Bassia.Integration;
-using Bassia.Ui;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -14,9 +14,9 @@ using static Bassia.Web.Html;
 
 /// <summary>
 /// The web dashboard (<c>bassia web</c>): a local site over one monorepo in the spirit of Fossil's web UI. Pages are
-/// rendered on the server and work without JavaScript. It reads through the same model as the CLI and <c>bassia
-/// ui</c>, and starts runs through the same <see cref="RunSupervisor"/> over <see cref="AgentCommand.StartRunAsync"/>.
-/// Integrations are shown and their triage previewed; running them stays with the CLI and the terminal frontend.
+/// rendered on the server and work without JavaScript. It reads through the same model as the CLI, and starts
+/// runs through the same <see cref="RunSupervisor"/> over <see cref="AgentCommand.StartRunAsync"/>.
+/// Integrations are shown and their triage previewed; running them stays with the CLI.
 /// </summary>
 internal sealed class Dashboard
 {
@@ -406,8 +406,8 @@ internal sealed class Dashboard
 
 		var rows = string.Concat(cards.Select(card => $"""
 			<tr><td><a class="id" href="/runs/{LiveKey(card)}">{E(card.Label)}</a></td>
-			<td>{Status(card.IsLive ? "live" : RunBoard.PhaseText(card.Phase).ToLowerInvariant())} <span class="muted">{E(RunBoard.PhaseText(card.Phase).ToLowerInvariant())}</span></td>
-			<td>{RunBoard.Elapsed(card.Elapsed)}</td><td>{E(card.Select)}</td><td>{Rationale(card.Command)}</td>
+			<td>{Status(card.IsLive ? "live" : RunCard.PhaseText(card.Phase).ToLowerInvariant())} <span class="muted">{E(RunCard.PhaseText(card.Phase).ToLowerInvariant())}</span></td>
+			<td>{RunCard.ElapsedText(card.Elapsed)}</td><td>{E(card.Select)}</td><td>{Rationale(card.Command)}</td>
 			<td class="muted">{E(card.LastOutput ?? card.Message)}</td></tr>
 			"""));
 		return $"<h2>Started from this dashboard</h2><table class=\"list\"><tr><th>Run</th><th>State</th><th>Elapsed</th><th>Selection</th><th>Rationale</th><th>Latest</th></tr>{rows}</table>";
@@ -458,8 +458,8 @@ internal sealed class Dashboard
 			body.Append($"""
 				<div{(card.IsLive ? $" data-events=\"/runs/{key}/events\"" : "")}>
 				<table class="list facts">
-				<tr><td>Phase</td><td><b data-field="phase">{E(RunBoard.PhaseText(card.Phase))}</b></td></tr>
-				<tr><td>Elapsed</td><td data-field="elapsed">{RunBoard.Elapsed(card.Elapsed)}</td></tr>
+				<tr><td>Phase</td><td><b data-field="phase">{E(RunCard.PhaseText(card.Phase))}</b></td></tr>
+				<tr><td>Elapsed</td><td data-field="elapsed">{RunCard.ElapsedText(card.Elapsed)}</td></tr>
 				<tr><td>Latest</td><td data-field="message">{E(card.Message)}</td></tr>
 				<tr><td>Command</td><td><code>{E(card.Command)}</code></td></tr>
 				</table>
@@ -535,8 +535,8 @@ internal sealed class Dashboard
 			var card = supervisor.Cards().First(candidate => candidate.Key == key);
 			var state = JsonSerializer.Serialize(new Dictionary<string, string>
 			{
-				["phase"] = RunBoard.PhaseText(card.Phase),
-				["elapsed"] = RunBoard.Elapsed(card.Elapsed),
+				["phase"] = RunCard.PhaseText(card.Phase),
+				["elapsed"] = RunCard.ElapsedText(card.Elapsed),
 				["message"] = card.Message
 			});
 			await context.Response.WriteAsync($"event: state\ndata: {state}\n\n", aborted);
@@ -626,7 +626,7 @@ internal sealed class Dashboard
 		return body.ToString();
 	}
 
-	private string Compose(IQueryCollection fields) => InteractiveSession.ComposeCommand(
+	private string Compose(IQueryCollection fields) => RunCommands.ComposeCommand(
 		string.IsNullOrWhiteSpace(fields["agent"]) ? monorepo.AgentCommand : fields["agent"].ToString(),
 		string.IsNullOrWhiteSpace(fields["model"]) ? null : fields["model"].ToString(),
 		string.IsNullOrWhiteSpace(fields["effort"]) ? null : fields["effort"].ToString(),
@@ -688,7 +688,7 @@ internal sealed class Dashboard
 	{
 		var candidates = (await store.ListLatestAsync()).Where(IntegrationPlanner.HasResults).OrderBy(run => run.Created, StringComparer.Ordinal).ToList();
 		var body = new StringBuilder(IntegrationsTable(await integrations.ListLatestAsync()));
-		body.Append("<h2>Preview a triage</h2><p class=\"muted\">Choose runs with results to see how they would integrate: which steps git merges by syntax, which go to the resolver for a semantic merge. Nothing changes; integrate with <code>bassia integration start</code> or view 3 of <code>bassia ui</code>.</p>");
+		body.Append("<h2>Preview a triage</h2><p class=\"muted\">Choose runs with results to see how they would integrate: which steps git merges by syntax, which go to the resolver for a semantic merge. Nothing changes; integrate with <code>bassia integration start</code>.</p>");
 		if (candidates.Count == 0)
 		{
 			body.Append(Notice("No run has pushed a result yet."));
@@ -734,13 +734,22 @@ internal sealed class Dashboard
 		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs);
 		var command = $"bassia integration start -runs {string.Join(",", runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => RunMetadata.ShortKey(run.RunId)))}";
 		var body = $"""
-			<p>{E(Markup(plan))}. Nothing was changed. To integrate: <code>{E(command)}</code>, or view 3 of <code>bassia ui</code>.</p>
+			<p>{E(Summary(plan))}. Nothing was changed. To integrate: <code>{E(command)}</code>.</p>
 			{StepsTable(plan)}
 			""";
 		return View("/integrations", "Triage", body);
 	}
 
-	private static string Markup(IReadOnlyList<ComponentIntegration> plan) => Spectre.Console.Markup.Remove(IntegrationPanel.Summary(plan));
+	/// <summary>One line: how many steps go which way.</summary>
+	internal static string Summary(IReadOnlyList<ComponentIntegration> plan)
+	{
+		var steps = plan.SelectMany(component => component.Steps).ToList();
+		var upToDate = steps.Count(step => step.Triage == Triage.UpToDate && step.Strategy != MergeStrategy.Skip);
+		var syntactic = steps.Count(step => step.Strategy == MergeStrategy.Syntactic) - upToDate;
+		var semantic = steps.Count(step => step.Strategy == MergeStrategy.Semantic);
+		var skipped = steps.Count(step => step.Strategy == MergeStrategy.Skip);
+		return $"{syntactic} by git (syntax) · {semantic} by the resolver (semantic) · {upToDate} up to date · {skipped} skipped";
+	}
 
 	private async Task<IResult> IntegrationAsync(string id)
 	{

@@ -1,6 +1,6 @@
-using Bassia.Ui;
+using Bassia.Graph;
 
-namespace Bassia.Tests.Ui;
+namespace Bassia.Tests.Graph;
 
 public class ComponentGraphTests
 {

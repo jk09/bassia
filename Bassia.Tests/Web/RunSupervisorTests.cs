@@ -1,7 +1,7 @@
 using Bassia.CliCommands.Agent;
-using Bassia.Ui;
+using Bassia.Web;
 
-namespace Bassia.Tests.Ui;
+namespace Bassia.Tests.Web;
 
 public class RunSupervisorTests
 {
@@ -153,5 +153,22 @@ public class RunSupervisorTests
 		Assert.False(card.IsLive);
 		Assert.Equal(AgentRunPhase.Failed, card.Phase);
 		Assert.Equal("boom", card.Message);
+	}
+
+	[Fact]
+	public void EveryPhaseGetsItsOwnLabel()
+	{
+		Assert.Equal("RUNNING", RunCard.PhaseText(AgentRunPhase.Agent));
+		Assert.Equal("PARTIAL", RunCard.PhaseText(AgentRunPhase.Partial));
+		Assert.Equal("UNKNOWN", RunCard.PhaseText(AgentRunPhase.Unknown));
+	}
+
+	[Theory]
+	[InlineData(0, "0:00")]
+	[InlineData(65, "1:05")]
+	[InlineData(3725, "1:02:05")]
+	public void ElapsedIsReadableAtEveryScale(int seconds, string expected)
+	{
+		Assert.Equal(expected, RunCard.ElapsedText(TimeSpan.FromSeconds(seconds)));
 	}
 }

@@ -1,7 +1,6 @@
 using System.Net;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
-using Bassia.Ui;
 using Bassia.Web;
 using Microsoft.AspNetCore.Builder;
 
@@ -238,7 +237,7 @@ public class DashboardTests
 
 		var command = await host.GetAsync("/new/compose?agent=claude%20-p&model=opus&prompt=do%20it&context=see%20README");
 
-		Assert.Equal(InteractiveSession.ComposeCommand("claude -p", "opus", null, "do it", "see README"), command);
+		Assert.Equal(RunCommands.ComposeCommand("claude -p", "opus", null, "do it", "see README"), command);
 	}
 
 	[Fact]
