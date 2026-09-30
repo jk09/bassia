@@ -117,6 +117,34 @@ internal static class CommandTable
 			["bassia component tag -name app -tag v1", "bassia component tag lib -tag v1 -ref main -message \"release 1\""],
 			ComponentCommands.TagAsync, Positional: "name"),
 
+		new("component", "survey", "Describe a component for planning a split: its folders with files, bytes and commits, the folders that change together, and a split plan skeleton.",
+			[
+				new("name", "component", "The component.", Required: true),
+				new("branch", "branch", "The branch to survey (default: the default branch)."),
+				new("depth", "n", "How many folder levels to report (default: 2)."),
+				new("limit", "n", "Read at most this many of the latest commits (default: 5000; 0 for all)."),
+				new("pairs", "n", "Report at most this many co-changing folder pairs (default: 30).")
+			],
+			["bassia component survey -name app", "bassia component survey app -depth 3 -limit 0"],
+			SplitCommands.SurveyAsync, Positional: "name"),
+
+		new("component", "split", "Split a component into new components by a TOML plan: each part gets its files with their whole history (renames followed), " +
+			"the parts are registered, references rewired, and the source retired.",
+			[
+				new("plan", "file|-", "The split plan (TOML), or - to read it from stdin.", Required: true),
+				new("name", "component", "The component to split, if the plan does not name it as 'source'."),
+				new("dry-run", null, "Check the plan and show the allocation without changing anything.")
+			],
+			["bassia component split -plan split.toml -dry-run", "bassia component split -plan split.toml", "bassia component split -name app -plan -"],
+			SplitCommands.SplitAsync, Positional: "plan",
+			Details: "The plan: source = \"<component>\", optional branch, shared = [patterns] (copied into every part), drop = [patterns] (left out), " +
+				"follow_renames = true|false, one [[part]] per new component with name, paths = [patterns], optional references and url, and optional " +
+				"[[referrer]] tables (name, references) for components that referenced the source (by default they reference every part). Patterns are " +
+				"relative to the component root: ** any folders, * within a folder, ? one character, a folder matches everything below it, !pattern " +
+				"excludes. Every file at the tip must go to exactly one part, 'shared' or 'drop'; all problems are reported at once, and nothing changes. " +
+				"Each part is a new repository whose history holds every commit that changed its files (authors, dates and messages kept, a Split-from " +
+				"trailer added), the tags of the branch, and a split record commit tagged split/<id>; the source's repository is kept, tagged split/<id>."),
+
 		new("graph", null, "Draw the component dependency graph: ASCII boxes in layers (board), an ASCII tree, Mermaid or SVG.",
 			[
 				new("name", "component", "Only this component and what it depends on."),
