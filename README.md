@@ -34,6 +34,7 @@ its usage, every switch and examples. Help is TOML too.
 | Monorepo | `init [-path <dir>]`, `status`, `version` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]` |
+| Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-limit <n>] [-page <n>]` |
 | Agentic runs | `run start -select <c@tag>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
@@ -148,6 +149,75 @@ each change to the meta-repo:
 
 `component add|set|remove` edit `.bassia/components.toml` the same way and reject a change that would leave a cycle
 or a reference to an unregistered component.
+
+### Splitting a component
+
+A component is the unit a run clones, so one that has grown too large, or mixes architecturally distinct parts, is
+broken up to keep runs cheap and dependencies precise. Deciding the breakdown is judgement - typically an LLM's;
+performing it is `bassia`'s:
+
+```powershell
+bassia component survey app                           # folders, sizes, change counts, co-changing folders, a plan skeleton
+bassia component split -plan split.toml -dry-run      # check the plan; every problem is listed, nothing changes
+bassia component split -plan split.toml               # do it
+```
+
+`survey` reports the component's folders (to `-depth`, default 2) with their files, bytes and the commits that touched
+them, the pairs of folders most often changed in the same commit (a split between them turns one change into several),
+and a `plan` skeleton. The plan is TOML:
+
+```toml
+source = "app"
+branch = "main"                         # optional: the source's default branch
+shared = ["LICENSE", "README.md"]       # optional: copied into every part, with history
+drop = ["legacy"]                       # optional: left out of every part, with history
+follow_renames = true                   # optional (default): files keep their history under earlier paths
+
+[[part]]
+name = "app-core"
+paths = ["src/core/**", "tests/core"]
+references = ["lib"]                    # optional: default is the source's references
+
+[[part]]
+name = "app-ui"
+paths = ["src/ui", "!src/ui/generated"]
+references = ["app-core", "lib"]
+url = "https://github.com/myrepo/app-ui.git"   # optional: recorded in components.toml and as the repo's origin
+
+[[referrer]]                            # optional: by default a referrer of the source references every part
+name = "tool"
+references = ["app-core"]
+```
+
+Patterns are relative to the component's root: `**` any folders, `*` within one folder, `?` one character; a pattern
+matches everything below what it matches (`src/ui` is the folder), and `!pattern` excludes. Every file at the tip must
+go to exactly one part, to `shared` or to `drop`; unallocated files, files several parts match, a part without files,
+taken names, unknown references and cycles are reported together (`problems`, `unallocated`, `ambiguous`) and nothing
+changes. A split is refused while a run on the source is live.
+
+Each part becomes a new repository `<root>/<part>/.git` with the source's branch name:
+
+- Its history is every source commit that changed one of its files, reduced to those files, with the original author,
+  committer, dates and message plus a `Split-from: <source>@<commit>` trailer. Commits that changed none of its files
+  are left out; merges stay merges where both sides changed the part and collapse otherwise.
+- A file's history follows renames: a file moved into the part (from another part's folder or from nowhere) keeps its
+  history under its earlier paths, so `git log --follow` and `git blame` reach its first commit. When an earlier path is
+  used again at the tip by another file, each part gets its own file's timeline only (`follow_renames = false` turns
+  this off).
+- The tags reachable from the branch come along, on the part's commit for the tagged state (annotated ones keep their
+  tagger and message), so a baseline such as `v1` is selectable as `app-core@v1`; tags from before the part had any
+  file are dropped and reported.
+- It ends with a split record commit (no change) whose message carries a TOML `[split]` record, tagged `split/<id>` -
+  a baseline for the next run (`run start -select app-core@split/<id>,...`).
+
+The tip of every part is verified against the source's tip (same files, modes and content) before anything is
+registered. The history is read once (`git fast-export`), each part is written by `git fast-import` into a repository
+that borrows the source's objects and then copies only what it reaches, so a part holds only its own files' objects.
+Only then are the parts registered in `components.toml`, the referrers rewired and the source unregistered, in one
+meta-repo commit carrying the split record. The source's repository is kept untouched apart from a `split/<id>` tag, so
+its history, run tags and run records stay valid; results of runs that were never merged into the split branch stay
+there and are listed as `unmerged_results`. If any step fails, the new repositories are removed and `components.toml`
+is restored.
 
 ### Agentic runs
 
@@ -325,7 +395,10 @@ dotnet test --filter Category=EndToEnd --logger "console;verbosity=detailed"
 Most tests drive the CLI in-process against components created locally. `CliSurfaceTests` covers the grammar, the
 help of every command and the monorepo, configuration, component, graph and log commands; `RunCommandTests` the run
 and integration commands, including detached runs and stopping them, which start the built `bassia` apphost as a real
-background process. `ParallelAgentRunEndToEndTests`
+background process. `ComponentSplitTests` splits a component with a branchy history (moves into and between
+parts, a merge, tags, a dropped folder, a path reused after its file moved away) and checks every part's files,
+`git log --follow`, tags, record commit and registration, plus plan errors, dry runs, rollback and the survey.
+`ParallelAgentRunEndToEndTests`
 (`Category=EndToEnd`) is the whole-pipeline proof and works differently: it builds a monorepo in the temp folder,
 clones [jk09/example](https://github.com/jk09/example) twice as two components, tags each component's HEAD, and
 starts one agentic run per component **at the same time**, each as its own `bassia` process. It then checks that

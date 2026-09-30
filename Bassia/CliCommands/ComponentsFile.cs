@@ -13,10 +13,15 @@ internal static class ComponentsFile
 {
 	public static string PathOf(string root) => Path.Combine(root, Monorepo.MetaRepoFolderName, "components.toml");
 
-	/// <summary>Appends a new <c>[[component]]</c> block.</summary>
+	/// <summary>Appends a new <c>[[component]]</c> block; an empty <paramref name="url"/> (a component with no upstream) is left out.</summary>
 	public static void Add(string root, string name, string url, IReadOnlyList<ComponentReference> references)
 	{
-		var builder = new StringBuilder($"\n[[component]]\nname = {ConfigFile.Quote(name)}\nurl = {ConfigFile.Quote(url)}\n");
+		var builder = new StringBuilder($"\n[[component]]\nname = {ConfigFile.Quote(name)}\n");
+		if (url.Length > 0)
+		{
+			builder.Append($"url = {ConfigFile.Quote(url)}\n");
+		}
+
 		if (references.Count > 0)
 		{
 			builder.Append(ReferencesLine(references)).Append('\n');
