@@ -448,9 +448,15 @@ public class AgentCommandTests
 		var parsed = ComponentSelection.ParseList("-select", "app@v0, lib@release/1.0");
 		Assert.Equal([new("app", "v0"), new("lib", "release/1.0")], parsed);
 
-		Assert.Contains("expected <component>@<commit-ish>", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-select", "app")).Message);
+		Assert.Contains("expected <component>@<commit-ish>", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-onto", "app")).Message);
 		Assert.Contains("expected <component>@<commit-ish>", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-select", "app@")).Message);
 		Assert.Contains("more than once", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-select", "app@v0,app@v1")).Message);
+
+		// -select also takes a bare name (the default branch's tip), but never an empty name or selector.
+		Assert.Equal([new("app", null), new("lib", "v1")], ComponentSelection.ParseList("-select", "app, lib@v1", allowBare: true));
+		Assert.Contains("expected <component>@<commit-ish> or <component>", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-select", "app@", allowBare: true)).Message);
+		Assert.Contains("expected <component>@<commit-ish> or <component>", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-select", "@v1", allowBare: true)).Message);
+		Assert.Contains("more than once", Assert.Throws<AgentException>(() => ComponentSelection.ParseList("-select", "app,app@v1", allowBare: true)).Message);
 	}
 
 	[Fact]

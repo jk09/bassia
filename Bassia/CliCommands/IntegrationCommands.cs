@@ -26,7 +26,7 @@ internal static class IntegrationCommands
 		var onto = new Dictionary<string, string>(StringComparer.Ordinal);
 		foreach (var selection in ComponentSelection.ParseList("-onto", string.Join(",", invocation.List("onto"))))
 		{
-			onto[selection.Component] = selection.CommitIsh;
+			onto[selection.Component] = selection.CommitIsh!;
 		}
 
 		var strategies = new Dictionary<(string, string), MergeStrategy>();

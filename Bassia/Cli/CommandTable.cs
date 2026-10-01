@@ -180,9 +180,9 @@ internal static class CommandTable
 
 		// ----- agentic runs -----
 
-		new("run", "start", "Start an agentic run: materialize the selected components at their tags in an isolated run folder, run the agent there, then commit, tag and push each changed component.",
+		new("run", "start", "Start an agentic run: materialize the selected components at their tags, hashes or default-branch tips in an isolated run folder, run the agent there, then commit, tag and push each changed component.",
 			[
-				new("select", "component@tag|hash,...", "Every component of the run at an annotated tag or a commit hash (6 to 40 lowercase hex digits, unambiguous in the component); must cover the components they reference.", Required: true),
+				new("select", "component[@tag|hash],...", "Every component of the run: a bare name starts from the tip of its default branch (resolved and recorded when the run starts), or add an annotated tag or a commit hash (6 to 40 lowercase hex digits, unambiguous in the component); must cover the components they reference.", Required: true),
 				new("detach", null, "Return at once and continue in the background; follow with run show/logs/wait, stop with run stop."),
 				new("prompt", "text", "Compose the agent command from this prompt and the configured agent.command."),
 				new("agent", "command", "With -prompt: the agent command to use instead of agent.command."),
@@ -197,10 +197,11 @@ internal static class CommandTable
 				"bassia run start -select app@v1,lib@v1 -prompt \"add a changelog\" -model opus",
 				"bassia run start -select app@v1,lib@v1 -detach -prompt \"fix the failing tests\"",
 				"bassia run start -select lib@v1 -run claude -p \"refactor the parser\" --permission-mode acceptEdits",
-				"bassia run start -select app@3f9c2e1,lib@v1 -prompt \"bisect the regression\""
+				"bassia run start -select app@3f9c2e1,lib@v1 -prompt \"bisect the regression\"",
+				"bassia run start -select app,lib -prompt \"update the docs\""
 			],
 			RunCommands.StartAsync,
-			Usage: "bassia run start -select <component@tag|hash,...> [-detach] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
+			Usage: "bassia run start -select <component[@tag|hash],...> [-detach] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
 			Details: "Without -detach the agent's output streams to the terminal and the result follows when the run ends; Ctrl-C stops the run and records it as cancelled. " +
 				"With -detach the selection is checked first, then the run continues in a background bassia process and the result (run_id, pid, log) is printed at once. " +
 				"The agent runs in the run folder with BASSIA_ROOT, BASSIA_RUN_ID and BASSIA_RUN_DIR set."),

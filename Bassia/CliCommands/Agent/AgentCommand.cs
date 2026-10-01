@@ -116,17 +116,18 @@ internal static class AgentCommand
 	}
 
 	/// <summary>
-	/// Checks a <c>-select</c> value and resolves every component's tag or hash to its commit, without touching the
-	/// filesystem: every entry names a registered component and an annotated tag or a commit hash, and the selection covers its own
-	/// reference closure. Returns the closure in dependency order with each component's resolved commit.
+	/// Checks a <c>-select</c> value and resolves every component's tag, hash or default branch to its commit, without
+	/// touching the filesystem: every entry names a registered component, either bare (the tip of its default branch)
+	/// or with an annotated tag or a commit hash, and the selection covers its own reference closure. Returns the
+	/// closure in dependency order with each component's selector (the branch name for a bare entry) and resolved commit.
 	/// </summary>
 	internal static async Task<(IReadOnlyList<ComponentDefinition> Closure, IReadOnlyList<(ComponentDefinition Component, string CommitIsh, string Commit)> Resolved)>
 		ResolveSelectionAsync(Monorepo monorepo, string select)
 	{
-		var selected = ComponentSelection.ParseList("-select", select);
+		var selected = ComponentSelection.ParseList("-select", select, allowBare: true);
 		if (selected.Count == 0)
 		{
-			throw new AgentException("-select names no component; expected <component>@<tag|hash>[,<component>@<tag|hash>...].");
+			throw new AgentException("-select names no component; expected <component>[@<tag|hash>][,<component>[@<tag|hash>]...].");
 		}
 
 		foreach (var selection in selected)
@@ -144,8 +145,9 @@ internal static class AgentCommand
 		var resolved = new List<(ComponentDefinition Component, string CommitIsh, string Commit)>();
 		foreach (var component in closure)
 		{
-			var commitIsh = commitIshByName[component.Name];
-			resolved.Add((component, commitIsh, await ResolveCommitAsync(monorepo, component.Name, commitIsh)));
+			resolved.Add(commitIshByName[component.Name] is { } commitIsh
+				? (component, commitIsh, await ResolveCommitAsync(monorepo, component.Name, commitIsh))
+				: await ResolveDefaultBranchAsync(monorepo, component));
 		}
 
 		return (closure, resolved);
@@ -166,8 +168,8 @@ internal static class AgentCommand
 
 	/// <summary>
 	/// A run must select every component it materializes: the reference closure of the selection has to be the
-	/// selection itself. Inferring a version for a component nobody named would put a mutable reference into an
-	/// otherwise tag-pinned, reproducible run record.
+	/// selection itself. A component nobody named is never pulled in implicitly: each one's version (a tag, a hash or
+	/// its default branch's tip) is the caller's explicit choice.
 	/// </summary>
 	private static void RequireCompleteClosure(IReadOnlyList<ComponentSelection> selected, IReadOnlyList<ComponentDefinition> closure)
 	{
@@ -186,7 +188,47 @@ internal static class AgentCommand
 		var details = string.Join(", ", missing.Select(name => $"'{name}' (referenced by '{referrers[name]}')"));
 		throw new AgentException(
 			$"-select must cover the full component closure; missing: {details}. " +
-			$"Add each as <component>@<tag|hash>, for example: -select {selected[0].Component}@{selected[0].CommitIsh},{missing[0]}@<tag>.");
+			$"Add each as <component> or <component>@<tag|hash>, for example: -select {string.Join(",", selected.Select(Format))},{missing[0]}.");
+
+		static string Format(ComponentSelection selection) =>
+			selection.CommitIsh is null ? selection.Component : $"{selection.Component}@{selection.CommitIsh}";
+	}
+
+	/// <summary>
+	/// Resolves a bare <c>-select</c> entry: the tip of the component's default branch (the branch its source-of-truth
+	/// repo's HEAD names) at this moment. The branch name is recorded as the selector and the commit as the run's
+	/// immutable provenance, so the record stays reproducible although the branch moves on.
+	/// </summary>
+	private static async Task<(ComponentDefinition Component, string CommitIsh, string Commit)> ResolveDefaultBranchAsync(Monorepo monorepo, ComponentDefinition component)
+	{
+		var sourceDir = RequireSourceDir(monorepo, component.Name);
+		var source = GitClient.In(sourceDir);
+		var head = await source.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+		var branch = head.ExitCode == 0 ? head.Output.Trim() : "";
+		if (branch.Length == 0)
+		{
+			throw new AgentException(
+				$"Component '{component.Name}' ('{sourceDir}') has no default branch: its HEAD is detached. " +
+				$"Select it as {component.Name}@<tag|hash>.");
+		}
+
+		var commit = await source.RunAsync(["rev-parse", "--verify", "--quiet", $"refs/heads/{branch}^{{commit}}"]);
+		if (commit.ExitCode != 0)
+		{
+			throw new AgentException(
+				$"Component '{component.Name}' ('{sourceDir}') has no commit on its default branch '{branch}'. " +
+				$"Select it as {component.Name}@<tag|hash>.");
+		}
+
+		return (component, branch, commit.Output.Trim());
+	}
+
+	private static string RequireSourceDir(Monorepo monorepo, string componentName)
+	{
+		var sourceDir = monorepo.SourceRepoDir(componentName);
+		return Directory.Exists(sourceDir)
+			? sourceDir
+			: throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia component add' first.");
 	}
 
 	/// <summary>
@@ -195,12 +237,7 @@ internal static class AgentCommand
 	/// </summary>
 	private static async Task<string> ResolveCommitAsync(Monorepo monorepo, string componentName, string commitIsh)
 	{
-		var sourceDir = monorepo.SourceRepoDir(componentName);
-		if (!Directory.Exists(sourceDir))
-		{
-			throw new AgentException($"Component '{componentName}' has no local repository at '{sourceDir}'. Run 'bassia component add' first.");
-		}
-
+		var sourceDir = RequireSourceDir(monorepo, componentName);
 		var source = GitClient.In(sourceDir);
 		if (IsHashSelector(commitIsh) && await ResolveHashAsync(source, sourceDir, componentName, commitIsh) is { } commit)
 		{
@@ -215,7 +252,7 @@ internal static class AgentCommand
 
 		if (type.Output.Trim() != "tag")
 		{
-			throw new AgentException($"'{componentName}@{commitIsh}' is a {type.Output.Trim()}, not an annotated tag. Select an annotated tag or a commit hash, or create a tag with: git -C \"{sourceDir}\" tag -a <name> -m <message>");
+			throw new AgentException($"'{componentName}@{commitIsh}' is a {type.Output.Trim()}, not an annotated tag. Select an annotated tag or a commit hash (or the bare component name for its default branch's tip), or create a tag with: git -C \"{sourceDir}\" tag -a <name> -m <message>");
 		}
 
 		return await source.RunOrThrowAsync(["rev-parse", "--verify", $"{commitIsh}^{{commit}}"]);
