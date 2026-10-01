@@ -195,14 +195,14 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		Assert.Equal(resultCommit, await TestEnvironment.GitAsync(source, "rev-parse", branch));
 
 		// The run branch and its result tag are the only refs the run added to the component.
-		var agentRefs = (await TestEnvironment.GitAsync(source, "for-each-ref", "--format=%(refname)", "refs/heads/agent/", "refs/tags/agent/"))
+		var agentRefs = (await TestEnvironment.GitAsync(source, "for-each-ref", "--format=%(refname)", "refs/heads/agent-run/", "refs/tags/agent-run/"))
 			.Replace("\r", "");
 		Assert.Equal($"refs/heads/{branch}\nrefs/tags/{resultTag}", agentRefs);
 
 		// The commit message carries the run's provenance, so a component's history reads back to the run.
 		var message = (await TestEnvironment.GitAsync(source, "log", "-1", "--format=%B", resultCommit)).Replace("\r", "");
 		var lines = message.Split('\n');
-		Assert.Equal($"agent({RunMetadata.ShortKey(runId)}): {AgentCommand.SummarizeCommand(plan.AgentCommand)}", lines[0]);
+		Assert.Equal($"agent({RunMetadata.Key(runId)}): {AgentCommand.SummarizeCommand(plan.AgentCommand)}", lines[0]);
 		Assert.Equal("", lines[1]);
 		var record = (TomlTable)TomlSerializer.Deserialize<TomlTable>(string.Join('\n', lines[2..]))!["agentic_run"];
 		Assert.Equal(runId, record["id"]);

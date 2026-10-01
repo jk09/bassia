@@ -16,7 +16,7 @@ internal static class ResultCommitMessage
 	{
 		var subject = subjectTemplate
 			.Replace("{run_id}", metadata.RunId)
-			.Replace("{short_id}", RunMetadata.ShortKey(metadata.RunId))
+			.Replace("{short_id}", RunMetadata.Key(metadata.RunId))
 			.Replace("{summary}", summary)
 			.Replace("{component}", component.Name)
 			.Split('\n')[0].Trim();

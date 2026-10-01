@@ -444,7 +444,7 @@ internal sealed class Dashboard
 	{
 		var card = LiveCard(id);
 		var runId = card?.RunId ?? (card is null ? RunMetadata.NormalizeRunId(id) : null);
-		var metadata = runId is not null && RunMetadata.Key(runId).Length == 32 ? await store.LoadLatestAsync(runId) : null;
+		var metadata = runId is not null && RunMetadata.IsRunId(runId) ? await store.LoadLatestAsync(runId) : null;
 		card ??= metadata is null ? null : LiveCard(metadata.RunId);
 		if (card is null && metadata is null)
 		{
@@ -507,7 +507,7 @@ internal sealed class Dashboard
 			}
 		}
 
-		var title = metadata is not null ? $"Run {RunMetadata.ShortKey(metadata.RunId)}" : $"Run {card!.Label}";
+		var title = metadata is not null ? $"Run {RunMetadata.Key(metadata.RunId)}" : $"Run {card!.Label}";
 		return View("/runs", title, body.ToString());
 	}
 
@@ -732,7 +732,7 @@ internal sealed class Dashboard
 		}
 
 		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs);
-		var command = $"bassia integration start -runs {string.Join(",", runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => RunMetadata.ShortKey(run.RunId)))}";
+		var command = $"bassia integration start -runs {string.Join(",", runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => RunMetadata.Key(run.RunId)))}";
 		var body = $"""
 			<p>{E(Summary(plan))}. Nothing was changed. To integrate: <code>{E(command)}</code>.</p>
 			{StepsTable(plan)}
@@ -753,7 +753,7 @@ internal sealed class Dashboard
 
 	private async Task<IResult> IntegrationAsync(string id)
 	{
-		var record = IntegrationRecord.Key(IntegrationRecord.NormalizeId(id)).Length == 32
+		var record = IntegrationRecord.IsId(IntegrationRecord.NormalizeId(id))
 			? await integrations.LoadLatestAsync(IntegrationRecord.NormalizeId(id))
 			: null;
 		if (record is null)
@@ -786,7 +786,7 @@ internal sealed class Dashboard
 			body.Append("</table>");
 		}
 
-		return View("/integrations", $"Integration {IntegrationRecord.ShortKey(record.IntegrationId)}", body.ToString());
+		return View("/integrations", $"Integration {IntegrationRecord.Key(record.IntegrationId)}", body.ToString());
 	}
 
 	/// <summary>The triage or the outcome, per component in execution order: the dashboard's view of merge resolution.</summary>
@@ -799,7 +799,7 @@ internal sealed class Dashboard
 			{
 				var step = component.Steps[i];
 				var strategy = IntegrationRecord.Snake(step.Strategy);
-				var conflicts = string.Join(", ", step.Conflicts) + (step.ConflictsWith.Count > 0 ? $" vs {string.Join(", ", step.ConflictsWith.Select(RunMetadata.ShortKey))}" : "");
+				var conflicts = string.Join(", ", step.Conflicts) + (step.ConflictsWith.Count > 0 ? $" vs {string.Join(", ", step.ConflictsWith.Select(RunMetadata.Key))}" : "");
 				var outcome = IntegrationRecord.Snake(step.Outcome) + (step.Commit is null ? "" : $" {Short(step.Commit)}");
 				var head = i == 0 ? $"<a href=\"{ComponentHref(component.Name)}\"><b>{E(component.Name)}</b></a> <span class=\"muted\">onto {E(component.BaseRef)} {E(Short(component.BaseCommit))}</span>" : "";
 				body.Append($"""

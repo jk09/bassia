@@ -88,8 +88,8 @@ public class IntegrateCommandTests
 
 		// Every run came in through its own merge commit, whose message says which run and how.
 		var subjects = await TestEnvironment.GitAsync(source, "log", "--merges", "--format=%s", Tag(record));
-		Assert.Contains(RunMetadata.ShortKey(first), subjects);
-		Assert.Contains(RunMetadata.ShortKey(second), subjects);
+		Assert.Contains(RunMetadata.Key(first), subjects);
+		Assert.Contains(RunMetadata.Key(second), subjects);
 		var message = await TestEnvironment.GitAsync(source, "log", "-1", "--format=%B", Tag(record));
 		Assert.Contains("[integration]", message);
 		Assert.Contains("strategy = \"syntactic\"", message);
@@ -208,7 +208,7 @@ public class IntegrateCommandTests
 		var stdin = Path.Combine(fixture.Root, "review.md");
 
 		var (exitCode, _, error) = await fixture.IntegrationStartAsync(
-			"-runs", "all", "-skip", RunMetadata.ShortKey(second), "-semantic", third, "-resolve", TestEnvironment.CaptureStdinCommand(stdin));
+			"-runs", "all", "-skip", RunMetadata.Key(second), "-semantic", third, "-resolve", TestEnvironment.CaptureStdinCommand(stdin));
 
 		Assert.True(exitCode == 0, error);
 		var steps = Assert.Single((await SingleIntegrationAsync(fixture)).Components).Steps;
@@ -347,7 +347,7 @@ public class IntegrateCommandTests
 		};
 		record.Runs.Add("agent-run-1");
 		var component = new ComponentIntegration { Name = "app", BaseRef = "main", BaseCommit = "abc", ResultTag = "integration/x/0", ResultStatus = ResultStatus.Pushed };
-		var step = new IntegrationStep { RunId = "agent-run-1", Rationale = "say \"hi\"\nplease", SourceTag = "agent/run-1/0", SourceCommit = "def", Triage = Triage.FastForward, Strategy = MergeStrategy.Semantic, Outcome = StepOutcome.Failed, Note = "n" };
+		var step = new IntegrationStep { RunId = "agent-run-1", Rationale = "say \"hi\"\nplease", SourceTag = "agent-run/1/0", SourceCommit = "def", Triage = Triage.FastForward, Strategy = MergeStrategy.Semantic, Outcome = StepOutcome.Failed, Note = "n" };
 		step.Conflicts.Add("a.txt");
 		step.ConflictsWith.Add("agent-run-2");
 		component.Steps.Add(step);
@@ -382,8 +382,8 @@ public class IntegrateCommandTests
 
 		// While resolving the second run, the resolver puts a folder where the third run's brief has to be written.
 		var blockBrief = OperatingSystem.IsWindows()
-			? $"mkdir ..\\example.{RunMetadata.ShortKey(third)}.merge.md & echo merged> same.txt"
-			: $"mkdir ../example.{RunMetadata.ShortKey(third)}.merge.md && echo merged > same.txt";
+			? $"mkdir ..\\example.{RunMetadata.Key(third)}.merge.md & echo merged> same.txt"
+			: $"mkdir ../example.{RunMetadata.Key(third)}.merge.md && echo merged > same.txt";
 		var (exitCode, _, error) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", ResolverFor(second, blockBrief));
 
 		Assert.Equal(1, exitCode);

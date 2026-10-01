@@ -209,7 +209,7 @@ public class DashboardTests
 		var done = await host.GetAsync("/runs/s1");
 		Assert.Contains("completed", done);
 		Assert.Contains(RunMetadata.TagName(card.RunId!, 0), done);
-		Assert.Contains(RunMetadata.ShortKey(card.RunId!), await host.GetAsync("/runs"));
+		Assert.Contains(RunMetadata.Key(card.RunId!), await host.GetAsync("/runs"));
 		Assert.Contains("event: done", await host.GetAsync("/runs/s1/events"));
 	}
 
@@ -282,7 +282,7 @@ public class DashboardTests
 		Assert.Contains("same.txt", plan);
 		Assert.Contains("Nothing was changed", plan);
 		Assert.Single(await new Bassia.Integration.IntegrationStore(new RunMetadataStore(new GitClient(fixture.Root), fixture.RunsRepo)).ListLatestAsync());
-		await host.GetAsync("/integrations/integration-00000000000000000000000000000000", HttpStatusCode.NotFound);
+		await host.GetAsync("/integrations/integration-brave-otter-000000", HttpStatusCode.NotFound);
 	}
 
 	[Fact]

@@ -19,7 +19,7 @@ internal sealed record SwitchSpec(string Name, string? Value, string Description
 /// One command of the command line - <c>bassia &lt;name&gt; [&lt;sub&gt;]</c> - with everything needed to parse, run and
 /// explain it. The help, the usage line in an error and what the parser accepts all come from this one record, so
 /// they cannot drift apart. <see cref="Positional"/> names the switch a single bare argument stands for
-/// (<c>bassia run show 3f2a91c4</c> is <c>bassia run show -id 3f2a91c4</c>).
+/// (<c>bassia run show brave-otter-3f2a91</c> is <c>bassia run show -id brave-otter-3f2a91</c>).
 /// </summary>
 internal sealed record CommandSpec(
 	string Name,

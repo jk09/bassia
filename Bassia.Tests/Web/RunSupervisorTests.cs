@@ -44,7 +44,7 @@ public class RunSupervisorTests
 		var release = new TaskCompletionSource();
 		using var supervisor = new RunSupervisor(async (_, _, context) =>
 		{
-			context.OnStep!(new AgentRunStep("agent-run-" + new string('a', 32), AgentRunPhase.Agent, "running the agent"));
+			context.OnStep!(new AgentRunStep("agent-run-brave-otter-aaaaaa", AgentRunPhase.Agent, "running the agent"));
 			context.OnOutput!("first line");
 			context.OnOutput!("second line");
 			await release.Task;

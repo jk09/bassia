@@ -161,7 +161,7 @@ internal static class RunCommands
 				new Dictionary<string, object?> { ["run_id"] = runId, ["log"] = log });
 		}
 
-		var shortId = RunMetadata.ShortKey(runId);
+		var shortId = RunMetadata.Key(runId);
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Agentic run '{runId}' started in the background. Follow it with 'bassia run show {shortId}', 'bassia run logs {shortId}' " +
 			$"or 'bassia run wait {shortId}'; stop it with 'bassia run stop {shortId}'.",
@@ -234,8 +234,8 @@ internal static class RunCommands
 	}
 
 	/// <summary>
-	/// The run <c>-id</c> names: its full id, its <c>&lt;id&gt;</c> part, or a prefix of at least four digits such as
-	/// the short id - among recorded runs and runs still preparing.
+	/// The run <c>-id</c> names: its full id, its <c>&lt;key&gt;</c> part, or a prefix of at least four characters of the key -
+	/// among recorded runs and runs still preparing.
 	/// </summary>
 	private static async Task<FoundRun> FindAsync(Invocation invocation)
 	{
@@ -253,7 +253,7 @@ internal static class RunCommands
 		{
 			1 => candidates[0],
 			0 => throw new AgentException($"Unknown agentic run '{name}'. List the runs with 'bassia run list'."),
-			_ => throw new AgentException($"'{name}' names more than one agentic run ({string.Join(", ", candidates.Select(RunMetadata.ShortKey))}); give more of its id.")
+			_ => throw new AgentException($"'{name}' names more than one agentic run ({string.Join(", ", candidates.Select(RunMetadata.Key))}); give more of its id.")
 		};
 
 		return new FoundRun(monorepo, store, jobs, runId, await store.LoadLatestAsync(runId), jobs.Find(runId));
@@ -291,7 +291,7 @@ internal static class RunCommands
 				["table"] = new TomlText(AsciiTable.Render(["ID", "STATUS", "LIVE", "CREATED", "TIME", "COMPONENTS", "SUMMARY"],
 					shown.Select(run => (IReadOnlyList<string>)
 					[
-						RunMetadata.ShortKey(run.RunId), run.Status + (run.Stale ? "!" : ""), run.Live ? "yes" : "",
+						RunMetadata.Key(run.RunId), run.Status + (run.Stale ? "!" : ""), run.Live ? "yes" : "",
 						Time(run.Record?.Created ?? run.Job?.Started), Elapsed(run.Record?.Created ?? run.Job?.Started, run.Record?.Finished),
 						string.Join(",", run.Record?.Components.Select(entry => entry.Name) ?? []),
 						run.Record is null ? "" : AgentCommand.SummarizeCommand(run.Record.Command)
@@ -303,7 +303,7 @@ internal static class RunCommands
 	private static Dictionary<string, object?> Summary(FoundRun run) => new()
 	{
 		["run_id"] = run.RunId,
-		["short_id"] = RunMetadata.ShortKey(run.RunId),
+		["short_id"] = RunMetadata.Key(run.RunId),
 		["status"] = run.Status,
 		["live"] = run.Live,
 		["stale"] = run.Stale,
@@ -325,7 +325,7 @@ internal static class RunCommands
 	}
 
 	private static string Describe(FoundRun run) =>
-		run.Stale ? $"Agentic run '{run.RunId}' is recorded as started, but no process is executing it any more; 'bassia run stop {RunMetadata.ShortKey(run.RunId)}' records it as cancelled."
+		run.Stale ? $"Agentic run '{run.RunId}' is recorded as started, but no process is executing it any more; 'bassia run stop {RunMetadata.Key(run.RunId)}' records it as cancelled."
 		: run.Live ? $"Agentic run '{run.RunId}' is live ({run.Status})."
 		: run.Record is null ? $"Agentic run '{run.RunId}' never got past preparing; it has no record."
 		: $"Agentic run '{run.RunId}' is {run.Status}.";
@@ -336,7 +336,7 @@ internal static class RunCommands
 			? new Dictionary<string, object?> { ["run_id"] = run.RunId, ["status"] = run.Status }
 			: AgentCommand.ResultData(run.Record, run.Store, []);
 		data.Remove("metadata_tags");
-		data["short_id"] = RunMetadata.ShortKey(run.RunId);
+		data["short_id"] = RunMetadata.Key(run.RunId);
 		data["status"] = run.Status;
 		data["live"] = run.Live;
 		data["stale"] = run.Stale;
@@ -377,7 +377,7 @@ internal static class RunCommands
 			$"{entry.Name,-12} {entry.ResultStatus.ToString().ToLowerInvariant(),-10} {entry.ResultTag ?? entry.CommitIsh}").ToList() ?? [];
 
 		var builder = new StringBuilder();
-		var title = $"+-- {RunMetadata.ShortKey(run.RunId)} ";
+		var title = $"+-- {RunMetadata.Key(run.RunId)} ";
 		builder.Append(title).Append(new string('-', width - title.Length - 1)).Append("+\n");
 		foreach (var line in lines)
 		{
@@ -407,7 +407,7 @@ internal static class RunCommands
 		{
 			throw new AgentException(
 				$"Agentic run '{run.RunId}' was not started with -detach, so its output went to the terminal or frontend that started it; " +
-				$"'bassia run show {RunMetadata.ShortKey(run.RunId)}' shows its record.");
+				$"'bassia run show {RunMetadata.Key(run.RunId)}' shows its record.");
 		}
 
 		var lines = ReadLines(log);
@@ -439,7 +439,7 @@ internal static class RunCommands
 				var data = Details(run);
 				data["timed_out"] = true;
 				return ProgramCli.WriteResult(false, invocation.Command,
-					$"Agentic run '{run.RunId}' is still running after {timeout}s; wait again, or stop it with 'bassia run stop {RunMetadata.ShortKey(run.RunId)}'.", data);
+					$"Agentic run '{run.RunId}' is still running after {timeout}s; wait again, or stop it with 'bassia run stop {RunMetadata.Key(run.RunId)}'.", data);
 			}
 
 			await Task.Delay(500);
@@ -531,7 +531,7 @@ internal static class RunCommands
 		var record = run.Record ?? throw new AgentException($"Agentic run '{run.RunId}' has no record yet; nothing to abandon.");
 		if (run.Live)
 		{
-			throw new AgentException($"Agentic run '{run.RunId}' is still running; stop it first with 'bassia run stop {RunMetadata.ShortKey(run.RunId)}'.");
+			throw new AgentException($"Agentic run '{run.RunId}' is still running; stop it first with 'bassia run stop {RunMetadata.Key(run.RunId)}'.");
 		}
 
 		var outcome = await AgentCommand.AbandonAsync(run.Store, record);

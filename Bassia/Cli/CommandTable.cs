@@ -17,8 +17,8 @@ internal static class CommandTable
 		["ui"] = "'bassia ui' was removed: use the command line, or 'bassia web' for the web dashboard."
 	};
 
-	private static readonly SwitchSpec Id = new("id", "run-id", "The run: its full id, its <id> part, or a prefix of at least 4 digits such as the short id.", Required: true);
-	private static readonly SwitchSpec IntegrationId = new("id", "integration-id", "The integration: its full id, its <id> part, or a prefix of at least 4 digits.", Required: true);
+	private static readonly SwitchSpec Id = new("id", "run-id", "The run: its full id, its <key> part (the short id), or a prefix of at least 4 characters of the key.", Required: true);
+	private static readonly SwitchSpec IntegrationId = new("id", "integration-id", "The integration: its full id, its <key> part (the short id), or a prefix of at least 4 characters of the key.", Required: true);
 	private static readonly SwitchSpec Runs = new("runs", "run-id,...|all", "The runs to integrate, oldest first; 'all' is every run with a pushed result.", Required: true);
 	private static readonly SwitchSpec Onto = new("onto", "component@ref,...", "Integrate a component onto this branch or tag instead of its default branch.");
 	private static readonly SwitchSpec Semantic = new("semantic", "run-id,...", "Send these runs' results to the resolver even without a textual conflict.");
@@ -169,7 +169,7 @@ internal static class CommandTable
 			],
 			[
 				"bassia log", "bassia log -component app", "bassia log -component app -only -limit 50", "bassia log -component app,tool -page 2",
-				"bassia log -component app -branch main", "bassia log -run 3f2a91c4", "bassia log -run 3f2a91c4,91ab22cd -component lib"
+				"bassia log -component app -branch main", "bassia log -run brave-otter-3f2a91", "bassia log -run brave-otter-3f2a91,quiet-fern-91ab22 -component lib"
 			],
 			LogCommand.RunAsync,
 			Details: "Every [[commit]] carries kind = \"result\" (a run's result commit, run_id) or kind = \"integration\" (an integration's merge " +
@@ -215,47 +215,47 @@ internal static class CommandTable
 
 		new("run", "show", "Show a run: its record, per-component results, whether it is live, and its latest output line.",
 			[Id],
-			["bassia run show -id 3f2a91c4", "bassia run show 3f2a91c4"],
+			["bassia run show -id brave-otter-3f2a91", "bassia run show brave-otter-3f2a91"],
 			RunCommands.ShowAsync, Positional: "id"),
 
 		new("run", "logs", "Print the captured output of a detached run (agent output and bassia's progress).",
 			[Id, new("tail", "n", "The last n lines (default: 50; 0 for all).")],
-			["bassia run logs 3f2a91c4", "bassia run logs -id 3f2a91c4 -tail 0"],
+			["bassia run logs brave-otter-3f2a91", "bassia run logs -id brave-otter-3f2a91 -tail 0"],
 			RunCommands.LogsAsync, Positional: "id"),
 
 		new("run", "wait", "Wait until a run is no longer live; ok when it completed.",
 			[Id, new("timeout", "seconds", "Give up after this long with timed_out = true (default: 0, wait as long as it takes).")],
-			["bassia run wait 3f2a91c4", "bassia run wait -id 3f2a91c4 -timeout 600"],
+			["bassia run wait brave-otter-3f2a91", "bassia run wait -id brave-otter-3f2a91 -timeout 600"],
 			RunCommands.WaitAsync, Positional: "id"),
 
 		new("run", "stop", "Stop a live run (started from any shell, detached, or in bassia web): kill the agent's process tree, record the run as cancelled and keep its folder.",
 			[Id, new("timeout", "seconds", "How long to wait for it to stop before killing its process (default: 30).")],
-			["bassia run stop 3f2a91c4"],
+			["bassia run stop brave-otter-3f2a91"],
 			RunCommands.StopAsync, Positional: "id"),
 
 		new("run", "retry", "Retry the commit/tag/push steps of a run that finished partial.",
 			[Id],
-			["bassia run retry 3f2a91c4"],
+			["bassia run retry brave-otter-3f2a91"],
 			RunCommands.RetryAsync, Positional: "id"),
 
 		new("run", "abandon", "Discard a finished run's folder and record it as abandoned; results already pushed stay where they are.",
 			[Id],
-			["bassia run abandon 3f2a91c4"],
+			["bassia run abandon brave-otter-3f2a91"],
 			RunCommands.AbandonAsync, Positional: "id"),
 
 		new("run", "diff", "Show what a run changed in each component: files, insertions and deletions, a diffstat, and the patch with -patch.",
 			[Id, new("component", "component", "Only this component."), new("patch", null, "Include the full patch.")],
-			["bassia run diff 3f2a91c4", "bassia run diff -id 3f2a91c4 -component app -patch"],
+			["bassia run diff brave-otter-3f2a91", "bassia run diff -id brave-otter-3f2a91 -component app -patch"],
 			RunCommands.DiffAsync, Positional: "id"),
 
 		// ----- integration -----
 
 		new("integration", "plan", "Triage how runs' results would merge, per component: up_to_date, fast_forward, clean or conflict, and whether git or the resolver merges each. Changes nothing.",
 			[Runs, Onto, Semantic, Skip],
-			["bassia integration plan -runs all", "bassia integration plan -runs 3f2a91c4,91ab22cd -onto lib@v1"],
+			["bassia integration plan -runs all", "bassia integration plan -runs brave-otter-3f2a91,quiet-fern-91ab22 -onto lib@v1"],
 			IntegrationCommands.PlanCommandAsync),
 
-		new("integration", "start", "Integrate runs' results per component: git merges what it can, then the resolver merges the rest from a semantic brief; the result is tagged integration/<id>/<n> in every component.",
+		new("integration", "start", "Integrate runs' results per component: git merges what it can, then the resolver merges the rest from a semantic brief; the result is tagged integration/<key>/<n> in every component.",
 			[
 				Runs, Onto, Semantic, Skip,
 				new("detach", null, "Return at once and continue in the background; follow with integration show/logs/wait, stop with integration stop."),
@@ -265,8 +265,8 @@ internal static class CommandTable
 			],
 			[
 				"bassia integration start -runs all",
-				"bassia integration start -runs all -skip 5e11aa00 -detach",
-				"bassia integration start -runs 3f2a91c4,91ab22cd -semantic 91ab22cd -resolve claude -p --permission-mode acceptEdits --model opus"
+				"bassia integration start -runs all -skip quiet-fern-91ab22 -detach",
+				"bassia integration start -runs brave-otter-3f2a91,quiet-fern-91ab22 -semantic quiet-fern-91ab22 -resolve claude -p --permission-mode acceptEdits --model opus"
 			],
 			IntegrationCommands.StartAsync),
 
@@ -277,27 +277,27 @@ internal static class CommandTable
 
 		new("integration", "show", "Show an integration: its steps per component with triage, strategy, outcome and conflicts, its result tags, and whether it is live.",
 			[IntegrationId],
-			["bassia integration show 5e11aa00"],
+			["bassia integration show steady-heron-5e11aa"],
 			IntegrationCommands.ShowAsync, Positional: "id"),
 
 		new("integration", "logs", "Print the captured output of a detached integration (resolver output and bassia's progress).",
 			[IntegrationId, new("tail", "n", "The last n lines (default: 50; 0 for all).")],
-			["bassia integration logs 5e11aa00"],
+			["bassia integration logs steady-heron-5e11aa"],
 			IntegrationCommands.LogsAsync, Positional: "id"),
 
 		new("integration", "wait", "Wait until an integration is no longer live; ok when it completed.",
 			[IntegrationId, new("timeout", "seconds", "Give up after this long with timed_out = true (default: 0, no limit).")],
-			["bassia integration wait 5e11aa00 -timeout 1800"],
+			["bassia integration wait steady-heron-5e11aa -timeout 1800"],
 			IntegrationCommands.WaitAsync, Positional: "id"),
 
 		new("integration", "stop", "Stop a live integration: a working resolver is killed and nothing further is published.",
 			[IntegrationId, new("timeout", "seconds", "How long to wait for it to stop before killing its process (default: 30).")],
-			["bassia integration stop 5e11aa00"],
+			["bassia integration stop steady-heron-5e11aa"],
 			IntegrationCommands.StopAsync, Positional: "id"),
 
 		new("integration", "advance", "Fast-forward each component's base branch to the integration's result (refused if a branch moved, or the base was a tag).",
 			[IntegrationId],
-			["bassia integration advance 5e11aa00"],
+			["bassia integration advance steady-heron-5e11aa"],
 			IntegrationCommands.AdvanceAsync, Positional: "id"),
 
 		// ----- frontends -----

@@ -239,7 +239,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 
 		foreach (var session in started)
 		{
-			var waited = await OkAsync(root, "run", "wait", RunMetadata.ShortKey(session.RunId), "-timeout", "600");
+			var waited = await OkAsync(root, "run", "wait", RunMetadata.Key(session.RunId), "-timeout", "600");
 			Assert.Equal("completed", waited["status"]);
 		}
 
@@ -308,7 +308,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		var intervals = new List<(DateTimeOffset Created, DateTimeOffset Finished)>();
 		foreach (var (session, runId, command) in started)
 		{
-			var shown = await OkAsync(root, "run", "show", RunMetadata.ShortKey(runId));
+			var shown = await OkAsync(root, "run", "show", RunMetadata.Key(runId));
 			Assert.Equal("completed", shown["status"]);
 			Assert.False((bool)shown["live"]);
 			Assert.Equal(session.SelectList, shown["select"]);
@@ -320,7 +320,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 				Assert.Equal(session.Select[name], component["commitish"]);
 			}
 
-			var diff = await OkAsync(root, "run", "diff", RunMetadata.ShortKey(runId));
+			var diff = await OkAsync(root, "run", "diff", RunMetadata.Key(runId));
 			foreach (var component in Tables(diff, "component"))
 			{
 				var name = (string)component["name"];
@@ -331,7 +331,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 			intervals.Add((Timestamp((string)shown["created"]), Timestamp((string)shown["finished"])));
 			proof.Fact($"`{session.Name}`", $"run `{runId}`, select `{session.SelectList}`, edits {string.Join("; ", session.Edits.Select(edit => $"{edit.Key}: {string.Join(", ", edit.Value.Keys)}"))}");
 			proof.Fact("Command", $"`{command}`");
-			proof.Block($"bassia run show {RunMetadata.ShortKey(runId)} (card)", (string)shown["card"]);
+			proof.Block($"bassia run show {RunMetadata.Key(runId)} (card)", (string)shown["card"]);
 		}
 
 		// Some moment lies inside every session's recorded interval: the wave ran in parallel, not one by one.
@@ -354,7 +354,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 	private async Task<Integrated> IntegrateAsync(string root, string temp, string wave, IReadOnlyList<StartedSession> started,
 		(string Component, string[] Files)? expectSemantic)
 	{
-		var runs = string.Join(",", started.Select(session => RunMetadata.ShortKey(session.RunId)));
+		var runs = string.Join(",", started.Select(session => RunMetadata.Key(session.RunId)));
 		var touched = started.SelectMany(session => session.Session.Touched).Distinct().ToHashSet();
 
 		var plan = await OkAsync(root, "integration", "plan", "-runs", runs);
@@ -407,7 +407,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		Assert.All(Tables(before, "commit"), commit => Assert.False((bool)commit["on_default_branch"]));
 		proof.Fact("Before advance", (string)before["message"]);
 
-		var advanced = await OkAsync(root, "integration", "advance", IntegrationRecord.ShortKey(id));
+		var advanced = await OkAsync(root, "integration", "advance", IntegrationRecord.Key(id));
 		proof.Fact("Advance", (string)advanced["message"]);
 		return new Integrated(id, resultCommits);
 	}
@@ -438,7 +438,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 	{
 		foreach (var (session, runId, _) in started)
 		{
-			var log = await OkAsync(root, "log", "-run", RunMetadata.ShortKey(runId));
+			var log = await OkAsync(root, "log", "-run", RunMetadata.Key(runId));
 			var run = Assert.Single(Tables(log, "run"));
 			Assert.Equal(runId, run["run_id"]);
 			foreach (var component in Tables(run, "component"))
@@ -463,7 +463,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 			}
 
 			Assert.Equal((long)session.Touched.Count, log["landed"]);
-			proof.Block($"bassia log -run {RunMetadata.ShortKey(runId)} ({session.Name})", $"{log["message"]}\n{log["graph"]}");
+			proof.Block($"bassia log -run {RunMetadata.Key(runId)} ({session.Name})", $"{log["message"]}\n{log["graph"]}");
 		}
 
 		foreach (var (component, resultCommit) in integration.ResultCommits)

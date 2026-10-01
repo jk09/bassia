@@ -37,7 +37,7 @@ internal sealed class RunMetadata
 {
 	public const string FileName = "run.toml";
 	public const string RunIdPrefix = "agent-run-";
-	public const string RefPrefix = "agent/run-";
+	public const string RefPrefix = "agent-run/";
 
 	public required string RunId { get; set; }
 	public required string Status { get; set; }
@@ -54,26 +54,27 @@ internal sealed class RunMetadata
 
 	public static string Timestamp() => DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
 
-	/// <summary><c>agent-run-&lt;id&gt;</c> with a fresh GUID, so ids never collide across workspaces sharing a component repo.</summary>
-	public static string NewRunId() => RunIdPrefix + Guid.NewGuid().ToString("N");
+	/// <summary><c>agent-run-&lt;key&gt;</c> with a fresh <see cref="RecordName"/> key, e.g. <c>agent-run-magical-otter-vt9j3p</c>.</summary>
+	public static string NewRunId() => RunIdPrefix + RecordName.NewKey();
 
-	/// <summary>Accepts the full run id or just its <c>&lt;id&gt;</c> part.</summary>
+	/// <summary>Accepts the full run id or just its <c>&lt;key&gt;</c> part.</summary>
 	public static string NormalizeRunId(string runId) => runId.StartsWith(RunIdPrefix, StringComparison.Ordinal) ? runId : RunIdPrefix + runId;
 
-	/// <summary>The <c>&lt;id&gt;</c> part of a run id.</summary>
+	/// <summary>The <c>&lt;key&gt;</c> part of a run id; short and readable, so it is also what is shown as the run's short id.</summary>
 	public static string Key(string runId) => runId[RunIdPrefix.Length..];
 
-	public static string ShortKey(string runId) => Key(runId)[..8];
+	/// <summary>Whether <paramref name="runId"/> is a well-formed <c>agent-run-&lt;key&gt;</c>.</summary>
+	public static bool IsRunId(string runId) => runId.StartsWith(RunIdPrefix, StringComparison.Ordinal) && RecordName.IsKey(Key(runId));
 
-	/// <summary>Branch of the run in every component checkout: <c>agent/run-&lt;id&gt;</c>.</summary>
+	/// <summary>Branch of the run in every component checkout: <c>agent-run/&lt;key&gt;</c>.</summary>
 	public static string RefBase(string runId) => RefPrefix + Key(runId);
 
 	/// <summary>
-	/// <c>agent/run-&lt;id&gt;/&lt;index&gt;</c>: a result tag in a component repo, or a lineage tag in the run-metadata repo.
+	/// <c>agent-run/&lt;key&gt;/&lt;index&gt;</c>: a result tag in a component repo, or a lineage tag in the run-metadata repo.
 	/// </summary>
 	public static string TagName(string runId, int index) => $"{RefBase(runId)}/{index}";
 
-	/// <summary>Highest <c>&lt;index&gt;</c> among the given <c>agent/run-&lt;id&gt;/&lt;index&gt;</c> tags, or -1 when there is none.</summary>
+	/// <summary>Highest <c>&lt;index&gt;</c> among the given <c>agent-run/&lt;key&gt;/&lt;index&gt;</c> tags, or -1 when there is none.</summary>
 	public static int HighestIndex(IEnumerable<string> tags)
 	{
 		var highest = -1;
@@ -191,7 +192,7 @@ internal sealed class RunMetadata
 /// <summary>
 /// Stores run records in the <c>.agentic-runs</c> bare repo using plumbing commands only: no branch is ever
 /// checked out or moved (so many parallel runs never contend for an index lock). Each record version is a commit
-/// (child of the previous version) reachable only through its annotated tag <c>agent/&lt;run-id&gt;/&lt;lineage&gt;</c>.
+/// (child of the previous version) reachable only through its annotated tag <c>agent-run/&lt;key&gt;/&lt;lineage&gt;</c>.
 /// </summary>
 internal sealed class RunMetadataStore
 {

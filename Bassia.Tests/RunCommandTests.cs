@@ -53,7 +53,7 @@ public class RunCommandTests
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
 		var runId = await monorepo.RunWritingAsync("example", "a.txt", "hello");
-		var shortId = RunMetadata.ShortKey(runId);
+		var shortId = RunMetadata.Key(runId);
 
 		var (listExit, listOutput, _) = await monorepo.BassiaAsync("run", "list");
 		Assert.Equal(0, listExit);
@@ -157,7 +157,7 @@ public class RunCommandTests
 		Assert.True(retryExit == 0, retryError);
 		Assert.Equal("completed", Result(retryOutput)["status"]);
 
-		var (exitCode, output, error) = await monorepo.BassiaAsync("run", "abandon", "-id", RunMetadata.ShortKey(runId));
+		var (exitCode, output, error) = await monorepo.BassiaAsync("run", "abandon", "-id", RunMetadata.Key(runId));
 
 		Assert.True(exitCode == 0, error);
 		Assert.Equal("abandoned", Result(output)["status"]);

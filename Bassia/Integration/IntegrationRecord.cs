@@ -52,7 +52,7 @@ internal sealed class IntegrationStep
 	/// <summary>The run's one-line rationale: the prompt its agent was given, as far as the command reveals it.</summary>
 	public required string Rationale { get; set; }
 
-	/// <summary>The run's result tag in the component (<c>agent/run-&lt;id&gt;/&lt;n&gt;</c>).</summary>
+	/// <summary>The run's result tag in the component (<c>agent-run/&lt;key&gt;/&lt;n&gt;</c>).</summary>
 	public required string SourceTag { get; set; }
 	public required string SourceCommit { get; set; }
 
@@ -105,7 +105,7 @@ internal sealed class ComponentIntegration
 
 /// <summary>
 /// The record of one integration, committed as <c>integration.toml</c> into the <c>.agentic-runs</c> store next to
-/// the run records, tagged <c>integration/&lt;id&gt;/&lt;lineage&gt;</c>.
+/// the run records, tagged <c>integration/&lt;key&gt;/&lt;lineage&gt;</c>.
 /// </summary>
 internal sealed class IntegrationRecord
 {
@@ -125,15 +125,18 @@ internal sealed class IntegrationRecord
 	public required string WorkspacePath { get; set; }
 	public List<ComponentIntegration> Components { get; } = [];
 
-	public static string NewId() => IdPrefix + Guid.NewGuid().ToString("N");
+	/// <summary><c>integration-&lt;key&gt;</c> with a fresh <see cref="RecordName"/> key, e.g. <c>integration-steady-heron-k2m8qa</c>.</summary>
+	public static string NewId() => IdPrefix + RecordName.NewKey();
 
 	public static string NormalizeId(string id) => id.StartsWith(IdPrefix, StringComparison.Ordinal) ? id : IdPrefix + id;
 
+	/// <summary>The <c>&lt;key&gt;</c> part of an integration id; short and readable, so it is also what is shown as its short id.</summary>
 	public static string Key(string id) => id[IdPrefix.Length..];
 
-	public static string ShortKey(string id) => Key(id)[..8];
+	/// <summary>Whether <paramref name="id"/> is a well-formed <c>integration-&lt;key&gt;</c>.</summary>
+	public static bool IsId(string id) => id.StartsWith(IdPrefix, StringComparison.Ordinal) && RecordName.IsKey(Key(id));
 
-	/// <summary>Branch of the integration in every component, and the base of its tags: <c>integration/&lt;id&gt;</c>.</summary>
+	/// <summary>Branch of the integration in every component, and the base of its tags: <c>integration/&lt;key&gt;</c>.</summary>
 	public static string RefBase(string id) => RefPrefix + Key(id);
 
 	public static string TagName(string id, int index) => $"{RefBase(id)}/{index}";

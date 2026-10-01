@@ -20,7 +20,7 @@ internal sealed record RunCard(
 	string? LastOutput)
 {
 	/// <summary>The short id once the run has one, otherwise the placeholder the dashboard gave it while starting.</summary>
-	public string Label => RunId is null ? Key : RunMetadata.ShortKey(RunId);
+	public string Label => RunId is null ? Key : RunMetadata.Key(RunId);
 
 	public TimeSpan Elapsed => (Finished ?? DateTimeOffset.UtcNow) - Started;
 

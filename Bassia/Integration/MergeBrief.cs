@@ -31,7 +31,7 @@ internal static class MergeBrief
 	{
 		var brief = new StringBuilder();
 		var incoming = input.Incoming;
-		var shortRun = RunMetadata.ShortKey(incoming.RunId);
+		var shortRun = RunMetadata.Key(incoming.RunId);
 
 		brief.AppendLine($"# Semantic merge: run {shortRun} into component '{input.Component}'");
 		brief.AppendLine();

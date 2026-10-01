@@ -175,7 +175,7 @@ internal static class LogCommand
 			summaries.Add(new Dictionary<string, object?>
 			{
 				["run_id"] = run.RunId,
-				["short_id"] = RunMetadata.ShortKey(run.RunId),
+				["short_id"] = RunMetadata.Key(run.RunId),
 				["status"] = run.Status,
 				["summary"] = AgentCommand.SummarizeCommand(run.Command),
 				["component"] = entries
@@ -234,7 +234,7 @@ internal static class LogCommand
 	/// every column whose component still has commits further down the page, then the commit itself:
 	/// <code>
 	/// app lib
-	///  *   |   2026-09-21 14:02  1a2b3c4d5e  add the changelog  (agent/run-3f2a91c4/0)
+	///  *   |   2026-09-21 14:02  1a2b3c4d5e  add the changelog  (agent-run/brave-otter-3f2a91/0)
 	///  |   *   2026-09-21 13:40  9f8e7d6c5b  fix the parser
 	/// </code>
 	/// </summary>
