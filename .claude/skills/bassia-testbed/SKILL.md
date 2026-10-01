@@ -1,6 +1,6 @@
 ---
 name: bassia-testbed
-description: Recreate the bassia-testbed monorepo - a Bassia monorepo whose components are all the git repos under C:\Users\jozef\Development (submodules as referenced components), used as a testbed for developing Bassia. Use when asked to (re)create, rebuild, reset or refresh the testbed.
+description: Recreate the bassia-testbed monorepo - a Bassia monorepo whose components are all the git repos under C:\Users\jozef\Development (submodules as referenced components), used as a testbed for developing Bassia. Use when asked to (re)create, rebuild, reset or refresh the testbed. Accepts optional arguments (e.g. `-Dev`, `-Root`, `-Exe`) forwarded to New-Testbed.ps1.
 ---
 
 # bassia-testbed
@@ -8,12 +8,18 @@ description: Recreate the bassia-testbed monorepo - a Bassia monorepo whose comp
 A Bassia monorepo at `C:\Users\jozef\Development\bassia-testbed`, empty except for 85 registered components: every git
 repo in `Development`, including those nested in non-git folders (e.g. `JavaScript\my-app`).
 
+## Arguments
+
+`/bassia-testbed` accepts optional arguments, which are forwarded as-is to `New-Testbed.ps1`'s parameters:
+`-Dev <path>` (default `C:\Users\jozef\Development`), `-Root <path>` (default `<Dev>\bassia-testbed`), and
+`-Exe <path>` (default the Debug `Bassia.exe`). For example: `/bassia-testbed -Dev D:\repos -Root D:\bassia-testbed`.
+
 ## Recreate
 
-1. Build the CLI: `dotnet build Bassia/Bassia.csproj` (the script uses the Debug `Bassia.exe`).
-2. Remove or rename an existing `bassia-testbed` (the script refuses to overwrite). Look at it first.
-3. Run `.claude/skills/bassia-testbed/New-Testbed.ps1` (`-Dev`, `-Root`, `-Exe` override the defaults). It takes a few
-   minutes: it clones ~85 repos locally with `bassia component add`.
+1. Build the CLI: `dotnet build Bassia/Bassia.csproj` (the script uses the Debug `Bassia.exe`, unless `-Exe` overrides it).
+2. Remove or rename an existing `bassia-testbed` at `-Root` (the script refuses to overwrite). Look at it first.
+3. Run `.claude/skills/bassia-testbed/New-Testbed.ps1`, passing through any arguments given to the skill. It takes a
+   few minutes: it clones ~85 repos locally with `bassia component add`.
 4. Verify with `bassia -C <root> status` (85 components, clean meta-repo) and `bassia -C <root> graph`.
 
 ## Rules the script encodes
