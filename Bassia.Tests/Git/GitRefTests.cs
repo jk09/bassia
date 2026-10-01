@@ -11,7 +11,7 @@ public class GitRefTests
 		await monorepo.AddComponentAsync("example");
 		var source = monorepo.SourceRepo("example");
 		await TestEnvironment.GitAsync(source, "tag", "light", "main");
-		var commit = await TestEnvironment.GitAsync(source, "rev-parse", "--short", "main");
+		var commit = await TestEnvironment.GitAsync(source, "rev-parse", "main");
 
 		var refs = await GitRef.ListAsync(GitClient.In(source));
 
