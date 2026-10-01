@@ -23,7 +23,9 @@ internal static class ConfigFile
 		new("agent.commit.subject", "agent.commit", "subject", Monorepo.DefaultCommitSubject,
 			"Subject line of a run's result commits. Placeholders: {run_id}, {short_id}, {summary}, {component}."),
 		new("integration.resolver", "integration", "resolver", Monorepo.DefaultResolver,
-			"Command that resolves a semantic merge; it gets the merge brief on stdin.")
+			"Command that resolves a semantic merge; it gets the merge brief on stdin."),
+		new("integration.weave", "integration", "weave", Monorepo.DefaultStructuralDriver,
+			"Structural merge driver tried where git's merge conflicts (weave's weave-driver), used when installed; off disables it.")
 	];
 
 	public static string PathOf(string root) => Path.Combine(root, Monorepo.MetaRepoFolderName, "config.toml");

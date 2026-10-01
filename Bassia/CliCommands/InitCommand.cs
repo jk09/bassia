@@ -22,7 +22,10 @@ internal static class InitCommand
 		"[integration]\n" +
 		"# Command that resolves a semantic merge during 'bassia integration start'. It runs in the component's working tree with the\n" +
 		"# merge brief on stdin (and its path in BASSIA_MERGE_BRIEF), and must leave the merge resolved but uncommitted.\n" +
-		"resolver = \"" + Monorepo.DefaultResolver + "\"\n";
+		"resolver = \"" + Monorepo.DefaultResolver + "\"\n" +
+		"# Structural merge driver tried where git's line merge conflicts, before the resolver: weave's entity-level merge\n" +
+		"# (https://github.com/Ataraxy-Labs/weave). Used when installed; 'off' disables it.\n" +
+		"weave = \"" + Monorepo.DefaultStructuralDriver + "\"\n";
 
 	private const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +

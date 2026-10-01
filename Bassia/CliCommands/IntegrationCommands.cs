@@ -15,9 +15,9 @@ internal static class IntegrationCommands
 {
 	public const string JobKind = "integration";
 
-	private sealed record Choices(IReadOnlyList<RunMetadata> Runs, IReadOnlyList<ComponentIntegration> Plan, RunMetadataStore Store);
+	private sealed record Choices(IReadOnlyList<RunMetadata> Runs, IReadOnlyList<ComponentIntegration> Plan, RunMetadataStore Store, StructuralMerge? Structural, string StructuralStatus);
 
-	/// <summary>The runs <c>-runs</c> names and the triage of them under <c>-onto</c>, <c>-semantic</c> and <c>-skip</c>.</summary>
+	/// <summary>The runs <c>-runs</c> names and the triage of them under <c>-onto</c>, <c>-semantic</c>, <c>-skip</c> and <c>-weave</c>.</summary>
 	private static async Task<Choices> PlanAsync(Invocation invocation, Monorepo monorepo)
 	{
 		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
@@ -40,8 +40,9 @@ internal static class IntegrationCommands
 			strategies[("*", IntegrationSupport.RequireSelected(runs, runId))] = MergeStrategy.Skip;
 		}
 
-		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs, new IntegrationChoices { Onto = onto, Strategies = strategies });
-		return new Choices(runs, plan, store);
+		var (structural, structuralStatus) = StructuralMerge.Resolve(monorepo, invocation.Get("weave"));
+		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs, new IntegrationChoices { Onto = onto, Strategies = strategies, Structural = structural });
+		return new Choices(runs, plan, store, structural, structuralStatus);
 	}
 
 	// ----- bassia integration plan -----
@@ -49,14 +50,17 @@ internal static class IntegrationCommands
 	public static async Task<int> PlanCommandAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var (runs, plan, _) = await PlanAsync(invocation, monorepo);
+		var (runs, plan, _, structural, structuralStatus) = await PlanAsync(invocation, monorepo);
 		var steps = plan.SelectMany(component => component.Steps).ToList();
+		var weave = structural is null ? $" Structural merge: {structuralStatus}." : "";
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Triage of {runs.Count} run(s): {steps.Count(step => step.Strategy == MergeStrategy.Syntactic)} step(s) for git, " +
-			$"{steps.Count(step => step.Strategy == MergeStrategy.Semantic)} for the resolver, {steps.Count(step => step.Strategy == MergeStrategy.Skip)} skipped. Nothing was changed.",
+			$"{steps.Count(step => step.Strategy == MergeStrategy.Structural)} for the structural merge, " +
+			$"{steps.Count(step => step.Strategy == MergeStrategy.Semantic)} for the resolver, {steps.Count(step => step.Strategy == MergeStrategy.Skip)} skipped.{weave} Nothing was changed.",
 			new Dictionary<string, object?>
 			{
 				["plan"] = true,
+				["structural_merge"] = structuralStatus,
 				["runs"] = runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => run.RunId).ToList(),
 				["steps"] = new TomlText(Steps(plan)),
 				["component"] = plan.Select(IntegrationSupport.ComponentData).ToList()
@@ -73,7 +77,7 @@ internal static class IntegrationCommands
 		{
 			output = log is null ? null : JobOutput.Redirect(log);
 			var monorepo = AgentCommand.LoadMonorepo();
-			var (runs, plan, store) = await PlanAsync(invocation, monorepo);
+			var (runs, plan, store, structural, _) = await PlanAsync(invocation, monorepo);
 			if (plan.Count == 0)
 			{
 				throw new IntegrationException("The plan is empty; there is nothing to integrate.");
@@ -82,7 +86,7 @@ internal static class IntegrationCommands
 			var resolver = invocation.Get("resolve") ?? monorepo.Resolver;
 			if (invocation.Has("detach") && log is null)
 			{
-				return await DetachAsync(invocation, monorepo, runs, resolver);
+				return await DetachAsync(invocation, monorepo, runs, resolver, structural);
 			}
 
 			var id = invocation.Get("id") is { } given ? IntegrationRecord.NormalizeId(given) : IntegrationRecord.NewId();
@@ -113,7 +117,7 @@ internal static class IntegrationCommands
 				IntegrationOutcome outcome;
 				try
 				{
-					outcome = await IntegrationRunner.RunAsync(new GitClient(monorepo.Root), monorepo, runs, plan, resolver, context, id);
+					outcome = await IntegrationRunner.RunAsync(new GitClient(monorepo.Root), monorepo, runs, plan, resolver, context, id, structural);
 				}
 				catch (OperationCanceledException)
 				{
@@ -141,7 +145,7 @@ internal static class IntegrationCommands
 		}
 	}
 
-	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, IReadOnlyList<RunMetadata> runs, string resolver)
+	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, IReadOnlyList<RunMetadata> runs, string resolver, StructuralMerge? structural)
 	{
 		var id = IntegrationRecord.NewId();
 		var jobs = new JobRegistry(monorepo);
@@ -156,6 +160,8 @@ internal static class IntegrationCommands
 			arguments.AddRange([$"-{name}", string.Join(",", invocation.List(name))]);
 		}
 
+		// The structural merge as this process found it, so the background process cannot come to another conclusion.
+		arguments.AddRange(["-weave", structural?.Command ?? StructuralMerge.Off]);
 		arguments.AddRange(["-resolve", resolver]);
 		using var process = DetachedProcess.Start(monorepo.Root, arguments);
 		var job = await RunCommands.WaitForRegistrationAsync(jobs, id, process);
@@ -180,7 +186,8 @@ internal static class IntegrationCommands
 				["log"] = log,
 				["result_file"] = jobs.ResultPath(id),
 				["runs"] = runs.Select(run => run.RunId).ToList(),
-				["resolver"] = resolver
+				["resolver"] = resolver,
+				["structural_driver"] = structural?.Command
 			});
 	}
 
@@ -295,6 +302,7 @@ internal static class IntegrationCommands
 			data["created"] = record.Created;
 			data["finished"] = record.Finished;
 			data["resolver"] = record.Resolver;
+			data["structural_driver"] = record.StructuralDriver;
 			data["workspace"] = record.WorkspacePath;
 			data["runs"] = record.Runs.ToList();
 			data["steps"] = new TomlText(Steps(record.Components));
@@ -434,9 +442,11 @@ internal static class IntegrationCommands
 	/// <code>
 	/// app  onto main @ 1a2b3c4  -> integration/steady-heron-5e11aa/0  completed
 	/// |-- brave-otter-3f2a91  fast_forward  SYNTAX     merged
-	/// `-- quiet-fern-91ab22   conflict      SEMANTIC*  resolved   [README.md]  conflicts with brave-otter-3f2a91
+	/// |-- calm-lynx-7d0e12    conflict      STRUCT     merged     [src/api.py]  weave: clean
+	/// `-- quiet-fern-91ab22   conflict      SEMANTIC*  resolved   [README.md]  weave: conflict [README.md]  conflicts with brave-otter-3f2a91
 	/// </code>
-	/// A star marks a strategy that was chosen rather than decided by the triage.
+	/// A star marks a strategy that was chosen rather than decided by the triage. <c>weave:</c> is the structural
+	/// merge's verdict where git conflicts, with the files still conflicted after it.
 	/// </summary>
 	internal static string Steps(IReadOnlyList<ComponentIntegration> components)
 	{
@@ -473,6 +483,7 @@ internal static class IntegrationCommands
 				var strategy = step.Strategy switch
 				{
 					MergeStrategy.Syntactic => "SYNTAX",
+					MergeStrategy.Structural => "STRUCT",
 					MergeStrategy.Semantic => "SEMANTIC",
 					_ => "SKIP"
 				} + (step.Overridden ? "*" : "");
@@ -488,6 +499,15 @@ internal static class IntegrationCommands
 				if (step.Conflicts.Count > 0)
 				{
 					builder.Append("  [").Append(string.Join(", ", step.Conflicts)).Append(']');
+				}
+
+				if (step.Structural is { } structural)
+				{
+					builder.Append("  weave: ").Append(IntegrationRecord.Snake(structural));
+					if (step.StructuralConflicts.Count > 0)
+					{
+						builder.Append(" [").Append(string.Join(", ", step.StructuralConflicts)).Append(']');
+					}
 				}
 
 				if (step.ConflictsWith.Count > 0)

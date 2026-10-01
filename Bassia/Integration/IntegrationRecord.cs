@@ -24,8 +24,27 @@ internal enum Triage
 	Conflict
 }
 
-/// <summary>How a step is merged: by git alone, by the resolver (an LLM) with the semantic brief, or not at all.</summary>
-internal enum MergeStrategy { Syntactic, Semantic, Skip }
+/// <summary>
+/// How the structural merge (<see cref="StructuralMerge"/>, weave) sees a result git's merge conflicts on. Decided by
+/// the triage only for a <see cref="Triage.Conflict"/>, and only when the structural merge is enabled.
+/// </summary>
+internal enum StructuralTriage
+{
+	/// <summary>Weave merges every conflicted file on its own.</summary>
+	Clean,
+
+	/// <summary>Weave merges it, but warns that the result may not mean what both sides meant (e.g. a dependency both changed).</summary>
+	Warnings,
+
+	/// <summary>Weave still conflicts: both sides changed the same entity incompatibly.</summary>
+	Conflict
+}
+
+/// <summary>
+/// How a step is merged: by git alone, by git with the structural merge driver (weave), by the resolver (an LLM) with
+/// the semantic brief, or not at all.
+/// </summary>
+internal enum MergeStrategy { Syntactic, Structural, Semantic, Skip }
 
 internal enum StepOutcome
 {
@@ -65,6 +84,15 @@ internal sealed class IntegrationStep
 	/// <summary>Files git could not merge (for a <see cref="Triage.Conflict"/>).</summary>
 	public List<string> Conflicts { get; } = [];
 
+	/// <summary>The structural merge's verdict where git conflicts; null when it was not tried.</summary>
+	public StructuralTriage? Structural { get; set; }
+
+	/// <summary>Files that still conflict after the structural merge: what is left for the resolver.</summary>
+	public List<string> StructuralConflicts { get; } = [];
+
+	/// <summary>The structural merge's warnings (weave's JSON payloads) on a merge it completed.</summary>
+	public List<string> StructuralWarnings { get; } = [];
+
 	/// <summary>Other runs of the same integration whose results conflict with this one on their own.</summary>
 	public List<string> ConflictsWith { get; } = [];
 
@@ -78,6 +106,9 @@ internal sealed class IntegrationStep
 	public string? Brief { get; set; }
 
 	public bool IsSemantic => Strategy == MergeStrategy.Semantic;
+
+	/// <summary>Merged deterministically, without the resolver: by git alone or with the structural merge driver.</summary>
+	public bool IsDeterministic => Strategy is MergeStrategy.Syntactic or MergeStrategy.Structural;
 }
 
 /// <summary>The integration of one component: its base, the ordered steps, and where the result went.</summary>
@@ -89,7 +120,7 @@ internal sealed class ComponentIntegration
 	public required string BaseRef { get; set; }
 	public required string BaseCommit { get; set; }
 
-	/// <summary>The steps in execution order: every syntactic step before every semantic one, skipped steps last.</summary>
+	/// <summary>The steps in execution order: every syntactic and structural step before every semantic one, skipped steps last.</summary>
 	public List<IntegrationStep> Steps { get; } = [];
 
 	public string? Branch { get; set; }
@@ -122,6 +153,10 @@ internal sealed class IntegrationRecord
 	/// <summary>The runs whose results were integrated, in the order they were considered (oldest first).</summary>
 	public List<string> Runs { get; } = [];
 	public required string Resolver { get; set; }
+
+	/// <summary>The structural merge driver the integration used (<see cref="StructuralMerge.Command"/>); null when none.</summary>
+	public string? StructuralDriver { get; set; }
+
 	public required string WorkspacePath { get; set; }
 	public List<ComponentIntegration> Components { get; } = [];
 
@@ -156,6 +191,7 @@ internal sealed class IntegrationRecord
 			["runs"] = Array(Runs)
 		};
 		if (Finished is not null) table["finished"] = Finished;
+		if (StructuralDriver is not null) table["structural_driver"] = StructuralDriver;
 
 		var components = new TomlTableArray();
 		foreach (var component in Components)
@@ -190,6 +226,13 @@ internal sealed class IntegrationRecord
 					["conflicts_with"] = Array(step.ConflictsWith),
 					["outcome"] = Snake(step.Outcome)
 				};
+				if (step.Structural is { } structural)
+				{
+					stepTable["structural"] = Snake(structural);
+					stepTable["structural_conflicts"] = Array(step.StructuralConflicts);
+					stepTable["structural_warnings"] = Array(step.StructuralWarnings);
+				}
+
 				Optional(stepTable, "commit", step.Commit);
 				Optional(stepTable, "note", step.Note);
 				Optional(stepTable, "brief", step.Brief);
@@ -215,6 +258,7 @@ internal sealed class IntegrationRecord
 			Created = Str(table, "created"),
 			Finished = OptStr(table, "finished"),
 			Resolver = Str(table, "resolver"),
+			StructuralDriver = OptStr(table, "structural_driver"),
 			WorkspacePath = Str(table, "workspace")
 		};
 		record.Runs.AddRange(Strings(table, "runs"));
@@ -250,6 +294,7 @@ internal sealed class IntegrationRecord
 							Triage = Parse<Triage>(Str(stepTable, "triage")),
 							Strategy = Parse<MergeStrategy>(Str(stepTable, "strategy")),
 							Overridden = stepTable.TryGetValue("overridden", out var overridden) && overridden is true,
+							Structural = OptStr(stepTable, "structural") is { } structural ? Parse<StructuralTriage>(structural) : null,
 							Outcome = Parse<StepOutcome>(Str(stepTable, "outcome")),
 							Commit = OptStr(stepTable, "commit"),
 							Note = OptStr(stepTable, "note"),
@@ -257,6 +302,8 @@ internal sealed class IntegrationRecord
 						};
 						step.Conflicts.AddRange(Strings(stepTable, "conflicts"));
 						step.ConflictsWith.AddRange(Strings(stepTable, "conflicts_with"));
+						step.StructuralConflicts.AddRange(Strings(stepTable, "structural_conflicts"));
+						step.StructuralWarnings.AddRange(Strings(stepTable, "structural_warnings"));
 						component.Steps.Add(step);
 					}
 				}

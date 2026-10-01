@@ -731,10 +731,11 @@ internal sealed class Dashboard
 			return View("/integrations", "Triage", Error("Choose at least one recorded run with results."), StatusCodes.Status400BadRequest);
 		}
 
-		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs);
+		var (structural, structuralStatus) = StructuralMerge.Resolve(monorepo);
+		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs, new IntegrationChoices { Structural = structural });
 		var command = $"bassia integration start -runs {string.Join(",", runs.OrderBy(run => run.Created, StringComparer.Ordinal).Select(run => RunMetadata.Key(run.RunId)))}";
 		var body = $"""
-			<p>{E(Summary(plan))}. Nothing was changed. To integrate: <code>{E(command)}</code>.</p>
+			<p>{E(Summary(plan))}. Structural merge: <code>{E(structuralStatus)}</code>. Nothing was changed. To integrate: <code>{E(command)}</code>.</p>
 			{StepsTable(plan)}
 			""";
 		return View("/integrations", "Triage", body);
@@ -746,9 +747,10 @@ internal sealed class Dashboard
 		var steps = plan.SelectMany(component => component.Steps).ToList();
 		var upToDate = steps.Count(step => step.Triage == Triage.UpToDate && step.Strategy != MergeStrategy.Skip);
 		var syntactic = steps.Count(step => step.Strategy == MergeStrategy.Syntactic) - upToDate;
+		var structural = steps.Count(step => step.Strategy == MergeStrategy.Structural);
 		var semantic = steps.Count(step => step.Strategy == MergeStrategy.Semantic);
 		var skipped = steps.Count(step => step.Strategy == MergeStrategy.Skip);
-		return $"{syntactic} by git (syntax) · {semantic} by the resolver (semantic) · {upToDate} up to date · {skipped} skipped";
+		return $"{syntactic} by git (syntax) · {structural} by weave (structure) · {semantic} by the resolver (semantic) · {upToDate} up to date · {skipped} skipped";
 	}
 
 	private async Task<IResult> IntegrationAsync(string id)
@@ -767,6 +769,7 @@ internal sealed class Dashboard
 			<tr><td>Status</td><td>{Status(record.Status)}</td></tr>
 			<tr><td>Runs</td><td>{string.Join(" ", record.Runs.Select(RunLink))}</td></tr>
 			<tr><td>Resolver</td><td><code>{E(record.Resolver)}</code></td></tr>
+			<tr><td>Structural merge</td><td><code>{E(record.StructuralDriver ?? "-")}</code></td></tr>
 			<tr><td>Created</td><td>{Time(record.Created)}</td></tr>
 			<tr><td>Finished</td><td>{Time(record.Finished)}</td></tr>
 			<tr><td>Workspace</td><td><code>{E(record.WorkspacePath)}</code></td></tr>
@@ -800,6 +803,12 @@ internal sealed class Dashboard
 				var step = component.Steps[i];
 				var strategy = IntegrationRecord.Snake(step.Strategy);
 				var conflicts = string.Join(", ", step.Conflicts) + (step.ConflictsWith.Count > 0 ? $" vs {string.Join(", ", step.ConflictsWith.Select(RunMetadata.Key))}" : "");
+				if (step.Structural is { } verdict)
+				{
+					conflicts += $" · weave: {IntegrationRecord.Snake(verdict)}" + (step.StructuralConflicts.Count > 0 ? $" ({string.Join(", ", step.StructuralConflicts)})" : "")
+						+ (step.StructuralWarnings.Count > 0 ? $", {step.StructuralWarnings.Count} warning(s)" : "");
+				}
+
 				var outcome = IntegrationRecord.Snake(step.Outcome) + (step.Commit is null ? "" : $" {Short(step.Commit)}");
 				var head = i == 0 ? $"<a href=\"{ComponentHref(component.Name)}\"><b>{E(component.Name)}</b></a> <span class=\"muted\">onto {E(component.BaseRef)} {E(Short(component.BaseCommit))}</span>" : "";
 				body.Append($"""

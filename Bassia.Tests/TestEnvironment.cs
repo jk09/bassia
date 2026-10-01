@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
+using Bassia.Integration;
 
 // ProgramCli reads Environment.CurrentDirectory and writes to Console, both process-global.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
@@ -169,16 +170,28 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 		Directory.CreateDirectory(fixture.Root);
 		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(fixture.Root, "init");
 		Assert.True(exitCode == 0, error);
+
+		// Whether a developer has weave installed must not change what the tests see; the tests of the structural
+		// merge turn it on with -weave.
+		ConfigFile.Set(fixture.Root, ConfigFile.Find("integration.weave"), StructuralMerge.Off);
 		return fixture;
 	}
 
-	/// <summary>Creates an upstream repo with one commit tagged <paramref name="tag"/> and registers it as a component.</summary>
-	public async Task AddComponentAsync(string name, string tag = "v0")
+	/// <summary>
+	/// Creates an upstream repo with one commit tagged <paramref name="tag"/> and registers it as a component. The
+	/// commit holds a README and <paramref name="files"/> (relative path -> content).
+	/// </summary>
+	public async Task AddComponentAsync(string name, string tag = "v0", IReadOnlyDictionary<string, string>? files = null)
 	{
 		var upstream = Path.Combine(temp.Path, "upstream", name);
 		Directory.CreateDirectory(upstream);
 		await TestEnvironment.GitAsync(upstream, "init", "--quiet", "--initial-branch=main");
 		await File.WriteAllTextAsync(Path.Combine(upstream, "README.md"), $"# {name}\n");
+		foreach (var (file, content) in files ?? new Dictionary<string, string>())
+		{
+			await File.WriteAllTextAsync(Path.Combine(upstream, file), content);
+		}
+
 		await TestEnvironment.GitAsync(upstream, "add", "--all");
 		await TestEnvironment.GitAsync(upstream, "commit", "--quiet", "-m", "Initial commit");
 
@@ -219,6 +232,21 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 	public async Task<string> RunWritingAsync(string component, string file, string content)
 	{
 		var (exitCode, output, error) = await RunStartAsync("-select", $"{component}@v0", "-run", TestEnvironment.WriteFileCommand($"{component}/{file}", content));
+		Assert.True(exitCode == 0, error);
+		return TestEnvironment.RunIdOf(output);
+	}
+
+	/// <summary>
+	/// Runs an agent over <c>&lt;component&gt;@v0</c> that replaces a file with <paramref name="content"/>, which may span
+	/// lines, and returns the run id.
+	/// </summary>
+	public async Task<string> RunReplacingAsync(string component, string file, string content)
+	{
+		var payload = Path.Combine(temp.Path, $"payload-{Guid.NewGuid():N}");
+		await File.WriteAllTextAsync(payload, content);
+		var target = $"{component}/{file}";
+		var copy = OperatingSystem.IsWindows() ? $"copy /y \"{payload}\" \"{target.Replace('/', '\\')}\" > nul" : $"cp '{payload}' '{target}'";
+		var (exitCode, output, error) = await RunStartAsync("-select", $"{component}@v0", "-run", copy);
 		Assert.True(exitCode == 0, error);
 		return TestEnvironment.RunIdOf(output);
 	}

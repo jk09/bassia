@@ -31,6 +31,12 @@ internal sealed class Monorepo
 	/// </summary>
 	public const string DefaultResolver = "claude -p --permission-mode acceptEdits";
 
+	/// <summary>
+	/// The structural (entity-level) merge driver the integration tries where git's merge conflicts: weave's
+	/// <c>weave-driver</c>, used when it is installed. <c>off</c> disables it; see <see cref="Integration.StructuralMerge"/>.
+	/// </summary>
+	public const string DefaultStructuralDriver = "weave-driver";
+
 	/// <summary>Agent command a run composed from a prompt starts with (<c>bassia run start -prompt</c>, the frontends).</summary>
 	public const string DefaultAgentCommand = "claude -p --permission-mode acceptEdits";
 
@@ -49,6 +55,9 @@ internal sealed class Monorepo
 	/// <summary>Command that resolves a semantic merge. Configurable via <c>[integration] resolver</c> in <c>config.toml</c>.</summary>
 	public string Resolver { get; }
 
+	/// <summary>Structural merge driver, or <c>off</c>. Configurable via <c>[integration] weave</c> in <c>config.toml</c>.</summary>
+	public string StructuralDriver { get; }
+
 	/// <summary>Agent command for runs composed from a prompt. Configurable via <c>[agent] command</c> in <c>config.toml</c>.</summary>
 	public string AgentCommand { get; }
 
@@ -63,12 +72,13 @@ internal sealed class Monorepo
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string agentCommand, IReadOnlyList<ComponentDefinition> components)
+	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand, IReadOnlyList<ComponentDefinition> components)
 	{
 		Root = root;
 		WorkspaceDir = workspaceDir;
 		CommitSubject = commitSubject;
 		Resolver = resolver;
+		StructuralDriver = structuralDriver;
 		AgentCommand = agentCommand;
 		Components = components;
 	}
@@ -114,6 +124,13 @@ internal sealed class Monorepo
 			resolver = configuredResolver;
 		}
 
+		var structuralDriver = DefaultStructuralDriver;
+		if (config.TryGetValue("integration", out var structuralSection) && structuralSection is TomlTable structural
+			&& structural.TryGetValue("weave", out var weaveValue) && weaveValue is string configuredWeave && !string.IsNullOrWhiteSpace(configuredWeave))
+		{
+			structuralDriver = configuredWeave.Trim();
+		}
+
 		var agentCommand = DefaultAgentCommand;
 		if (config.TryGetValue("agent", out var agentTable) && agentTable is TomlTable agentConfig
 			&& agentConfig.TryGetValue("command", out var commandValue) && commandValue is string configuredCommand && !string.IsNullOrWhiteSpace(configuredCommand))
@@ -122,7 +139,7 @@ internal sealed class Monorepo
 		}
 
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, commitSubject, resolver, agentCommand, components);
+		return new Monorepo(root, workspaceDir, commitSubject, resolver, structuralDriver, agentCommand, components);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>

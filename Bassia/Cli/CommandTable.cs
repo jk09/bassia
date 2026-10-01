@@ -23,6 +23,7 @@ internal static class CommandTable
 	private static readonly SwitchSpec Onto = new("onto", "component@ref,...", "Integrate a component onto this branch or tag instead of its default branch.");
 	private static readonly SwitchSpec Semantic = new("semantic", "run-id,...", "Send these runs' results to the resolver even without a textual conflict.");
 	private static readonly SwitchSpec Skip = new("skip", "run-id,...", "Leave these runs out.");
+	private static readonly SwitchSpec Weave = new("weave", "command|off", "The structural merge driver instead of integration.weave (default weave-driver, used when installed); off disables it.");
 	private static readonly SwitchSpec Log = new("log", "path", "The log of a detached job (set by -detach).", Hidden: true);
 
 	public static readonly IReadOnlyList<CommandSpec> Commands =
@@ -45,13 +46,13 @@ internal static class CommandTable
 			MonorepoCommands.ConfigListAsync),
 
 		new("config", "get", "Show one setting.",
-			[new("key", "key", "workspace.path, agent.command, agent.commit.subject or integration.resolver.", Required: true)],
+			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver or integration.weave.", Required: true)],
 			["bassia config get -key integration.resolver", "bassia config get agent.command"],
 			MonorepoCommands.ConfigGetAsync, Positional: "key"),
 
 		new("config", "set", "Change one setting in .bassia/config.toml (comments are kept) and commit it to the meta-repo.",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject or integration.resolver.", Required: true),
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver or integration.weave.", Required: true),
 				new("value", "value", "The new value. An empty value is not allowed; set the default explicitly to go back.", Required: true)
 			],
 			[
@@ -250,14 +251,14 @@ internal static class CommandTable
 
 		// ----- integration -----
 
-		new("integration", "plan", "Triage how runs' results would merge, per component: up_to_date, fast_forward, clean or conflict, and whether git or the resolver merges each. Changes nothing.",
-			[Runs, Onto, Semantic, Skip],
-			["bassia integration plan -runs all", "bassia integration plan -runs brave-otter-3f2a91,quiet-fern-91ab22 -onto lib@v1"],
+		new("integration", "plan", "Triage how runs' results would merge, per component: up_to_date, fast_forward, clean or conflict for git, and whether git, the structural merge (weave) or the resolver merges each. Changes nothing.",
+			[Runs, Onto, Semantic, Skip, Weave],
+			["bassia integration plan -runs all", "bassia integration plan -runs brave-otter-3f2a91,quiet-fern-91ab22 -onto lib@v1", "bassia integration plan -runs all -weave off"],
 			IntegrationCommands.PlanCommandAsync),
 
-		new("integration", "start", "Integrate runs' results per component: git merges what it can, then the resolver merges the rest from a semantic brief; the result is tagged integration/<key>/<n> in every component.",
+		new("integration", "start", "Integrate runs' results per component: git merges what it can, the structural merge (weave) what git cannot, then the resolver the rest from a semantic brief; the result is tagged integration/<key>/<n> in every component.",
 			[
-				Runs, Onto, Semantic, Skip,
+				Runs, Onto, Semantic, Skip, Weave,
 				new("detach", null, "Return at once and continue in the background; follow with integration show/logs/wait, stop with integration stop."),
 				new("id", "integration-id", "The integration's id (set by -detach).", Hidden: true),
 				Log,

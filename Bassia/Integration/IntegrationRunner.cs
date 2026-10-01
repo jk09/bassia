@@ -24,8 +24,8 @@ internal sealed record IntegrationOutcome(bool Ok, string Message, IntegrationRe
 /// <summary>
 /// Executes an integration plan. Every component is integrated in its own checkout under
 /// <c>.workspace/integration-&lt;key&gt;/</c>, on the branch <c>integration/&lt;key&gt;</c> started at the component's base:
-/// first every step git can merge on its own (oldest run first), then every step that needs the resolver, each with
-/// the semantic brief on its stdin. The result is tagged <c>integration/&lt;key&gt;/&lt;n&gt;</c> - one identically named
+/// first every step git can merge on its own or with the structural merge driver (oldest run first), then every step
+/// that needs the resolver, each with the semantic brief on its stdin. The result is tagged <c>integration/&lt;key&gt;/&lt;n&gt;</c> - one identically named
 /// annotated tag across the components, so the integration can be selected as the baseline of the next run - and
 /// branch and tag are pushed to the component's source-of-truth repo. Nothing else there moves until
 /// <see cref="AdvanceAsync"/> is asked to.
@@ -39,7 +39,8 @@ internal static class IntegrationRunner
 		IReadOnlyList<ComponentIntegration> plan,
 		string resolver,
 		IntegrationContext? context = null,
-		string? id = null)
+		string? id = null,
+		StructuralMerge? structural = null)
 	{
 		var cancellation = context?.Cancellation ?? CancellationToken.None;
 		if (plan.Count == 0)
@@ -58,6 +59,7 @@ internal static class IntegrationRunner
 			Status = "started",
 			Created = RunMetadata.Timestamp(),
 			Resolver = resolver,
+			StructuralDriver = structural?.Command,
 			WorkspacePath = Path.Combine(monorepo.WorkspaceDir, id)
 		};
 		draft.Runs.AddRange(plan.SelectMany(component => component.Steps).Select(step => step.RunId).Distinct(StringComparer.Ordinal)
@@ -68,7 +70,7 @@ internal static class IntegrationRunner
 		var record = draft.Clone();
 		var tags = new List<string> { await store.CommitAsync(record) };
 		Directory.CreateDirectory(record.WorkspacePath);
-		var session = new Session(monorepo, record, runs, context);
+		var session = new Session(monorepo, record, runs, context, structural);
 		session.Report($"{id}: recorded as {tags[0]}; integrating {record.Components.Count} component(s).");
 
 		foreach (var component in record.Components)
@@ -94,7 +96,8 @@ internal static class IntegrationRunner
 	internal static string Summary(IntegrationRecord record)
 	{
 		var steps = record.AllSteps.ToList();
-		var merged = steps.Count(step => step.Outcome == StepOutcome.Merged);
+		var merged = steps.Count(step => step.Outcome == StepOutcome.Merged && step.Strategy == MergeStrategy.Syntactic);
+		var structured = steps.Count(step => step.Outcome == StepOutcome.Merged && step.Strategy == MergeStrategy.Structural);
 		var resolved = steps.Count(step => step.Outcome == StepOutcome.Resolved);
 		var failed = steps.Count(step => step.Outcome == StepOutcome.Failed);
 		var tagged = record.Components.Where(component => component.ResultTag is not null && component.ResultStatus == ResultStatus.Pushed).ToList();
@@ -104,11 +107,14 @@ internal static class IntegrationRunner
 
 		return record.Status switch
 		{
-			"completed" => $"Integration '{record.IntegrationId}' completed: {merged} result(s) merged by git, {resolved} resolved semantically; {where}.",
+			"completed" => $"Integration '{record.IntegrationId}' completed: {merged} result(s) merged by git, {Structured()}{resolved} resolved semantically; {where}.",
 			"cancelled" => $"Integration '{record.IntegrationId}' was cancelled; {where}. The workspace '{record.WorkspacePath}' is kept for inspection.",
-			_ => $"Integration '{record.IntegrationId}' finished with failures: {merged} merged, {resolved} resolved, {failed} failed; {where}. " +
+			_ => $"Integration '{record.IntegrationId}' finished with failures: {merged} merged, {Structured()}{resolved} resolved, {failed} failed; {where}. " +
 				$"The workspace '{record.WorkspacePath}' and the briefs in it are kept for inspection."
 		};
+
+		// Only an integration that had the structural merge mentions it, so the summary reads as before without it.
+		string Structured() => record.StructuralDriver is null && structured == 0 ? "" : $"{structured} merged structurally by weave, ";
 	}
 
 	/// <summary>
@@ -165,7 +171,7 @@ internal static class IntegrationRunner
 	}
 
 	/// <summary>The state of one executing integration, so the per-component and per-step code shares it.</summary>
-	private sealed class Session(Monorepo monorepo, IntegrationRecord record, IReadOnlyList<RunMetadata> runs, IntegrationContext? context)
+	private sealed class Session(Monorepo monorepo, IntegrationRecord record, IReadOnlyList<RunMetadata> runs, IntegrationContext? context, StructuralMerge? structural)
 	{
 		private CancellationToken Cancellation => context?.Cancellation ?? CancellationToken.None;
 
@@ -203,10 +209,10 @@ internal static class IntegrationRunner
 				await checkout.RunOrThrowAsync(["checkout", "--quiet", "-b", component.Branch, component.BaseCommit]);
 				Report($"'{component.Name}': integrating onto {component.BaseRef} ({component.BaseCommit[..7]}) in '{component.Path}'.", component.Name);
 
-				// Syntactic steps first; one git cannot merge after all is demoted to the back of the semantic queue.
+				// Deterministic steps first; one git or weave cannot merge after all is demoted to the back of the semantic queue.
 				var executed = new List<IntegrationStep>();
 				var semantic = component.Steps.Where(step => step.Strategy == MergeStrategy.Semantic).ToList();
-				foreach (var step in component.Steps.Where(step => step.Strategy == MergeStrategy.Syntactic))
+				foreach (var step in component.Steps.Where(step => step.IsDeterministic))
 				{
 					if (Cancelled || Cancellation.IsCancellationRequested)
 					{
@@ -275,9 +281,14 @@ internal static class IntegrationRunner
 			}
 		}
 
-		/// <returns>False when git stopped on a conflict after all: the step then goes to the resolver.</returns>
+		/// <summary>A syntactic step is merged by git alone; a structural one by git with the structural merge driver.</summary>
+		/// <returns>
+		/// False when the merge stopped on a conflict after all, or the structural merge warned: the step then goes to the
+		/// resolver.
+		/// </returns>
 		private async Task<bool> MergeSyntacticallyAsync(GitClient checkout, ComponentIntegration component, IntegrationStep step)
 		{
+			var driver = step.Strategy == MergeStrategy.Structural ? structural : null;
 			var head = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
 			if (await MergeProbe.IsAncestorAsync(checkout, step.SourceCommit, head))
 			{
@@ -287,8 +298,20 @@ internal static class IntegrationRunner
 				return true;
 			}
 
-			Report($"'{component.Name}': merging run {Short(step)} with git.", component.Name, step.RunId);
-			var merge = await checkout.RunAsync(["merge", "--quiet", "--no-ff", "--no-edit", "-m", MergeCommitMessage(component, step), step.SourceCommit]);
+			if (step.Strategy == MergeStrategy.Structural && driver is null)
+			{
+				// Planned with weave, executed without it (an integration started from an edited plan): the resolver decides.
+				step.Strategy = MergeStrategy.Semantic;
+				step.Note = "planned for the structural merge, which this integration does not have; handed to the resolver";
+				Report($"'{component.Name}': run {Short(step)} needs the structural merge, which is not enabled; it moves to the semantic queue.", component.Name, step.RunId);
+				return false;
+			}
+
+			Report(driver is null
+					? $"'{component.Name}': merging run {Short(step)} with git."
+					: $"'{component.Name}': merging run {Short(step)} with git and the structural merge driver ({driver.Command}).",
+				component.Name, step.RunId);
+			var merge = await checkout.RunAsync([.. driver?.GitOptions ?? [], "merge", "--quiet", "--no-ff", "--no-edit", "-m", MergeCommitMessage(component, step), step.SourceCommit]);
 			if (merge.ExitCode != 0)
 			{
 				// Only a conflict is the resolver's business. Anything else (no git identity, a failing hook, a locked
@@ -303,14 +326,29 @@ internal static class IntegrationRunner
 
 				step.Strategy = MergeStrategy.Semantic;
 				step.Triage = Triage.Conflict;
-				step.Note = "git could not merge it onto the steps before it; handed to the resolver";
+				step.Note = driver is null
+					? "git could not merge it onto the steps before it; handed to the resolver"
+					: "git and the structural merge could not merge it onto the steps before it; handed to the resolver";
 				Report($"'{component.Name}': run {Short(step)} conflicts after all; it moves to the semantic queue.", component.Name, step.RunId);
+				return false;
+			}
+
+			if (driver is not null && StructuralMerge.Warnings(merge.Error) is { Count: > 0 } warnings)
+			{
+				// Clean, but weave doubts it means what both sides meant: like the triage, leave that to the resolver.
+				await RestoreAsync(checkout, head);
+				step.Strategy = MergeStrategy.Semantic;
+				step.Structural = StructuralTriage.Warnings;
+				step.StructuralWarnings.Clear();
+				step.StructuralWarnings.AddRange(warnings);
+				step.Note = "the structural merge completed it with warnings; handed to the resolver for review";
+				Report($"'{component.Name}': run {Short(step)} merged structurally with {warnings.Count} warning(s); it moves to the semantic queue.", component.Name, step.RunId);
 				return false;
 			}
 
 			step.Outcome = StepOutcome.Merged;
 			step.Commit = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
-			Report($"'{component.Name}': run {Short(step)} merged by git as {step.Commit[..7]}.", component.Name, step.RunId);
+			Report($"'{component.Name}': run {Short(step)} merged {(driver is null ? "by git" : "structurally by weave")} as {step.Commit[..7]}.", component.Name, step.RunId);
 			return true;
 		}
 
@@ -324,9 +362,18 @@ internal static class IntegrationRunner
 				return;
 			}
 
-			// diff3 puts the common ancestor into every conflict, so the resolver sees what each side changed, not
-			// just where they ended up.
-			var merge = await checkout.RunAsync(["-c", "merge.conflictStyle=diff3", "merge", "--quiet", "--no-ff", "--no-commit", step.SourceCommit]);
+			// With the structural merge enabled, the merge starts with weave as the driver, so the resolver only gets what
+			// weave could not merge, in entity-labelled conflicts. What git alone conflicts on is probed first, so the
+			// record and the brief show both.
+			if (structural is not null)
+			{
+				step.Conflicts.Clear();
+				step.Conflicts.AddRange((await MergeProbe.ProbeAsync(checkout, head, step.SourceCommit)).Conflicts);
+			}
+
+			// diff3 puts the common ancestor into every conflict git's own merge leaves, so the resolver sees what each
+			// side changed, not just where they ended up.
+			var merge = await checkout.RunAsync([.. structural?.GitOptions ?? [], "-c", "merge.conflictStyle=diff3", "merge", "--quiet", "--no-ff", "--no-commit", step.SourceCommit]);
 			if (merge.ExitCode is not (0 or 1) || !await MergeInProgressAsync(checkout))
 			{
 				await RestoreAsync(checkout, head);
@@ -335,8 +382,21 @@ internal static class IntegrationRunner
 			}
 
 			var conflicts = Lines(await checkout.RunOrThrowAsync(["diff", "--name-only", "--diff-filter=U"]));
-			step.Conflicts.Clear();
-			step.Conflicts.AddRange(conflicts);
+			if (structural is null)
+			{
+				step.Conflicts.Clear();
+				step.Conflicts.AddRange(conflicts);
+			}
+			else if (step.Conflicts.Count > 0)
+			{
+				// What the structural merge made of git's conflicts, as it is in the working tree now.
+				var warnings = StructuralMerge.Warnings(merge.Error);
+				step.StructuralConflicts.Clear();
+				step.StructuralConflicts.AddRange(conflicts);
+				step.StructuralWarnings.Clear();
+				step.StructuralWarnings.AddRange(warnings);
+				step.Structural = conflicts.Count > 0 ? StructuralTriage.Conflict : warnings.Count > 0 ? StructuralTriage.Warnings : StructuralTriage.Clean;
+			}
 
 			var briefText = MergeBrief.Render(await BriefAsync(checkout, component, step, before, head, conflicts));
 			int? exitCode;
@@ -345,7 +405,7 @@ internal static class IntegrationRunner
 				step.Brief = Path.Combine(record.WorkspacePath, $"{component.Name}.{Short(step)}.merge.md");
 				await File.WriteAllTextAsync(step.Brief, briefText);
 				Report(conflicts.Count == 0
-						? $"'{component.Name}': asking the resolver to review run {Short(step)} semantically."
+						? $"'{component.Name}': asking the resolver to review run {Short(step)} semantically{(step.StructuralWarnings.Count > 0 ? $" ({step.StructuralWarnings.Count} structural merge warning(s))" : "")}."
 						: $"'{component.Name}': asking the resolver to merge run {Short(step)} ({conflicts.Count} conflicted file(s)).",
 					component.Name, step.RunId);
 
@@ -404,7 +464,8 @@ internal static class IntegrationRunner
 			}
 
 			await checkout.RunOrThrowAsync(["add", "--all"]);
-			var unresolved = conflicts.Where(file => HasConflictMarkers(Path.Combine(component.Path!, file))).ToList();
+			var unresolved = conflicts.Concat(step.Conflicts).Distinct(StringComparer.Ordinal)
+				.Where(file => HasConflictMarkers(Path.Combine(component.Path!, file))).ToList();
 			unresolved.AddRange(Lines(await checkout.RunOrThrowAsync(["diff", "--name-only", "--diff-filter=U"])).Except(unresolved));
 			if (unresolved.Count > 0)
 			{
@@ -443,6 +504,7 @@ internal static class IntegrationRunner
 				runs.FirstOrDefault(run => run.RunId == step.RunId),
 				conflicts,
 				step.ConflictsWith,
+				structural is null ? null : new MergeBrief.StructuralInfo(structural.Command, step.Conflicts, step.StructuralWarnings),
 				await SideAsync("Ours", head, integrated),
 				await SideAsync("Theirs", step.SourceCommit, [step.Rationale]));
 		}
@@ -493,6 +555,12 @@ internal static class IntegrationRunner
 				["source_commit"] = step.SourceCommit,
 				["rationale"] = step.Rationale
 			};
+			if (step.Strategy == MergeStrategy.Structural)
+			{
+				table["conflicts"] = Array(step.Conflicts);
+				table["structural_driver"] = structural?.Command ?? "";
+			}
+
 			if (step.IsSemantic)
 			{
 				var conflicts = new TomlArray();
@@ -502,6 +570,16 @@ internal static class IntegrationRunner
 				}
 
 				table["conflicts"] = conflicts;
+				if (step.Structural is not null)
+				{
+					table["structural_driver"] = structural?.Command ?? "";
+					table["structural_conflicts"] = Array(step.StructuralConflicts);
+					if (step.StructuralWarnings.Count > 0)
+					{
+						table["structural_warnings"] = Array(step.StructuralWarnings);
+					}
+				}
+
 				table["resolver"] = record.Resolver;
 			}
 
@@ -510,6 +588,17 @@ internal static class IntegrationRunner
 		}
 
 		private static string Short(IntegrationStep step) => RunMetadata.Key(step.RunId);
+
+		private static TomlArray Array(IEnumerable<string> values)
+		{
+			var array = new TomlArray();
+			foreach (var value in values)
+			{
+				array.Add(value);
+			}
+
+			return array;
+		}
 	}
 
 	private static async Task<bool> MergeInProgressAsync(GitClient checkout) =>
@@ -532,8 +621,10 @@ internal static class IntegrationRunner
 		await checkout.RunOrThrowAsync(["clean", "--quiet", "-d", "--force", "-x"]);
 	}
 
+	/// <summary>Conflict markers left in a file, or the pointer to <c>weave explain</c> the structural merge adds to a conflicted one.</summary>
 	private static bool HasConflictMarkers(string path) =>
-		File.Exists(path) && File.ReadLines(path).Any(line => line.StartsWith("<<<<<<<", StringComparison.Ordinal) || line.StartsWith(">>>>>>>", StringComparison.Ordinal));
+		File.Exists(path) && File.ReadLines(path).Any(line =>
+			line.StartsWith("<<<<<<<", StringComparison.Ordinal) || line.StartsWith(">>>>>>>", StringComparison.Ordinal) || StructuralMerge.IsAnnotation(line));
 
 	private static List<string> Lines(string text) =>
 		text.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();

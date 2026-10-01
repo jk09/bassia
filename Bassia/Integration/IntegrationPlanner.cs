@@ -15,6 +15,9 @@ internal sealed record IntegrationChoices
 	public IReadOnlyDictionary<(string Component, string RunId), MergeStrategy> Strategies { get; init; } =
 		new Dictionary<(string, string), MergeStrategy>();
 
+	/// <summary>The structural merge (weave) tried where git conflicts; null leaves every conflict to the resolver.</summary>
+	public StructuralMerge? Structural { get; init; }
+
 	public MergeStrategy? StrategyFor(string component, string runId) =>
 		Strategies.TryGetValue((component, runId), out var strategy) ? strategy
 		: Strategies.TryGetValue(("*", runId), out strategy) ? strategy
@@ -25,9 +28,12 @@ internal sealed record IntegrationChoices
 /// The triage: decides, per component, how every selected run's result will be integrated, without changing any
 /// ref. Results are considered oldest run first. Each is classified against the integration head as git's
 /// syntax-based merge sees it; the ones git can merge on its own are chained onto a simulated head, in order, so a
-/// result that merges cleanly onto the base but conflicts with an earlier result is caught here too. Whatever git
-/// cannot merge goes to the semantic queue, which runs after every syntactic step, so the resolver sees as much of
-/// the integration as git could build and is asked to decide only what git could not.
+/// result that merges cleanly onto the base but conflicts with an earlier result is caught here too. Where git
+/// conflicts, the structural merge (weave, when enabled) is asked the same question at the level of functions,
+/// classes and keys; what it merges cleanly is chained just like git's merges, because it is just as deterministic.
+/// Whatever neither can merge - or weave merges only with warnings - goes to the semantic queue, which runs after
+/// every deterministic step, so the resolver sees as much of the integration as git and weave could build and is
+/// asked to decide only what they could not.
 /// </summary>
 internal static class IntegrationPlanner
 {
@@ -105,14 +111,13 @@ internal static class IntegrationPlanner
 			});
 		}
 
-		// Chain every result git can merge on its own onto a simulated head, oldest first.
+		// Chain every result git (or the structural merge) can merge on its own onto a simulated head, oldest first.
 		var head = baseCommit;
-		List<IntegrationStep> syntactic = [], semantic = [], skipped = [];
+		List<IntegrationStep> deterministic = [], semantic = [], skipped = [];
 		foreach (var step in candidates)
 		{
 			var chosen = choices.StrategyFor(name, step.RunId);
-			var probe = await MergeProbe.ProbeAsync(git, head, step.SourceCommit);
-			Apply(step, probe);
+			var probe = await ClassifyAsync(git, head, step, choices.Structural);
 
 			if (chosen == MergeStrategy.Skip)
 			{
@@ -120,39 +125,47 @@ internal static class IntegrationPlanner
 				step.Overridden = true;
 				skipped.Add(step);
 			}
-			else if (probe.Triage == Triage.UpToDate)
+			else if (step.Triage == Triage.UpToDate)
 			{
 				step.Strategy = MergeStrategy.Syntactic;
-				syntactic.Add(step);
+				deterministic.Add(step);
 			}
-			else if (probe.Triage == Triage.Conflict || chosen == MergeStrategy.Semantic)
+			else if (chosen == MergeStrategy.Semantic || (step.Triage == Triage.Conflict && step.Structural != StructuralTriage.Clean))
 			{
 				step.Strategy = MergeStrategy.Semantic;
-				step.Overridden = probe.Triage != Triage.Conflict;
+				step.Overridden = step.Triage != Triage.Conflict || step.Structural == StructuralTriage.Clean;
 				semantic.Add(step);
 			}
 			else
 			{
-				step.Strategy = MergeStrategy.Syntactic;
-				syntactic.Add(step);
+				// Git's own merge, or the structural merge where git conflicts and weave does not.
+				step.Strategy = step.Triage == Triage.Conflict ? MergeStrategy.Structural : MergeStrategy.Syntactic;
+				deterministic.Add(step);
 				head = probe.Triage == Triage.FastForward ? step.SourceCommit : await MergeProbe.SimulateMergeAsync(git, head, step.SourceCommit, probe.Tree!);
 			}
 		}
 
-		// What the resolver will face first: the semantic results against everything git merged.
+		// What the resolver will face first: the semantic results against everything git and weave merged.
 		foreach (var step in semantic)
 		{
-			Apply(step, await MergeProbe.ProbeAsync(git, head, step.SourceCommit));
+			await ClassifyAsync(git, head, step, choices.Structural);
 		}
 
 		// Which results collide with each other on their own - the reason a result that merges cleanly onto the base
-		// can still need the resolver, and what the semantic brief points the resolver at.
+		// can still need the resolver, and what the semantic brief points the resolver at. What the structural merge
+		// combines cleanly is no collision.
 		var active = candidates.Where(step => step.Strategy != MergeStrategy.Skip).ToList();
 		for (var i = 0; i < active.Count; i++)
 		{
 			for (var j = i + 1; j < active.Count; j++)
 			{
-				if ((await MergeProbe.ProbeAsync(git, active[i].SourceCommit, active[j].SourceCommit)).Triage == Triage.Conflict)
+				var probe = await MergeProbe.ProbeAsync(git, active[i].SourceCommit, active[j].SourceCommit);
+				if (probe.Triage == Triage.Conflict && choices.Structural is { } structural)
+				{
+					probe = await MergeProbe.ProbeAsync(git, active[i].SourceCommit, active[j].SourceCommit, structural);
+				}
+
+				if (probe.Triage == Triage.Conflict)
 				{
 					active[i].ConflictsWith.Add(active[j].RunId);
 					active[j].ConflictsWith.Add(active[i].RunId);
@@ -160,15 +173,36 @@ internal static class IntegrationPlanner
 			}
 		}
 
-		component.Steps.AddRange([.. syntactic, .. semantic, .. skipped]);
+		component.Steps.AddRange([.. deterministic, .. semantic, .. skipped]);
 		return component;
 	}
 
-	private static void Apply(IntegrationStep step, MergeProbe.Result probe)
+	/// <summary>
+	/// Records on the step how <paramref name="head"/> and its result merge: git's verdict always, and where git
+	/// conflicts, the structural merge's. Returns the probe whose tree a deterministic merge would produce: the
+	/// structural one when git conflicts and weave merges cleanly, git's otherwise.
+	/// </summary>
+	private static async Task<MergeProbe.Result> ClassifyAsync(GitClient git, string head, IntegrationStep step, StructuralMerge? structural)
 	{
+		var probe = await MergeProbe.ProbeAsync(git, head, step.SourceCommit);
 		step.Triage = probe.Triage;
 		step.Conflicts.Clear();
 		step.Conflicts.AddRange(probe.Conflicts);
+		step.Structural = null;
+		step.StructuralConflicts.Clear();
+		step.StructuralWarnings.Clear();
+		if (probe.Triage != Triage.Conflict || structural is null)
+		{
+			return probe;
+		}
+
+		var structured = await MergeProbe.ProbeAsync(git, head, step.SourceCommit, structural);
+		step.StructuralConflicts.AddRange(structured.Conflicts);
+		step.StructuralWarnings.AddRange(structured.Warnings);
+		step.Structural = structured.Triage == Triage.Conflict ? StructuralTriage.Conflict
+			: structured.Warnings.Count > 0 ? StructuralTriage.Warnings
+			: StructuralTriage.Clean;
+		return step.Structural == StructuralTriage.Clean ? structured : probe;
 	}
 
 	/// <summary>The branch the component repo's <c>HEAD</c> names: what <c>component add</c> cloned, usually <c>main</c>.</summary>
@@ -190,28 +224,32 @@ internal static class IntegrationPlanner
 /// <summary>Asks git how two commits would merge, without a working tree and without moving any ref.</summary>
 internal static class MergeProbe
 {
-	internal sealed record Result(Triage Triage, string? Tree, IReadOnlyList<string> Conflicts);
+	/// <param name="Warnings">The structural merge driver's warnings; always empty for git's own merge.</param>
+	internal sealed record Result(Triage Triage, string? Tree, IReadOnlyList<string> Conflicts, IReadOnlyList<string> Warnings);
 
-	public static async Task<Result> ProbeAsync(GitClient git, string ours, string theirs)
+	/// <param name="structural">Merge with the structural driver (weave) instead of git's line merge alone.</param>
+	public static async Task<Result> ProbeAsync(GitClient git, string ours, string theirs, StructuralMerge? structural = null)
 	{
 		if (await IsAncestorAsync(git, theirs, ours))
 		{
-			return new Result(Triage.UpToDate, null, []);
+			return new Result(Triage.UpToDate, null, [], []);
 		}
 
 		if (await IsAncestorAsync(git, ours, theirs))
 		{
-			return new Result(Triage.FastForward, null, []);
+			return new Result(Triage.FastForward, null, [], []);
 		}
 
 		// merge-tree --write-tree (git 2.38+) runs the real three-way merge in the object database: exit code 0 is a
-		// clean merge and prints the tree, 1 is a conflict and lists the conflicted paths after the tree.
-		var merge = await git.RunAsync(["merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs]);
+		// clean merge and prints the tree, 1 is a conflict and lists the conflicted paths after the tree. It honours a
+		// merge driver given with -c, which is how the structural merge is probed without touching the repo.
+		var merge = await git.RunAsync([.. structural?.GitOptions ?? [], "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs]);
 		var lines = merge.Output.Replace("\r", "").Split('\n');
+		var warnings = structural is null ? [] : StructuralMerge.Warnings(merge.Error);
 		return merge.ExitCode switch
 		{
-			0 => new Result(Triage.Clean, lines[0].Trim(), []),
-			1 => new Result(Triage.Conflict, lines[0].Trim(), lines.Skip(1).TakeWhile(line => line.Length > 0).Distinct(StringComparer.Ordinal).ToList()),
+			0 => new Result(Triage.Clean, lines[0].Trim(), [], warnings),
+			1 => new Result(Triage.Conflict, lines[0].Trim(), lines.Skip(1).TakeWhile(line => line.Length > 0).Distinct(StringComparer.Ordinal).ToList(), warnings),
 			_ => throw new IntegrationException(
 				$"git merge-tree failed in '{git.WorkingDirectory}' (the triage needs git 2.38 or later): {merge.Error.Trim()}")
 		};
