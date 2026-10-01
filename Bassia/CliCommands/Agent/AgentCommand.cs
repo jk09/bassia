@@ -116,8 +116,8 @@ internal static class AgentCommand
 	}
 
 	/// <summary>
-	/// Checks a <c>-select</c> value and resolves every component's tag to its commit, without touching the
-	/// filesystem: every entry names a registered component and an annotated tag, and the selection covers its own
+	/// Checks a <c>-select</c> value and resolves every component's tag or hash to its commit, without touching the
+	/// filesystem: every entry names a registered component and an annotated tag or a commit hash, and the selection covers its own
 	/// reference closure. Returns the closure in dependency order with each component's resolved commit.
 	/// </summary>
 	internal static async Task<(IReadOnlyList<ComponentDefinition> Closure, IReadOnlyList<(ComponentDefinition Component, string CommitIsh, string Commit)> Resolved)>
@@ -126,7 +126,7 @@ internal static class AgentCommand
 		var selected = ComponentSelection.ParseList("-select", select);
 		if (selected.Count == 0)
 		{
-			throw new AgentException("-select names no component; expected <component>@<tag>[,<component>@<tag>...].");
+			throw new AgentException("-select names no component; expected <component>@<tag|hash>[,<component>@<tag|hash>...].");
 		}
 
 		foreach (var selection in selected)
@@ -186,12 +186,12 @@ internal static class AgentCommand
 		var details = string.Join(", ", missing.Select(name => $"'{name}' (referenced by '{referrers[name]}')"));
 		throw new AgentException(
 			$"-select must cover the full component closure; missing: {details}. " +
-			$"Add each as <component>@<tag>, for example: -select {selected[0].Component}@{selected[0].CommitIsh},{missing[0]}@<tag>.");
+			$"Add each as <component>@<tag|hash>, for example: -select {selected[0].Component}@{selected[0].CommitIsh},{missing[0]}@<tag>.");
 	}
 
 	/// <summary>
-	/// Resolves a component's commit in its source-of-truth repo. The commit-ish must be an annotated tag, since it
-	/// is logged as the run's immutable provenance.
+	/// Resolves a component's commit in its source-of-truth repo. The commit-ish must be an annotated tag or a commit
+	/// hash (see <see cref="IsHashSelector"/>), since it is logged as the run's immutable provenance.
 	/// </summary>
 	private static async Task<string> ResolveCommitAsync(Monorepo monorepo, string componentName, string commitIsh)
 	{
@@ -202,6 +202,11 @@ internal static class AgentCommand
 		}
 
 		var source = GitClient.In(sourceDir);
+		if (IsHashSelector(commitIsh) && await ResolveHashAsync(source, sourceDir, componentName, commitIsh) is { } commit)
+		{
+			return commit;
+		}
+
 		var type = await source.RunAsync(["cat-file", "-t", commitIsh]);
 		if (type.ExitCode != 0)
 		{
@@ -210,10 +215,57 @@ internal static class AgentCommand
 
 		if (type.Output.Trim() != "tag")
 		{
-			throw new AgentException($"'{componentName}@{commitIsh}' is a {type.Output.Trim()}, not an annotated tag. Create one with: git -C \"{sourceDir}\" tag -a <name> -m <message>");
+			throw new AgentException($"'{componentName}@{commitIsh}' is a {type.Output.Trim()}, not an annotated tag. Select an annotated tag or a commit hash, or create a tag with: git -C \"{sourceDir}\" tag -a <name> -m <message>");
 		}
 
 		return await source.RunOrThrowAsync(["rev-parse", "--verify", $"{commitIsh}^{{commit}}"]);
+	}
+
+	/// <summary>
+	/// A selector read as a commit hash: 6 to 64 lowercase hex digits (a SHA-1 or SHA-256 hash or a prefix of one).
+	/// Anything else is a ref name.
+	/// </summary>
+	internal static bool IsHashSelector(string commitIsh) =>
+		commitIsh.Length is >= 6 and <= 64 && commitIsh.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+	/// <summary>
+	/// Resolves a hash selector to its commit, or returns null when it is only a ref name (no object hash starts with
+	/// it), so the caller resolves it as a tag. The selector must mean one thing: a prefix shared by several objects
+	/// fails with git's own ambiguity error, and one that is both a ref and an object hash prefix fails too, where git
+	/// would silently prefer the ref.
+	/// </summary>
+	private static async Task<string?> ResolveHashAsync(GitClient source, string sourceDir, string componentName, string hash)
+	{
+		// A hash selector is all hex digits, so it can never be mistaken for an option.
+		var symbolic = await source.RunAsync(["rev-parse", "--symbolic-full-name", hash]);
+		var reference = symbolic.ExitCode == 0 ? symbolic.Output.Trim() : "";
+		var candidates = (await source.RunOrThrowAsync(["rev-parse", $"--disambiguate={hash}"]))
+			.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+		if (candidates.Length == 0)
+		{
+			return reference.Length > 0 ? null : throw new AgentException($"'{hash}' does not exist in component '{componentName}' ('{sourceDir}').");
+		}
+
+		if (reference.Length > 0)
+		{
+			throw new AgentException(
+				$"'{componentName}@{hash}' is ambiguous: it names the ref '{reference}' and is also the prefix of the object hash {candidates[0]}" +
+				(candidates.Length > 1 ? $" (and {candidates.Length - 1} more)" : "") +
+				$". Select the ref as '{componentName}@{reference}' or the commit with a longer hash.");
+		}
+
+		var resolved = await source.RunAsync(["rev-parse", "--verify", hash]);
+		if (resolved.ExitCode != 0)
+		{
+			throw new AgentException($"'{componentName}@{hash}' does not name a single object in component '{componentName}' ('{sourceDir}'); select it with a longer hash. git: {resolved.Error.Trim()}");
+		}
+
+		var commit = resolved.Output.Trim();
+		var type = (await source.RunOrThrowAsync(["cat-file", "-t", commit])).Trim();
+		return type == "commit"
+			? commit
+			: throw new AgentException($"'{componentName}@{hash}' is a {type}, not a commit. Select a commit hash or an annotated tag.");
 	}
 
 	// ----- materialization -----
