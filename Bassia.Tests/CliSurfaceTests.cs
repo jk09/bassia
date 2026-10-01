@@ -425,7 +425,7 @@ public class CliSurfaceTests
 		Assert.True(runExit == 0, runError);
 		var runId = TestEnvironment.RunIdOf(runOutput);
 		var other = await monorepo.RunWritingAsync("lib", "b.txt", "b");
-		var shortId = RunMetadata.ShortKey(runId);
+		var shortId = RunMetadata.Key(runId);
 
 		var (beforeExit, beforeOutput, beforeError) = await monorepo.BassiaAsync("log", "-run", shortId);
 

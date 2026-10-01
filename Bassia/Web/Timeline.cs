@@ -123,7 +123,7 @@ internal static class Timeline
 		return entries;
 	}
 
-	/// <summary><c>HEAD -> main, tag: v0, agent/run-x</c> -> <c>main</c>, <c>v0</c>, <c>agent/run-x</c>.</summary>
+	/// <summary><c>HEAD -> main, tag: v0, agent-run/x</c> -> <c>main</c>, <c>v0</c>, <c>agent-run/x</c>.</summary>
 	internal static IReadOnlyList<string> Refs(string decoration) =>
 		decoration.Split(", ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
 			.Select(entry => entry.StartsWith("HEAD -> ", StringComparison.Ordinal) ? entry["HEAD -> ".Length..] : entry)

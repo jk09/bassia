@@ -59,9 +59,9 @@ internal static class Html
 
 	public static string Status(string status) => $"<span class=\"status {E(status)}\">{E(status)}</span>";
 
-	public static string RunLink(string runId) => $"<a class=\"id\" href=\"/runs/{Url(runId)}\">{E(RunMetadata.ShortKey(runId))}</a>";
+	public static string RunLink(string runId) => $"<a class=\"id\" href=\"/runs/{Url(runId)}\">{E(RunMetadata.Key(runId))}</a>";
 
-	public static string IntegrationLink(string id) => $"<a class=\"id\" href=\"/integrations/{Url(id)}\">{E(IntegrationRecord.ShortKey(id))}</a>";
+	public static string IntegrationLink(string id) => $"<a class=\"id\" href=\"/integrations/{Url(id)}\">{E(IntegrationRecord.Key(id))}</a>";
 
 	/// <summary>
 	/// A ref as a chip. Agent and integration refs link to the run or integration that made them, which is what ties a
@@ -89,7 +89,7 @@ internal static class Html
 			if (name.StartsWith(prefix, StringComparison.Ordinal))
 			{
 				var key = name[prefix.Length..].Split('/')[0];
-				return key.Length == 32 && key.All(Uri.IsHexDigit) ? path + Url(idPrefix + key) : null;
+				return RecordName.IsKey(key) ? path + Url(idPrefix + key) : null;
 			}
 		}
 

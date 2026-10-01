@@ -44,13 +44,13 @@ public class TomlResultTests
 		{
 			["agent_exit_code"] = 3,
 			["result_error"] = null,
-			["metadata_tags"] = new[] { "agent/run-abc/0", "agent/run-abc/1" }
+			["metadata_tags"] = new[] { "agent-run/brave-otter-abc123/0", "agent-run/brave-otter-abc123/1" }
 		});
 
 		var table = Parse(text);
 		Assert.Equal(3L, table["agent_exit_code"]);
 		Assert.False(table.ContainsKey("result_error"));
-		Assert.Equal(new object[] { "agent/run-abc/0", "agent/run-abc/1" }, (TomlArray)table["metadata_tags"]);
+		Assert.Equal(new object[] { "agent-run/brave-otter-abc123/0", "agent-run/brave-otter-abc123/1" }, (TomlArray)table["metadata_tags"]);
 	}
 
 	[Fact]

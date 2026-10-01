@@ -443,7 +443,7 @@ internal static class ComponentSplitter
 			}
 
 			var unmerged = (await source.RunOrThrowAsync(["for-each-ref", "--no-merged", $"refs/heads/{allocation.Branch}", "--format=%(refname:strip=2)",
-				"refs/tags/agent/", "refs/tags/integration/"])).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
+				"refs/tags/agent-run/", "refs/tags/integration/"])).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
 
 			await source.RunOrThrowAsync(["tag", "-a", tag, "-m", RecordMessage(id, allocation, null, timestamp), allocation.TipCommit]);
 			sourceTagged = true;

@@ -91,7 +91,7 @@ public class AgentCommandTests
 		// Subject from the default template, then a TOML body naming the run, its command and the tag on this commit.
 		var message = await TestEnvironment.GitAsync(source, "log", "-1", "--format=%B", resultCommit);
 		var lines = message.Replace("\r", "").Split('\n');
-		Assert.Equal($"agent({RunMetadata.ShortKey(runId)}): {AgentCommand.SummarizeCommand(TestEnvironment.WriteFileCommand("example/hello.cs", "class Hello {}"))}", lines[0]);
+		Assert.Equal($"agent({RunMetadata.Key(runId)}): {AgentCommand.SummarizeCommand(TestEnvironment.WriteFileCommand("example/hello.cs", "class Hello {}"))}", lines[0]);
 		Assert.Equal("", lines[1]);
 		var body = (TomlTable)TomlSerializer.Deserialize<TomlTable>(string.Join('\n', lines[2..]))!["agentic_run"];
 		Assert.Equal(runId, body["id"]);
@@ -141,7 +141,7 @@ public class AgentCommandTests
 
 		// Both runs branched off v0 independently, each with its own branch and tag in the source of truth.
 		var source = monorepo.SourceRepo("example");
-		var refs = (await TestEnvironment.GitAsync(source, "for-each-ref", "--format=%(refname)", "refs/heads/agent/", "refs/tags/agent/")).Replace("\r", "").Split('\n');
+		var refs = (await TestEnvironment.GitAsync(source, "for-each-ref", "--format=%(refname)", "refs/heads/agent-run/", "refs/tags/agent-run/")).Replace("\r", "").Split('\n');
 		Assert.Equal(
 			new[] { $"refs/heads/{RunMetadata.RefBase(firstId)}", $"refs/heads/{RunMetadata.RefBase(secondId)}", $"refs/tags/{RunMetadata.TagName(firstId, 0)}", $"refs/tags/{RunMetadata.TagName(secondId, 0)}" }.Order(),
 			refs.Order());
@@ -160,7 +160,7 @@ public class AgentCommandTests
 		Assert.Contains("result_status = \"unchanged\"", output);
 		Assert.Contains("changed no component; nothing was committed", output);
 
-		var refs = await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "for-each-ref", "--format=%(refname)", "refs/heads/agent/", "refs/tags/agent/");
+		var refs = await TestEnvironment.GitAsync(monorepo.SourceRepo("example"), "for-each-ref", "--format=%(refname)", "refs/heads/agent-run/", "refs/tags/agent-run/");
 		Assert.Equal("", refs);
 	}
 

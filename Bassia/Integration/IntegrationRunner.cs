@@ -23,9 +23,9 @@ internal sealed record IntegrationOutcome(bool Ok, string Message, IntegrationRe
 
 /// <summary>
 /// Executes an integration plan. Every component is integrated in its own checkout under
-/// <c>.workspace/integration-&lt;id&gt;/</c>, on the branch <c>integration/&lt;id&gt;</c> started at the component's base:
+/// <c>.workspace/integration-&lt;key&gt;/</c>, on the branch <c>integration/&lt;key&gt;</c> started at the component's base:
 /// first every step git can merge on its own (oldest run first), then every step that needs the resolver, each with
-/// the semantic brief on its stdin. The result is tagged <c>integration/&lt;id&gt;/&lt;n&gt;</c> - one identically named
+/// the semantic brief on its stdin. The result is tagged <c>integration/&lt;key&gt;/&lt;n&gt;</c> - one identically named
 /// annotated tag across the components, so the integration can be selected as the baseline of the next run - and
 /// branch and tag are pushed to the component's source-of-truth repo. Nothing else there moves until
 /// <see cref="AdvanceAsync"/> is asked to.
@@ -505,11 +505,11 @@ internal static class IntegrationRunner
 				table["resolver"] = record.Resolver;
 			}
 
-			var subject = $"integrate({IntegrationRecord.ShortKey(record.IntegrationId)}): {Short(step)} {step.Rationale}";
+			var subject = $"integrate({IntegrationRecord.Key(record.IntegrationId)}): {Short(step)} {step.Rationale}";
 			return $"{subject}\n\n{TomlSerializer.Serialize(new TomlTable { ["integration"] = table })}";
 		}
 
-		private static string Short(IntegrationStep step) => RunMetadata.ShortKey(step.RunId);
+		private static string Short(IntegrationStep step) => RunMetadata.Key(step.RunId);
 	}
 
 	private static async Task<bool> MergeInProgressAsync(GitClient checkout) =>

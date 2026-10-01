@@ -138,7 +138,7 @@ internal static class TestEnvironment
 	/// <summary>The run id from an <c>agent</c> command's TOML result (stdout on success, stderr on failure).</summary>
 	public static string RunIdOf(string toml)
 	{
-		var match = Regex.Match(toml, "run_id = \"(agent-run-[0-9a-f]{32})\"");
+		var match = Regex.Match(toml, "run_id = \"(agent-run-[a-z]+-[a-z]+-[a-z0-9]{6})\"");
 		Assert.True(match.Success, $"no run id in: {toml}");
 		return match.Groups[1].Value;
 	}

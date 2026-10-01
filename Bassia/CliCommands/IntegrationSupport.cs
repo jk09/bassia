@@ -35,7 +35,7 @@ internal static class IntegrationSupport
 		return selected;
 	}
 
-	/// <summary>A run is named by its full id, its <c>&lt;id&gt;</c> part, or any unambiguous-enough prefix of it such as the short id.</summary>
+	/// <summary>A run is named by its full id, its <c>&lt;key&gt;</c> part (the short id), or any unambiguous-enough prefix of the key.</summary>
 	internal static bool MatchesRun(string runId, string name) =>
 		RunMetadata.Key(runId).StartsWith(RunMetadata.Key(RunMetadata.NormalizeRunId(name)), StringComparison.OrdinalIgnoreCase)
 		&& RunMetadata.Key(RunMetadata.NormalizeRunId(name)).Length >= 4;

@@ -5,9 +5,9 @@ public class CommitProvenanceTests
 	[Fact]
 	public void Parse_ResultCommitBody_NamesTheRun()
 	{
-		var provenance = CommitProvenance.Parse("[agentic_run]\nid = \"agent-run-0123456789abcdef0123456789abcdef\"\nsummary = \"x\"\n[agentic_run.component]\nname = \"app\"\n");
+		var provenance = CommitProvenance.Parse("[agentic_run]\nid = \"agent-run-magical-otter-vt9j3p\"\nsummary = \"x\"\n[agentic_run.component]\nname = \"app\"\n");
 
-		Assert.Equal(new CommitProvenance(CommitProvenance.Result, "agent-run-0123456789abcdef0123456789abcdef", null), provenance);
+		Assert.Equal(new CommitProvenance(CommitProvenance.Result, "agent-run-magical-otter-vt9j3p", null), provenance);
 	}
 
 	[Fact]

@@ -166,7 +166,7 @@ internal static class IntegrationCommands
 				new Dictionary<string, object?> { ["integration_id"] = id, ["log"] = log });
 		}
 
-		var shortId = IntegrationRecord.ShortKey(id);
+		var shortId = IntegrationRecord.Key(id);
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Integration '{id}' started in the background. Follow it with 'bassia integration show {shortId}', 'bassia integration logs {shortId}' " +
 			$"or 'bassia integration wait {shortId}'; stop it with 'bassia integration stop {shortId}'.",
@@ -241,14 +241,14 @@ internal static class IntegrationCommands
 				["table"] = new TomlText(AsciiTable.Render(["ID", "STATUS", "LIVE", "CREATED", "RUNS", "RESULT TAGS"],
 					shown.Select(found => (IReadOnlyList<string>)
 					[
-						IntegrationRecord.ShortKey(found.Id), found.Status + (found.Stale ? "!" : ""), found.Live ? "yes" : "",
-						RunCommands.Time(found.Record!.Created), string.Join(",", found.Record.Runs.Select(RunMetadata.ShortKey)),
+						IntegrationRecord.Key(found.Id), found.Status + (found.Stale ? "!" : ""), found.Live ? "yes" : "",
+						RunCommands.Time(found.Record!.Created), string.Join(",", found.Record.Runs.Select(RunMetadata.Key)),
 						string.Join(",", found.Record.Components.Where(component => component.ResultTag is not null).Select(component => component.Name))
 					]))),
 				["integration"] = shown.Select(found => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 				{
 					["integration_id"] = found.Id,
-					["short_id"] = IntegrationRecord.ShortKey(found.Id),
+					["short_id"] = IntegrationRecord.Key(found.Id),
 					["status"] = found.Status,
 					["live"] = found.Live,
 					["stale"] = found.Stale,
@@ -271,7 +271,7 @@ internal static class IntegrationCommands
 	}
 
 	private static string Describe(Found found) =>
-		found.Stale ? $"Integration '{found.Id}' is recorded as started, but no process is executing it any more; 'bassia integration stop {IntegrationRecord.ShortKey(found.Id)}' records it as cancelled."
+		found.Stale ? $"Integration '{found.Id}' is recorded as started, but no process is executing it any more; 'bassia integration stop {IntegrationRecord.Key(found.Id)}' records it as cancelled."
 		: found.Live ? $"Integration '{found.Id}' is live ({found.Status})."
 		: found.Record is null ? $"Integration '{found.Id}' never got past preparing; it has no record."
 		: $"Integration '{found.Id}' is {found.Status}.";
@@ -281,7 +281,7 @@ internal static class IntegrationCommands
 		var data = new Dictionary<string, object?>
 		{
 			["integration_id"] = found.Id,
-			["short_id"] = IntegrationRecord.ShortKey(found.Id),
+			["short_id"] = IntegrationRecord.Key(found.Id),
 			["status"] = found.Status,
 			["live"] = found.Live,
 			["stale"] = found.Stale,
@@ -420,7 +420,7 @@ internal static class IntegrationCommands
 		var record = found.Record ?? throw new IntegrationException($"Integration '{found.Id}' has no record yet.");
 		if (found.Live)
 		{
-			throw new IntegrationException($"Integration '{found.Id}' is still running; wait for it with 'bassia integration wait {IntegrationRecord.ShortKey(found.Id)}'.");
+			throw new IntegrationException($"Integration '{found.Id}' is still running; wait for it with 'bassia integration wait {IntegrationRecord.Key(found.Id)}'.");
 		}
 
 		var outcome = await IntegrationRunner.AdvanceAsync(new GitClient(found.Monorepo.Root), found.Monorepo, record);
@@ -432,9 +432,9 @@ internal static class IntegrationCommands
 	/// <summary>
 	/// Per component its base and its steps in execution order, as a tree:
 	/// <code>
-	/// app  onto main @ 1a2b3c4  -> integration/5e11aa00/0  completed
-	/// |-- 3f2a91c4  fast_forward  SYNTAX     merged
-	/// `-- 91ab22cd  conflict      SEMANTIC*  resolved   [README.md]  conflicts with 3f2a91c4
+	/// app  onto main @ 1a2b3c4  -> integration/steady-heron-5e11aa/0  completed
+	/// |-- brave-otter-3f2a91  fast_forward  SYNTAX     merged
+	/// `-- quiet-fern-91ab22   conflict      SEMANTIC*  resolved   [README.md]  conflicts with brave-otter-3f2a91
 	/// </code>
 	/// A star marks a strategy that was chosen rather than decided by the triage.
 	/// </summary>
@@ -465,6 +465,8 @@ internal static class IntegrationCommands
 			}
 
 			builder.Append('\n');
+			// Run keys differ in length; padding them to the longest keeps the columns aligned.
+			var keyWidth = component.Steps.Select(step => RunMetadata.Key(step.RunId).Length).DefaultIfEmpty(0).Max();
 			for (var i = 0; i < component.Steps.Count; i++)
 			{
 				var step = component.Steps[i];
@@ -475,7 +477,7 @@ internal static class IntegrationCommands
 					_ => "SKIP"
 				} + (step.Overridden ? "*" : "");
 				builder.Append(i == component.Steps.Count - 1 ? "`-- " : "|-- ")
-					.Append(RunMetadata.ShortKey(step.RunId)).Append("  ")
+					.Append(RunMetadata.Key(step.RunId).PadRight(keyWidth)).Append("  ")
 					.Append(IntegrationRecord.Snake(step.Triage).PadRight(12)).Append("  ")
 					.Append(strategy.PadRight(9));
 				if (step.Outcome != StepOutcome.Pending)
@@ -490,7 +492,7 @@ internal static class IntegrationCommands
 
 				if (step.ConflictsWith.Count > 0)
 				{
-					builder.Append("  conflicts with ").Append(string.Join(", ", step.ConflictsWith.Select(RunMetadata.ShortKey)));
+					builder.Append("  conflicts with ").Append(string.Join(", ", step.ConflictsWith.Select(RunMetadata.Key)));
 				}
 
 				builder.Append('\n');

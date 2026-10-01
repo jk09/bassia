@@ -425,7 +425,7 @@ internal static class AgentCommand
 	}
 
 	/// <summary>
-	/// <c>agent/run-&lt;id&gt;/&lt;counter&gt;</c> with the next unused counter. Every result tag of the run sits on the
+	/// <c>agent-run/&lt;key&gt;/&lt;counter&gt;</c> with the next unused counter. Every result tag of the run sits on the
 	/// run branch of this checkout (cloned from the source of truth, so earlier pushed results are visible too), which
 	/// makes the checkout's own tag list the complete sequence.
 	/// </summary>
