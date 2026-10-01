@@ -15,6 +15,9 @@ internal static class MergeBrief
 
 	internal sealed record Side(string Title, IReadOnlyList<string> Rationales, string History, string Diff);
 
+	/// <summary>The structural merge the semantic merge was started with: its driver, git's own conflicts and weave's warnings.</summary>
+	internal sealed record StructuralInfo(string Driver, IReadOnlyList<string> GitConflicts, IReadOnlyList<string> Warnings);
+
 	internal sealed record Input(
 		string IntegrationId,
 		string Component,
@@ -24,6 +27,7 @@ internal static class MergeBrief
 		RunMetadata? IncomingRun,
 		IReadOnlyList<string> Conflicts,
 		IReadOnlyList<string> ConflictsWith,
+		StructuralInfo? Structural,
 		Side Ours,
 		Side Theirs);
 
@@ -40,7 +44,11 @@ internal static class MergeBrief
 			$"working tree, with the merge of `{incoming.SourceTag}` already started and not committed.");
 		brief.AppendLine();
 
-		if (input.Conflicts.Count > 0)
+		if (input.Structural is { } structural)
+		{
+			AppendStructural(brief, input, structural);
+		}
+		else if (input.Conflicts.Count > 0)
 		{
 			brief.AppendLine("Git's line-based merge stopped on conflicts in these files; each conflict is marked in the file " +
 				"with `<<<<<<<` (the integration so far), `|||||||` (the common ancestor), `=======` and `>>>>>>>` (the incoming run):");
@@ -105,6 +113,63 @@ internal static class MergeBrief
 
 		AppendSide(brief, input.Ours);
 		return brief.ToString();
+	}
+
+	/// <summary>
+	/// The merge was started with the structural merge driver: say what git alone conflicted on, what weave merged of
+	/// it, what is left and what weave warned about.
+	/// </summary>
+	private static void AppendStructural(StringBuilder brief, Input input, StructuralInfo structural)
+	{
+		var resolved = structural.GitConflicts.Except(input.Conflicts, StringComparer.Ordinal).ToList();
+		brief.AppendLine($"The merge was started with weave (`{structural.Driver}`), an entity-level merge driver that merges " +
+			"functions, classes and keys instead of lines; files weave does not understand were merged by git line by line.");
+		brief.AppendLine();
+		if (structural.GitConflicts.Count > 0)
+		{
+			brief.AppendLine($"Git's line-based merge alone conflicted in: {string.Join(", ", structural.GitConflicts.Select(file => $"`{file}`"))}.");
+		}
+
+		if (resolved.Count > 0)
+		{
+			brief.AppendLine($"Weave merged these of them without a conflict; check that the result is right: {string.Join(", ", resolved.Select(file => $"`{file}`"))}.");
+		}
+
+		brief.AppendLine();
+		if (input.Conflicts.Count > 0)
+		{
+			brief.AppendLine("These files still conflict; each conflict is marked in the file with `<<<<<<<` (the integration so far), " +
+				"`=======` and `>>>>>>>` (the incoming run):");
+			brief.AppendLine();
+			foreach (var file in input.Conflicts)
+			{
+				brief.AppendLine($"- `{file}`");
+			}
+
+			brief.AppendLine();
+			brief.AppendLine(StructuralMerge.MarkerHelp());
+		}
+		else
+		{
+			brief.AppendLine("Nothing is left conflicted, but this merge was sent to you for a semantic review: check that the combined " +
+				"result still does what both sides meant (duplicate definitions, renamed symbols used by the other side, contradicting " +
+				"behaviour, broken references) and fix what does not.");
+		}
+
+		if (structural.Warnings.Count > 0)
+		{
+			brief.AppendLine();
+			brief.AppendLine("Weave warned that its merge may not mean what both sides meant (e.g. an entity that depends on another " +
+				"entity the other side changed, or a merged file that no longer parses). Check each of these in particular:");
+			brief.AppendLine();
+			brief.AppendLine("```json");
+			foreach (var warning in structural.Warnings)
+			{
+				brief.AppendLine(warning);
+			}
+
+			brief.AppendLine("```");
+		}
 	}
 
 	private static void AppendSide(StringBuilder brief, Side side)

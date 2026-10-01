@@ -152,7 +152,7 @@ internal static class Html
 		.chat .bar .grow { flex:1; }
 		.chat .hint { color:var(--muted); font-size:12px; }
 		.pager { margin:10px 0; } .pager a { margin-right:14px; }
-		td.strategy-syntactic { color:var(--ok); font-weight:600; } td.strategy-semantic { color:#7a3ab8; font-weight:600; }
+		td.strategy-syntactic { color:var(--ok); font-weight:600; } td.strategy-semantic { color:#7a3ab8; font-weight:600; } td.strategy-structural { color:#1f6fb2; font-weight:600; }
 		td.strategy-skip { color:var(--muted); }
 		""";
 

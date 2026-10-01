@@ -185,7 +185,7 @@ public class IntegrateCommandTests
 		var (exitCode, output, error) = await fixture.BassiaAsync("integration", "plan", "-runs", "all");
 
 		Assert.True(exitCode == 0, error);
-		Assert.Contains("2 step(s) for git, 1 for the resolver, 0 skipped. Nothing was changed.", output);
+		Assert.Contains("2 step(s) for git, 0 for the structural merge, 1 for the resolver, 0 skipped. Structural merge: off. Nothing was changed.", output);
 		// Git's steps come first, in run order; the run that collides with the first moves behind them.
 		var order = new[] { first, third, second }.Select(run => output.IndexOf($"run_id = \"{run}\"", StringComparison.Ordinal)).ToList();
 		Assert.All(order, index => Assert.True(index > 0));

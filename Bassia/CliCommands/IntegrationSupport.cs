@@ -52,6 +52,7 @@ internal static class IntegrationSupport
 		["status"] = outcome.Record.Status,
 		["workspace"] = outcome.Record.WorkspacePath,
 		["runs"] = outcome.Record.Runs,
+		["structural_driver"] = outcome.Record.StructuralDriver,
 		["metadata_repo"] = storeDir,
 		["metadata_tags"] = outcome.RecordTags,
 		["component"] = outcome.Record.Components.Select(ComponentData).ToList()
@@ -78,6 +79,9 @@ internal static class IntegrationSupport
 			["strategy"] = IntegrationRecord.Snake(step.Strategy),
 			["conflicts"] = step.Conflicts,
 			["conflicts_with"] = step.ConflictsWith,
+			["structural"] = step.Structural is { } structural ? IntegrationRecord.Snake(structural) : null,
+			["structural_conflicts"] = step.StructuralConflicts,
+			["structural_warnings"] = step.StructuralWarnings,
 			["outcome"] = IntegrationRecord.Snake(step.Outcome),
 			["commit"] = step.Commit,
 			["note"] = step.Note,

@@ -357,10 +357,11 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		var runs = string.Join(",", started.Select(session => RunMetadata.Key(session.RunId)));
 		var touched = started.SelectMany(session => session.Session.Touched).Distinct().ToHashSet();
 
-		var plan = await OkAsync(root, "integration", "plan", "-runs", runs);
+		// The README conflict is the resolver's by design; a weave installed on this machine must not take it.
+		var plan = await OkAsync(root, "integration", "plan", "-runs", runs, "-weave", "off");
 		Assert.Equal(Components.Where(touched.Contains).Order(), Tables(plan, "component").Select(component => (string)component["name"]).Order());
 
-		var integrated = await OkAsync(root, "integration", "start", "-runs", runs, "-resolve", UnionResolver());
+		var integrated = await OkAsync(root, "integration", "start", "-runs", runs, "-weave", "off", "-resolve", UnionResolver());
 		Assert.Equal("completed", integrated["status"]);
 		var id = (string)integrated["integration_id"];
 
