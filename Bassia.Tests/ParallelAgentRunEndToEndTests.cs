@@ -1,6 +1,4 @@
-using System.Diagnostics;
 using System.Globalization;
-using System.Text;
 using Bassia.CliCommands.Agent;
 using Tomlyn;
 using Tomlyn.Model;
@@ -30,12 +28,8 @@ namespace Bassia.Tests;
 [Trait("Category", "EndToEnd")]
 public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 {
-	/// <summary>
-	/// Cloned twice, under two logical names, so the monorepo holds two components that are separate
-	/// source-of-truth repositories. Point <c>BASSIA_E2E_COMPONENT_URL</c> at a local mirror to run offline.
-	/// </summary>
-	private static string ComponentUrl =>
-		Environment.GetEnvironmentVariable("BASSIA_E2E_COMPONENT_URL") ?? "https://github.com/jk09/example.git";
+	/// <summary>Cloned twice, under two logical names, so the monorepo holds two separate source-of-truth repositories.</summary>
+	private static string ComponentUrl => EndToEnd.ComponentUrl;
 
 	/// <summary>The component's default branch, which no agentic run may move.</summary>
 	private const string UpstreamBranch = "main";
@@ -323,106 +317,15 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 	private static DateTimeOffset Timestamp(string value) =>
 		DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
-	// ----- driving the built executable -----
+	private static string BassiaExecutable => EndToEnd.BassiaExecutable;
 
-	/// <summary>The bassia apphost, copied next to the test assembly by the project reference.</summary>
-	private static string BassiaExecutable =>
-		Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "Bassia.exe" : "Bassia");
+	private static bool KeepMonorepo => EndToEnd.KeepMonorepo;
 
-	/// <summary>
-	/// Starts bassia as a child process in <paramref name="workingDirectory"/>. The process is started before
-	/// the first await, so several calls made back to back really do run at the same time.
-	/// </summary>
-	private static async Task<CliResult> BassiaAsync(string workingDirectory, params string[] args)
-	{
-		var exe = BassiaExecutable;
-		Assert.True(File.Exists(exe), $"'{exe}' is missing; build the solution before running the end-to-end tests.");
+	private static Task<CliResult> BassiaAsync(string workingDirectory, params string[] args) => EndToEnd.BassiaAsync(workingDirectory, args);
 
-		var startInfo = new ProcessStartInfo(exe)
-		{
-			WorkingDirectory = workingDirectory,
-			RedirectStandardOutput = true,
-			RedirectStandardError = true,
-			UseShellExecute = false,
-			CreateNoWindow = true
-		};
-		foreach (var arg in args)
-		{
-			startInfo.ArgumentList.Add(arg);
-		}
+	private static TomlTable AssertOk(CliResult result, string what) => EndToEnd.AssertOk(result, what);
 
-		using var process = Process.Start(startInfo)!;
-		var standardOutput = process.StandardOutput.ReadToEndAsync();
-		var standardError = process.StandardError.ReadToEndAsync();
-		await process.WaitForExitAsync();
-		return new CliResult(process.ExitCode, await standardOutput, await standardError);
-	}
-
-	/// <summary>Asserts the command succeeded and returns its TOML result.</summary>
-	private static TomlTable AssertOk(CliResult result, string what)
-	{
-		Assert.True(result.ExitCode == 0, $"bassia {what} failed ({result.ExitCode}):\n{result.StandardError}");
-		var toml = ParseResult(result.StandardOutput, what);
-		Assert.True((bool)toml["ok"], $"bassia {what} reported failure:\n{result.StandardOutput}");
-		return toml;
-	}
-
-	/// <summary>
-	/// An agent command's own output can precede the result, so the result is the block starting at the last
-	/// marker line bassia opens it with.
-	/// </summary>
-	private static TomlTable ParseResult(string standardOutput, string what)
-	{
-		var text = standardOutput.Replace("\r\n", "\n");
-		var start = text.LastIndexOf(TomlResult.Marker + "\n", StringComparison.Ordinal);
-		Assert.True(start >= 0, $"bassia {what} printed no TOML result:\n{standardOutput}");
-		return TomlSerializer.Deserialize<TomlTable>(text[start..])!;
-	}
-
-	// ----- the proof -----
-
-	private static bool KeepMonorepo => !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("BASSIA_E2E_KEEP"));
-
-	/// <summary>
-	/// Writes the report where a human (or a build) can pick it up: <c>BASSIA_E2E_PROOF</c> when set, otherwise a
-	/// timestamped file in the temp folder. The report is also written to the test output.
-	/// </summary>
-	private static string WriteProof(string report)
-	{
-		var path = Environment.GetEnvironmentVariable("BASSIA_E2E_PROOF");
-		if (string.IsNullOrWhiteSpace(path))
-		{
-			path = Path.Combine(Path.GetTempPath(), $"bassia-e2e-proof-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.md");
-		}
-
-		var directory = Path.GetDirectoryName(Path.GetFullPath(path));
-		if (!string.IsNullOrEmpty(directory))
-		{
-			Directory.CreateDirectory(directory);
-		}
-
-		File.WriteAllText(path, report);
-		return Path.GetFullPath(path);
-	}
-
-	/// <summary>The Markdown proof the test emits: every fact it asserted, with the shas needed to re-check it.</summary>
-	private sealed class ProofReport
-	{
-		private readonly StringBuilder text = new();
-
-		public void Heading(string title) => text.Append("# ").Append(title).Append("\n\n");
-
-		public void Section(string title) => text.Append("\n## ").Append(title).Append("\n\n");
-
-		public void Fact(string name, string? value) => text.Append("- **").Append(name).Append("**: ").Append(value).Append('\n');
-
-		public void Line(string line) => text.Append(line).Append('\n');
-
-		public void Block(string caption, string content) =>
-			text.Append('\n').Append(caption).Append(":\n\n```\n").Append(content.Replace("\r", "")).Append("\n```\n");
-
-		public override string ToString() => text.ToString();
-	}
+	private static string WriteProof(string report) => EndToEnd.WriteProof("bassia-e2e-proof", report);
 
 	private sealed record RunPlan(
 		string Name,
@@ -434,6 +337,4 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		string AgentCommand);
 
 	private sealed record VerifiedRun(string RunId, RunPlan Plan, string ResultCommit, string ResultTag, string Workspace);
-
-	private sealed record CliResult(int ExitCode, string StandardOutput, string StandardError);
 }

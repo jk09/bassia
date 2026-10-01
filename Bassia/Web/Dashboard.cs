@@ -246,7 +246,7 @@ internal sealed class Dashboard
 					GitRefKind.AnnotatedTag => "<b>annotated tag</b>",
 					_ => "<span class=\"muted\">lightweight tag</span>"
 				};
-				body.Append($"<tr><td>{kind}</td><td>{Ref(reference.Name)}</td><td><a class=\"hash\" href=\"/commit/{Url(name)}/{Url(reference.Commit)}\">{E(reference.Commit)}</a></td><td>{E(reference.Subject)}</td></tr>");
+				body.Append($"<tr><td>{kind}</td><td>{Ref(reference.Name)}</td><td><a class=\"hash\" href=\"/commit/{Url(name)}/{Url(reference.Commit)}\">{E(Short(reference.Commit))}</a></td><td>{E(reference.Subject)}</td></tr>");
 			}
 
 			body.Append("</table>");

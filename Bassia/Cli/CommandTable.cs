@@ -156,15 +156,26 @@ internal static class CommandTable
 			["bassia graph", "bassia graph -format tree", "bassia graph -name app -format tree", "bassia graph -format svg -out components.svg"],
 			ComponentCommands.GraphAsync),
 
-		new("log", null, "Show history with an ASCII graph: the meta-repo's by default, or the combined timeline of components and the components they depend on.",
+		new("log", null, "Show history with an ASCII graph: the meta-repo's by default, the combined timeline of components and the components they depend on, " +
+			"or with -run where runs' work went in every component. Each commit names the run (and integration) its message records.",
 			[
-				new("component", "component,...", "The components; the ones they depend on join automatically."),
+				new("component", "component,...", "The components; the ones they depend on join automatically. With -run: only these components."),
 				new("only", null, "Only the named components, without their dependencies."),
+				new("branch", "branch", "Only the history of this branch (e.g. main) in each component."),
+				new("run", "run-id,...|all", "The runs' result commits and the integration merges that brought them in, across the components they touched, " +
+					"with whether each landed on its component's default branch."),
 				new("limit", "n", "Commits per page (default: 20)."),
 				new("page", "n", "The page (default: 1).")
 			],
-			["bassia log", "bassia log -component app", "bassia log -component app -only -limit 50", "bassia log -component app,tool -page 2"],
-			LogCommand.RunAsync),
+			[
+				"bassia log", "bassia log -component app", "bassia log -component app -only -limit 50", "bassia log -component app,tool -page 2",
+				"bassia log -component app -branch main", "bassia log -run 3f2a91c4", "bassia log -run 3f2a91c4,91ab22cd -component lib"
+			],
+			LogCommand.RunAsync,
+			Details: "Every [[commit]] carries kind = \"result\" (a run's result commit, run_id) or kind = \"integration\" (an integration's merge " +
+				"commit, integration_id and the run_id it merged) when its message holds Bassia's record. With -run, each commit also has " +
+				"on_default_branch, and each [[run]] lists per component its result tag and commit, the default branch, landed (the result is " +
+				"reachable from that branch) and merged_by (the integrations whose merge of it is there)."),
 
 		// ----- agentic runs -----
 

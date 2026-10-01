@@ -251,10 +251,11 @@ internal static class AgentCommand
 				owner.Junctions[reference.Path] = reference.Name;
 
 				// The nested component's files belong to its own repo: hide them from the owner's index
-				// without touching the owner's tracked .gitignore.
+				// without touching the owner's tracked .gitignore. No trailing slash: git sees a symlink as a file,
+				// and a "/path/" pattern matches directories only, so the owner would commit the link itself.
 				var excludePath = Path.Combine(owner.Path, ".git", "info", "exclude");
 				Directory.CreateDirectory(Path.GetDirectoryName(excludePath)!);
-				await File.AppendAllTextAsync(excludePath, $"/{reference.Path.Replace('\\', '/')}/\n");
+				await File.AppendAllTextAsync(excludePath, $"/{reference.Path.Replace('\\', '/')}\n");
 			}
 		}
 	}

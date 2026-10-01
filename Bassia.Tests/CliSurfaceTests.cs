@@ -386,4 +386,98 @@ public class CliSurfaceTests
 		Assert.Equal(["app"], Strings(Result(onlyOutput), "components"));
 		Assert.Contains("(HEAD -> main, tag: v0) Initial commit", (string)Result(onlyOutput)["graph"]);
 	}
+
+	[Fact]
+	public async Task Log_NamesTheRunACommitRecords_AndBranchNarrowsTheHistoryToThatBranch()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("lib");
+		var runId = await monorepo.RunWritingAsync("lib", "a.txt", "a");
+
+		var (exitCode, output, error) = await monorepo.BassiaAsync("log", "-component", "lib");
+
+		Assert.True(exitCode == 0, error);
+		var commits = Tables(Result(output), "commit").ToList();
+		var result = Assert.Single(commits, commit => commit.ContainsKey("run_id"));
+		Assert.Equal("result", result["kind"]);
+		Assert.Equal(runId, result["run_id"]);
+		Assert.False(commits.Single(commit => (string)commit["subject"] == "Initial commit").ContainsKey("kind"));
+
+		var (mainExit, mainOutput, mainError) = await monorepo.BassiaAsync("log", "-component", "lib", "-branch", "main");
+		Assert.True(mainExit == 0, mainError);
+		Assert.Equal("main", Result(mainOutput)["branch"]);
+		Assert.Equal(["Initial commit"], Tables(Result(mainOutput), "commit").Select(commit => (string)commit["subject"]).ToArray());
+
+		var (missingExit, _, missingError) = await monorepo.BassiaAsync("log", "-component", "lib", "-branch", "nope");
+		Assert.Equal(1, missingExit);
+		Assert.Contains("Component 'lib' has no branch 'nope'", missingError);
+	}
+
+	[Fact]
+	public async Task LogRun_FindsARunsCommitsInEveryComponentAndTellsWhetherTheyLandedOnTheDefaultBranch()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("lib");
+		await monorepo.AddComponentAsync("app");
+		await monorepo.AddComponentAsync("idle");
+		await monorepo.SetReferencesAsync("app", "lib");
+		var (runExit, runOutput, runError) = await monorepo.RunStartAsync("-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/a.txt", "a"));
+		Assert.True(runExit == 0, runError);
+		var runId = TestEnvironment.RunIdOf(runOutput);
+		var other = await monorepo.RunWritingAsync("lib", "b.txt", "b");
+		var shortId = RunMetadata.ShortKey(runId);
+
+		var (beforeExit, beforeOutput, beforeError) = await monorepo.BassiaAsync("log", "-run", shortId);
+
+		Assert.True(beforeExit == 0, beforeError);
+		var before = Result(beforeOutput);
+		Assert.Equal(["app", "lib"], Strings(before, "components").Order().ToArray());
+		var result = Assert.Single(Tables(before, "commit"));
+		Assert.Equal(("app", "result", runId, false), ((string)result["component"], (string)result["kind"], (string)result["run_id"], (bool)result["on_default_branch"]));
+		Assert.Equal(0L, before["landed"]);
+		var components = Tables(Assert.Single(Tables(before, "run")), "component").ToDictionary(component => (string)component["name"]);
+		Assert.Equal("pushed", components["app"]["result_status"]);
+		Assert.Equal("unchanged", components["lib"]["result_status"]);
+		Assert.All(components.Values, component => Assert.False((bool)component["landed"]));
+
+		var (integrationExit, integrationOutput, integrationError) = await monorepo.IntegrationStartAsync("-runs", shortId);
+		Assert.True(integrationExit == 0, integrationError);
+		var integrationId = (string)Result(integrationOutput)["integration_id"];
+		Assert.Equal(0, (await monorepo.BassiaAsync("integration", "advance", integrationId)).ExitCode);
+
+		var (afterExit, afterOutput, afterError) = await monorepo.BassiaAsync("log", "-run", shortId);
+
+		Assert.True(afterExit == 0, afterError);
+		var after = Result(afterOutput);
+		var commits = Tables(after, "commit").ToList();
+		Assert.Equal(["integration", "result"], commits.Select(commit => (string)commit["kind"]).Order().ToArray());
+		Assert.All(commits, commit => Assert.Equal(("app", runId, true), ((string)commit["component"], (string)commit["run_id"], (bool)commit["on_default_branch"])));
+		Assert.Equal(integrationId, commits.Single(commit => (string)commit["kind"] == "integration")["integration_id"]);
+		var app = Tables(Assert.Single(Tables(after, "run")), "component").Single(component => (string)component["name"] == "app");
+		Assert.True((bool)app["landed"]);
+		Assert.Equal("main", app["default_branch"]);
+		Assert.Equal([integrationId], Strings(app, "merged_by"));
+		Assert.Equal(1L, after["landed"]);
+
+		// The other run's commits never show up, and -component narrows the search.
+		Assert.DoesNotContain(other, afterOutput);
+		var (onlyExit, onlyOutput, _) = await monorepo.BassiaAsync("log", "-run", shortId, "-component", "lib");
+		Assert.Equal(0, onlyExit);
+		Assert.Empty(Tables(Result(onlyOutput), "commit"));
+	}
+
+	[Theory]
+	[InlineData(1, "Unknown agentic run '0000ffff'", "log", "-run", "0000ffff")]
+	[InlineData(2, "-branch cannot be combined with -run", "log", "-run", "all", "-branch", "main")]
+	public async Task LogRun_RejectsUnknownRunsAndABranch(int expectedExitCode, string expected, params string[] args)
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("lib");
+		await monorepo.RunWritingAsync("lib", "a.txt", "a");
+
+		var (exitCode, _, error) = await monorepo.BassiaAsync(args);
+
+		Assert.Equal(expectedExitCode, exitCode);
+		Assert.Contains(expected, error);
+	}
 }

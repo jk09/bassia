@@ -35,7 +35,7 @@ its usage, every switch and examples. Help is TOML too.
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
-| Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-limit <n>] [-page <n>]` |
+| Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-branch <b>] [-run <id>,...\|all] [-limit <n>] [-page <n>]` |
 | Agentic runs | `run start -select <c@tag>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
@@ -112,6 +112,22 @@ app lib
      *   2026-09-21 14:02  129b996f87  integrate(fb66859a): add the changelog  (integration/fb66859a.../0)
  *   |   2026-09-21 13:49  85ca329ea7  agent(ed931d08): add the changelog  (agent/run-ed931d08.../0)
      *   2026-09-21 13:40  b90be7506c  fix the parser
+```
+
+Every `[[commit]]` names the run its message records: `kind = "result"` and `run_id` for a run's result commit,
+`kind = "integration"`, `integration_id` and the merged `run_id` for an integration's merge commit. `-branch main`
+narrows each component to that branch, which shows what is on the mainline and which runs put it there.
+
+`bassia log -run <id>,...` (or `-run all`) answers where runs' work went: across every component the runs selected
+(or the `-component`s given), their result commits and the integration merges that brought them in, each with
+`on_default_branch`, and per run and component the result tag, `landed` (the result is reachable from the
+component's default branch) and `merged_by` (the integrations whose merge of it is there):
+
+```
+2 commit(s) of 1 run(s) in lib, app; 1 of 1 result(s) landed on their component's default branch.
+lib app
+     *   2026-09-21 14:02  129b996f87  integrate(5e11aa00): ed931d08 add the changelog  (main, integration/5e11aa00.../0)
+     *   2026-09-21 13:49  85ca329ea7  agent(ed931d08): add the changelog  (agent/run-ed931d08.../0)
 ```
 
 ### Live runs: detached, watched, stopped
@@ -369,10 +385,25 @@ where they were, stayed out of the other component, and recorded both runs in `.
 row. The run command is a deterministic shell command standing in for a coding agent, so the proof is about
 Bassia and not about a model's output.
 
-It writes a Markdown report of every commit, tag and record it verified, to the test output and to a file. Three
-environment variables steer it:
+`ThreeComponentEndToEndTests` (`Category=EndToEnd`) follows the work all the way to `main` and checks it with
+Bassia's own commands. Its monorepo holds three components cloned from jk09/example: the libraries `sortlib` and
+`greetlib`, and `apps`, which nests both. Two waves of agentic sessions run in parallel - wave 1 detached
+(`run start -detach`, `run wait`), wave 2 in the foreground - implementing an insertion sort library, a greeting
+library together with a program in `apps` that uses it, a hello world program, a terminal program sorting its
+arguments with `sortlib`, and a descending sort. Each session's agent is a deterministic stand-in that applies a
+patch computed against its baseline. Two sessions edit the same lines of `apps/README.md`, so each wave's
+`integration start` has git merge what it can and a deterministic resolver (a git union merge) the conflict, then
+`integration advance` moves every `main`. `log -run` must report every result off `main` before the advance and
+landed through the integration after it, in exactly the components the session edited; `log -component apps
+-branch main` must attribute the mainline to all five sessions; `component show`, `run list` and `integration list`
+must agree. A last session selects the three `main` states and builds and runs the C programs (skipped without a C
+compiler on `PATH`).
 
-- `BASSIA_E2E_PROOF` — where to write the report (default: a timestamped file in the temp folder).
+Both write a Markdown report of every commit, tag and record they verified, to the test output and to a file. Three
+environment variables steer them:
+
+- `BASSIA_E2E_PROOF` — where to write the report: a file, or a folder for one report per test (default: a
+  timestamped file in the temp folder).
 - `BASSIA_E2E_KEEP` — keep the monorepo after the test so the refs in the report can be inspected.
 - `BASSIA_E2E_COMPONENT_URL` — clone from a local mirror instead of GitHub, to run offline.
 
