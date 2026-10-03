@@ -78,14 +78,31 @@ internal static class CommandTable
 			[
 				new("url", "url", "The repository to clone (any URL or path git clone accepts).", Required: true),
 				new("name", "name", "The component's logical name (default: inferred from the URL)."),
-				new("references", "component[:path],...", "Components this one nests, each at a subfolder (default: its name).")
+				new("references", "component[:path],...", "Components this one nests, each at a subfolder (default: its name)."),
+				new("unwind", null, "Also unwind its git submodules, recursively, into components it references (see 'bassia help component unwind').")
 			],
 			[
 				"bassia component add -url https://github.com/myrepo/lib.git",
 				"bassia component add -url https://github.com/myrepo/app.git -name app -references lib",
-				"bassia component add -url ../upstream/ui -references lib:vendor/lib"
+				"bassia component add -url ../upstream/ui -references lib:vendor/lib",
+				"bassia component add -url https://github.com/myrepo/tool.git -unwind"
 			],
 			ComponentCommands.AddAsync, Positional: "url"),
+
+		new("component", "unwind", "Turn a component's git submodules, recursively, into components it references at the submodule paths, so runs nest them as junctioned folders.",
+			[
+				new("name", "component", "The component.", Required: true),
+				new("dry-run", null, "Show the plan (components added or reused, unwind commits, linking tags) without changing anything.")
+			],
+			["bassia component unwind -name app -dry-run", "bassia component unwind app"],
+			UnwindCommands.UnwindAsync, Positional: "name",
+			Details: "A submodule is identified by its URL (relative URLs resolve against the parent's; scheme, user, .git suffix and case do not matter): " +
+				"one registered with that URL (or origin) is reused, otherwise it is cloned as a new component named after the URL (prefixed with the " +
+				"parent's name on a clash). Every commit with submodules gets one commit on top that removes the gitlinks and their .gitmodules sections: " +
+				"on the default branch it becomes the new tip, for a commit a submodule pins it stays off the branch. Each such commit and the commits its " +
+				"submodules pin (unwound in turn) are tagged unwind/<component>/<n> - one annotated tag of the same name in every component involved - so " +
+				"-select a@unwind/a/0,b@unwind/a/0 reproduces exactly the pinned combination. The whole tree is planned first: a pinned commit that cannot " +
+				"be fetched, a cycle, or a path already nesting another component fails it and nothing changes. The meta-repo is committed once."),
 
 		new("component", "show", "Show a component: its branches, tags (annotated ones can be selected for a run), dependencies, dependency tree and the runs that touched it.",
 			[new("name", "component", "The component.", Required: true)],
@@ -146,6 +163,33 @@ internal static class CommandTable
 				"excludes. Every file at the tip must go to exactly one part, 'shared' or 'drop'; all problems are reported at once, and nothing changes. " +
 				"Each part is a new repository whose history holds every commit that changed its files (authors, dates and messages kept, a Split-from " +
 				"trailer added), the tags of the branch, and a split record commit tagged split/<id>; the source's repository is kept, tagged split/<id>."),
+
+		// ----- tags across components -----
+
+		new("tag", "list", "List every tag across the components with how many components it tags, as a table and as [[tag]] entries.",
+			[
+				new("component", "component,...", "Only tags in any of these components (each still counts every component it is in)."),
+				new("prefix", "prefix", "Only tags whose name starts with this, e.g. unwind/ or integration/."),
+				new("min", "n", "Only tags in at least n components (default: 1); -min 2 lists the multi-component tags.")
+			],
+			["bassia tag list", "bassia tag list -min 2", "bassia tag list -prefix unwind/ -component app"],
+			TagCommands.ListAsync,
+			Details: "Tags are read from the component repositories, the only record of them. Each [[tag]] has its kind (unwind, integration, run, " +
+				"split or other), the components and commits it tags, and the -select value that starts a run from it in all of them."),
+
+		new("tag", "show", "Show one tag in every component that has it: commit, subject, date and tag message.",
+			[new("tag", "tag", "The tag.", Required: true)],
+			["bassia tag show -tag unwind/app/0", "bassia tag show release-3"],
+			TagCommands.ShowAsync, Positional: "tag"),
+
+		new("tag", "create", "Create the same annotated tag in several components - a baseline for a run spanning them; none is created if any already has it.",
+			[
+				new("tag", "tag", "The tag to create.", Required: true),
+				new("select", "component[@ref],...", "The components and what to tag in each (default: the default branch's tip).", Required: true),
+				new("message", "text", "The tag message (default: the components and commits).")
+			],
+			["bassia tag create -tag release-3 -select app,lib", "bassia tag create release-3 -select app@main,lib@v2 -message \"release 3\""],
+			TagCommands.CreateAsync, Positional: "tag"),
 
 		new("graph", null, "Draw the component dependency graph: ASCII boxes in layers (board), an ASCII tree, Mermaid or SVG.",
 			[

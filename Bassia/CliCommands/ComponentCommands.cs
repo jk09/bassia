@@ -84,6 +84,11 @@ internal static class ComponentCommands
 			throw new GitException($"git clone failed: {clone.Error.Trim()}");
 		}
 
+		if (invocation.Has("unwind"))
+		{
+			return await UnwindCommands.AddUnwoundAsync(invocation, monorepo, name, url, componentDir, references);
+		}
+
 		ComponentsFile.Add(root, name, url, references);
 		var commit = await MonorepoCommands.CommitMetaRepoAsync(root, $"Add component '{name}' from '{url}'");
 		return ProgramCli.WriteResult(true, invocation.Command,

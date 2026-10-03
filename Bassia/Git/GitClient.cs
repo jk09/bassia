@@ -17,7 +17,10 @@ internal sealed class GitClient(string workingDirectory)
 
 	public Task<GitResult> RunAsync(IReadOnlyList<string> arguments) => RunAsync(arguments, standardInput: null);
 
-	public async Task<GitResult> RunAsync(IReadOnlyList<string> arguments, string? standardInput)
+	public Task<GitResult> RunAsync(IReadOnlyList<string> arguments, string? standardInput) => RunAsync(arguments, standardInput, environment: null);
+
+	/// <summary>Runs git with extra <paramref name="environment"/> variables (e.g. <c>GIT_INDEX_FILE</c> for a scratch index).</summary>
+	public async Task<GitResult> RunAsync(IReadOnlyList<string> arguments, string? standardInput, IReadOnlyDictionary<string, string>? environment)
 	{
 		using var process = new Process
 		{
@@ -38,6 +41,11 @@ internal sealed class GitClient(string workingDirectory)
 			process.StartInfo.ArgumentList.Add(argument);
 		}
 
+		foreach (var (name, value) in environment ?? new Dictionary<string, string>())
+		{
+			process.StartInfo.Environment[name] = value;
+		}
+
 		process.Start();
 		var outputTask = process.StandardOutput.ReadToEndAsync();
 		var errorTask = process.StandardError.ReadToEndAsync();
@@ -53,9 +61,9 @@ internal sealed class GitClient(string workingDirectory)
 	}
 
 	/// <summary>Runs git and throws <see cref="GitException"/> on a non-zero exit code; returns trimmed stdout.</summary>
-	public async Task<string> RunOrThrowAsync(IReadOnlyList<string> arguments, string? standardInput = null)
+	public async Task<string> RunOrThrowAsync(IReadOnlyList<string> arguments, string? standardInput = null, IReadOnlyDictionary<string, string>? environment = null)
 	{
-		var result = await RunAsync(arguments, standardInput);
+		var result = await RunAsync(arguments, standardInput, environment);
 		if (result.ExitCode != 0)
 		{
 			throw new GitException($"git {string.Join(' ', arguments)} failed in '{workingDirectory}': {result.Error.Trim()}");

@@ -35,6 +35,8 @@ its usage, every switch and examples. Help is TOML too.
 | Monorepo | `init [-path <dir>]`, `status`, `version` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]` |
+| Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
+| Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-branch <b>] [-run <id>,...\|all] [-limit <n>] [-page <n>]` |
 | Agentic runs | `run start -select <c[@tag\|hash]>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
@@ -236,6 +238,58 @@ meta-repo commit carrying the split record. The source's repository is kept unto
 its history, run tags and run records stay valid; results of runs that were never merged into the split branch stay
 there and are listed as `unmerged_results`. If any step fails, the new repositories are removed and `components.toml`
 is restored.
+
+### Unwinding submodules
+
+Bassia's components replace git submodules, but a repository added as a component may still have some. Unwinding
+turns them into components of their own, so the monorepo's structure is all in `components.toml`:
+
+```powershell
+bassia -C R:\ component add -url https://github.com/myrepo/tool.git -unwind   # add and unwind at once
+bassia -C R:\ component unwind -name app -dry-run                              # the plan; nothing changes
+bassia -C R:\ component unwind -name app
+```
+
+- **Identity.** A submodule is identified by its URL: a relative URL (`../lib.git`) resolves against the parent's, and
+  the scheme (`https://`, `ssh://`, `git@host:`), user, a `.git` suffix and case do not matter, so
+  `git@github.com:Owner/Lib.git` is `github.com/owner/lib`. A registered component with that URL (or `origin`) is
+  reused; otherwise the submodule is cloned as a new component named after its URL (`<parent>-<name>` when the name is
+  taken by another repository).
+- **Recursive.** The submodules of a submodule are unwound too, at every depth, both at the commit a parent pins and on
+  the submodule component's own main branch.
+- **References.** Each submodule becomes a reference of its parent at the submodule's path (`lib:vendor/lib`), so a run
+  nests it as a junctioned folder like any other referenced component.
+- **Commits.** Every commit with submodules gets one commit on top that removes the gitlinks and their `.gitmodules`
+  sections (the file goes when nothing is left in it). On the main branch that commit becomes the new tip, so
+  `run start -select app,lib` works; history is kept, so the component stays compatible with its upstream. For a
+  commit a submodule pins, the commit stays off main.
+- **Linking tags.** Each main branch can express only one combination, while the same submodule may be pinned at
+  different commits by different components (or by older commits). So every commit with submodules is linked with
+  the commits its submodules pin (unwound in turn) by one annotated tag of the same name in every component involved,
+  `unwind/<component>/<n>`: `run start -select app@unwind/app/0,lib@unwind/app/0,core@unwind/app/0` starts from exactly
+  the pinned combination. A component pinned twice at different commits within one tree keeps the nearest pin in the
+  tag; the result lists the other as a conflict, and it stays reachable through its own parent's tag.
+- **All or nothing.** The whole tree is planned first, new components are cloned into a staging folder and pinned
+  commits missing from a repository are fetched from the submodule's URL. A pinned commit that cannot be found, a
+  submodule without a URL, a cycle, or a path where the parent already nests another component fails the unwind and
+  nothing changes (`component add -unwind` then adds nothing either). The meta-repo is committed once.
+
+### Tags across components
+
+Identically named tags tie commits of several components together: unwinding links pinned submodules with
+`unwind/...` tags, an integration tags its result `integration/<key>/<n>` in every component, and a run that spans
+components starts from a tag in each.
+
+```powershell
+bassia -C R:\ tag list                                  # every tag, with how many components it tags
+bassia -C R:\ tag list -min 2 -prefix unwind/           # multi-component unwind tags
+bassia -C R:\ tag show unwind/app/0                     # the tag in each component: commit, subject, message
+bassia -C R:\ tag create release-3 -select app,lib@v2   # one annotated tag in each; none if any already has it
+```
+
+`tag list` reads the tags from the component repositories, which stay the only record of them, groups them by name
+and reports per tag its kind (`unwind`, `integration`, `run`, `split` or `other`), the number of components and their
+commits, and the `-select` value that starts a run from it in all of them.
 
 ### Agentic runs
 
