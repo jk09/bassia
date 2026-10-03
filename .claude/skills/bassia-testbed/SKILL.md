@@ -1,6 +1,6 @@
 ---
 name: bassia-testbed
-description: Recreate the bassia-testbed monorepo - a Bassia monorepo whose components are all the git repos under C:\Users\jozef\Development (submodules as referenced components), used as a testbed for developing Bassia. Use when asked to (re)create, rebuild, reset or refresh the testbed. Accepts optional arguments (e.g. `-Dev`, `-Root`, `-Exe`) forwarded to New-Testbed.ps1.
+description: Recreate the bassia-testbed monorepo - a Bassia monorepo whose components are all the git repos under C:\Users\jozef\Development (submodules unwound into referenced components), used as a testbed for developing Bassia. Use when asked to (re)create, rebuild, reset or refresh the testbed. Accepts optional arguments (e.g. `-Dev`, `-Root`, `-Exe`) forwarded to New-Testbed.ps1.
 ---
 
 # bassia-testbed
@@ -20,7 +20,8 @@ repo in `Development`, including those nested in non-git folders (e.g. `JavaScri
 2. Remove or rename an existing `bassia-testbed` at `-Root` (the script refuses to overwrite). Look at it first.
 3. Run `.claude/skills/bassia-testbed/New-Testbed.ps1`, passing through any arguments given to the skill. It takes a
    few minutes: it clones ~85 repos locally with `bassia component add`.
-4. Verify with `bassia -C <root> status` (85 components, clean meta-repo) and `bassia -C <root> graph`.
+4. Verify with `bassia -C <root> status` (85 components, clean meta-repo), `bassia -C <root> graph` (the parents
+   reference their submodules) and `bassia -C <root> tag list -prefix unwind/`.
 
 ## Rules the script encodes
 
@@ -34,11 +35,17 @@ repo in `Development`, including those nested in non-git folders (e.g. `JavaScri
   gh-pages, `eShopOnContainers` dev, `color-thief` color-thief-main (the branch the parent pins).
 - **Names:** folder names, spaces to `-`; collisions renamed (`JavaScript-my-app`, `react-sandbox-my-app`,
   `ReactActivities-act21`).
-- **Submodules** become components, added first, and the parent references them at the submodule path
-  (`-references name:path`): `ContractExpressions` -> `CodeContracts`; `EdgeTabHandler` -> `color-thief`; `UnitGen` ->
-  `FluentTerminal` (the existing component, which contains the pinned commit), `ILSpy`, `CodeContracts`,
-  `UnitGen-FsCheck` under `ExternalPrograms/`. `UnitGen-FsCheck` is separate because the top-level `FsCheck` lacks the
-  pinned commit. `snappymail`'s `.gitmodules` entry has no gitlink, so it is not a submodule.
+- **Submodules** are unwound: once every component is added (trunk and origin set), the script runs
+  `bassia component unwind` on each. A submodule becomes a referenced component at its path, and the parent's trunk
+  gets one commit that removes the gitlinks; each pinned combination is tagged `unwind/<parent>/<n>` in every
+  component involved (`bassia tag list -prefix unwind/`). The submodule targets are added first from the local
+  checkouts, so the unwind reuses them by origin URL instead of cloning from the network: `ContractExpressions` ->
+  `CodeContracts`; `EdgeTabHandler` -> `color-thief`; `UnitGen` -> `FluentTerminal` (the existing component, which
+  contains the pinned commit), `ILSpy`, `CodeContracts`, `UnitGen-FsCheck` under `ExternalPrograms/`.
+  `UnitGen-FsCheck` is separate because the top-level `FsCheck` lacks the pinned commit; it is added before `FsCheck`,
+  so it is the component that URL maps to. `snappymail`'s `.gitmodules` entry has no gitlink, so it is not a
+  submodule. The script warns when an unwind had to clone a component not in its tables (a submodule URL that matched
+  no local origin) and fails at the end, after unwinding the rest, if any unwind failed.
 
 ## When the set of repos changed
 

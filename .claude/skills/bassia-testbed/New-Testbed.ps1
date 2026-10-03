@@ -1,8 +1,9 @@
 <#
 .SYNOPSIS
 Creates the bassia-testbed monorepo: one component per git repo under -Dev (except the testbed itself, bassia and
-jkmonorepo), with submodules as referenced components. Components are cloned from the local folders, each bare
-repo's HEAD is set to the trunk below and its origin to the source's real remote.
+jkmonorepo). Components are cloned from the local folders, each bare repo's HEAD is set to the trunk below and its
+origin to the source's real remote. Then every component is unwound ('bassia component unwind'): its submodules become
+referenced components, matched to the components already added by their origin URL.
 #>
 [CmdletBinding()]
 param(
@@ -16,20 +17,22 @@ $dev = $Dev
 $root = $Root
 $exe = (Resolve-Path -LiteralPath $Exe).Path
 
-# name -> source path (relative to $dev), trunk, optional references
+# name -> source path (relative to $dev), trunk
 $comps = [ordered]@{}
-function Add-Comp($name, $path, $trunk, $refs = $null) { $script:comps[$name] = @{ path = $path; trunk = $trunk; refs = $refs } }
+function Add-Comp($name, $path, $trunk) { $script:comps[$name] = @{ path = $path; trunk = $trunk } }
 
-# Submodule targets first, so referrers can reference them.
+# Submodule targets: the local checkouts, so the unwind below reuses them (matched by origin URL) instead of cloning
+# from the network. Added before FsCheck, so UnitGen-FsCheck (which has UnitGen's pinned commit) wins that URL.
 Add-Comp 'CodeContracts'   'ContractExpressions\CodeContracts'          'master'
 Add-Comp 'color-thief'     'EdgeTabHandler\color-thief'                  'color-thief-main'
 Add-Comp 'ILSpy'           'UnitGen\ExternalPrograms\ILSpy'              'master'
 Add-Comp 'UnitGen-FsCheck' 'UnitGen\ExternalPrograms\FsCheck'            'master'
 Add-Comp 'FluentTerminal'  'FluentTerminal'                              'master'
 
-Add-Comp 'ContractExpressions' 'ContractExpressions' 'main'   'CodeContracts:CodeContracts'
-Add-Comp 'EdgeTabHandler'      'EdgeTabHandler'      'main'   'color-thief:color-thief'
-Add-Comp 'UnitGen'             'UnitGen'             'main'   'FluentTerminal:ExternalPrograms/FluentTerminal,ILSpy:ExternalPrograms/ILSpy,CodeContracts:ExternalPrograms/CodeContracts,UnitGen-FsCheck:ExternalPrograms/FsCheck'
+# Their parents; the unwind references the submodules at their paths.
+Add-Comp 'ContractExpressions' 'ContractExpressions' 'main'
+Add-Comp 'EdgeTabHandler'      'EdgeTabHandler'      'main'
+Add-Comp 'UnitGen'             'UnitGen'             'main'
 
 $plain = @{
   'AiBrowser'='main'; 'angular-custom-route-match'='master'; 'angular-router-sample'='master'; 'angular-router-tour-of-heroes'='master'
@@ -77,7 +80,6 @@ foreach ($name in $comps.Keys) {
   git -C $src rev-parse --verify --quiet "refs/heads/$($c.trunk)" | Out-Null
   if ($LASTEXITCODE) { throw "$name : trunk $($c.trunk) missing in $src" }
   $a = @('-C', $root, 'component', 'add', '-url', $src, '-name', $name)
-  if ($c.refs) { $a += @('-references', $c.refs) }
   $out = & $exe @a 2>&1
   if ($LASTEXITCODE) { Write-Host ($out -join "`n"); throw "add $name failed" }
   $bare = Join-Path $root "$name\.git"
@@ -93,3 +95,19 @@ foreach ($name in $comps.Keys) {
   Write-Host "ok $name ($($c.trunk))$(if($r){' <- '+$u})"
 }
 $null = $urls
+
+# Unwind every component once all are added, trunks and origins set: the unwind works on the trunk (HEAD) and finds
+# the submodule components by origin URL. A failing unwind is reported and the rest go on.
+$failed = @()
+$unexpected = @()
+foreach ($name in $comps.Keys) {
+  $out = & $exe -C $root component unwind -name $name 2>&1
+  $text = $out -join "`n"
+  if ($LASTEXITCODE) { Write-Warning "unwind $name failed:`n$text"; $failed += $name; continue }
+  $added = [regex]::Matches($text, '(?ms)^\[\[component\]\]\s*\nname = "([^"]+)"\s*\naction = "added"') | ForEach-Object { $_.Groups[1].Value }
+  foreach ($addedName in $added) { $unexpected += "$addedName (from $name)" }
+  $message = [regex]::Match($text, '(?m)^message = "(.*)"$').Groups[1].Value
+  if ($message -notmatch 'nothing to unwind') { Write-Host "unwound $name - $message" }
+}
+if ($unexpected) { Write-Warning "unwind cloned components not in the tables (submodule URL matched no local origin): $($unexpected -join ', ')" }
+if ($failed) { throw "unwind failed for: $($failed -join ', ')" }
