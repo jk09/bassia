@@ -7,6 +7,43 @@
 - .NET SDK 10.0 or later
 - Git available on `PATH`
 
+## Installing
+
+Clone this repository and ask Claude Code to `/bassia-install`. It builds the latest release tag (`v<major>.<minor>.<patch>`)
+and installs it for the current user, without elevation. The `/bassia-use` and `/bassia-uninstall` skills then switch
+between installed versions and remove them. All three run `scripts/bassia-versions.ps1` (PowerShell 7), which can also
+be run by hand:
+
+```sh
+pwsh scripts/bassia-versions.ps1 check [<version>]           # the .NET SDK the version needs, and what is installed
+pwsh scripts/bassia-versions.ps1 available                   # release tags, newest first
+pwsh scripts/bassia-versions.ps1 install [<version>] [-Configuration Debug] [-SelfContained] [-Prerelease] [-NoUse] [-Force]
+pwsh scripts/bassia-versions.ps1 list                        # installed versions; * marks the default
+pwsh scripts/bassia-versions.ps1 use <version>               # switch the default
+pwsh scripts/bassia-versions.ps1 uninstall <version> | -All
+```
+
+Versions are installed side by side, like nvm does it. `<version>` is a release tag (`v0.2.0` or `0.2.0`), `latest`
+(the default), or a branch or commit, which is installed as `<ref>-<commit>`. A Debug build adds `-debug` to the
+version id. The build runs in a temporary git worktree, so the clone's own working tree is never touched, and it
+publishes a framework-dependent build (`-SelfContained` for one that doesn't need an installed .NET runtime). The
+install root is `$BASSIA_HOME`, else `%LOCALAPPDATA%\Bassia` on Windows or `~/.local/share/bassia` elsewhere:
+
+```
+<root>/
+  versions/v0.2.0/          one publish per version, plus bassia-install.toml (ref, commit, configuration, SDK)
+  versions/v0.1.0-debug/
+  current -> versions/v0.2.0  the default: a junction on Windows, a symlink elsewhere; the only entry on PATH
+  activate.ps1, activate.sh   use another version in one shell only
+```
+
+The first install adds `<root>/current` to the user's PATH. On Windows that is the user PATH in the registry. Elsewhere
+it is a line in `~/.profile` (plus `~/.bashrc` and `~/.zshrc` if they exist) that sources `<root>/env.sh`. Switching
+the default retargets the link, so PATH stays as it is. To use another version in one shell only, as with venv, run
+`. <root>/activate.ps1 <version>` (PowerShell) or `. <root>/activate.sh <version>` (bash/zsh), and `bassia_deactivate`
+to undo it. Without a version, `activate` uses the one named in the nearest `.bassia-version` file, so a project can
+pin a version.
+
 ## Command line
 
 `bassia` is operated mainly by AI agents, so the command line is its primary interface: everything `bassia web` can
