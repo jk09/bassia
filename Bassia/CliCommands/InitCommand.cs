@@ -25,7 +25,13 @@ internal static class InitCommand
 		"resolver = \"" + Monorepo.DefaultResolver + "\"\n" +
 		"# Structural merge driver tried where git's line merge conflicts, before the resolver: weave's entity-level merge\n" +
 		"# (https://github.com/Ataraxy-Labs/weave). Used when installed; 'off' disables it.\n" +
-		"weave = \"" + Monorepo.DefaultStructuralDriver + "\"\n";
+		"weave = \"" + Monorepo.DefaultStructuralDriver + "\"\n" +
+		"\n" +
+		"[llm]\n" +
+		"# LLM behind 'bassia prompt <ask>': 'claude' (Claude Code, run as the command below with its tools off) or 'command' (the\n" +
+		"# command below as it is, reading the prompt on stdin, with {model} replaced by -model). Skills live in skills/<name>/SKILL.md.\n" +
+		"backend = \"" + Prompt.LlmBackends.DefaultName + "\"\n" +
+		"command = \"" + Prompt.LlmBackends.DefaultCommand + "\"\n";
 
 	private const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +

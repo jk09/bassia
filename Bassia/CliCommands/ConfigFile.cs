@@ -25,7 +25,11 @@ internal static class ConfigFile
 		new("integration.resolver", "integration", "resolver", Monorepo.DefaultResolver,
 			"Command that resolves a semantic merge; it gets the merge brief on stdin."),
 		new("integration.weave", "integration", "weave", Monorepo.DefaultStructuralDriver,
-			"Structural merge driver tried where git's merge conflicts (weave's weave-driver), used when installed; off disables it.")
+			"Structural merge driver tried where git's merge conflicts (weave's weave-driver), used when installed; off disables it."),
+		new("llm.backend", "llm", "backend", Prompt.LlmBackends.DefaultName,
+			"LLM backend of 'bassia prompt': claude (Claude Code) or command (any command that reads the prompt on stdin and prints the reply)."),
+		new("llm.command", "llm", "command", Prompt.LlmBackends.DefaultCommand,
+			"Command the LLM backend of 'bassia prompt' runs; the prompt goes to its stdin. For the command backend, {model} is replaced by -model.")
 	];
 
 	public static string PathOf(string root) => Path.Combine(root, Monorepo.MetaRepoFolderName, "config.toml");

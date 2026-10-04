@@ -46,13 +46,13 @@ internal static class CommandTable
 			MonorepoCommands.ConfigListAsync),
 
 		new("config", "get", "Show one setting.",
-			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver or integration.weave.", Required: true)],
+			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, llm.backend or llm.command.", Required: true)],
 			["bassia config get -key integration.resolver", "bassia config get agent.command"],
 			MonorepoCommands.ConfigGetAsync, Positional: "key"),
 
 		new("config", "set", "Change one setting in .bassia/config.toml (comments are kept) and commit it to the meta-repo.",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver or integration.weave.", Required: true),
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, llm.backend or llm.command.", Required: true),
 				new("value", "value", "The new value. An empty value is not allowed; set the default explicitly to go back.", Required: true)
 			],
 			[
@@ -345,6 +345,45 @@ internal static class CommandTable
 			[IntegrationId],
 			["bassia integration advance steady-heron-5e11aa"],
 			IntegrationCommands.AdvanceAsync, Positional: "id"),
+
+		// ----- skills and natural language -----
+
+		new("skill", "list", "List the meta-repo's skills (.bassia/skills/<name>/SKILL.md): reusable instructions 'bassia prompt' offers the LLM.",
+			[],
+			["bassia skill list"],
+			PromptCommands.SkillListAsync),
+
+		new("skill", "show", "Show one skill: its description and instructions.",
+			[new("name", "skill", "The skill.", Required: true)],
+			["bassia skill show -name release", "bassia skill show release"],
+			PromptCommands.SkillShowAsync, Positional: "name"),
+
+		new("prompt", null, "Do what an ask in natural language says: an LLM plans bassia commands from it, bassia checks and runs them, and answers.",
+			[
+				new("backend", "name", "The LLM backend instead of llm.backend: claude (Claude Code, the default) or command."),
+				new("llm", "command", "The command the backend runs instead of llm.command."),
+				new("model", "model", "The model the backend uses (claude: --model; command: replaces {model})."),
+				new("skill", "skill,...", "Hand the LLM these skills' instructions up front (a /<skill> word in the ask does the same)."),
+				new("yes", null, "Run commands that change something without asking."),
+				new("dry-run", null, "Change nothing: run only read-only commands and show the plan up to the first command that would change something."),
+				new("max-rounds", "n", "Give up after this many LLM rounds (default: 8)."),
+				new("ask", "text", "The ask: the rest of the command line (put it last); may be given without -ask.", Required: true, Rest: true)
+			],
+			[
+				"bassia prompt initialize the monorepo at folder C:\\mono",
+				"bassia prompt -dry-run add https://github.com/myrepo/lib.git as a component and tag it v1",
+				"bassia -C R:\\ prompt which components depend on lib?",
+				"bassia prompt -yes /release cut release 3 of app and lib",
+				"bassia prompt -backend command -llm \"ollama run llama3\" show the status"
+			],
+			PromptCommands.PromptAsync, Positional: "ask",
+			Usage: "bassia prompt [-backend <name>] [-llm <command>] [-model <model>] [-skill <skill,...>] [-yes] [-dry-run] [-max-rounds <n>] <ask...>",
+			Details: "The LLM gets the ask, the working directory and monorepo, this command catalog and the skills' descriptions, and answers with " +
+				"commands as TOML argument lists. Each is checked against the command table, then run as its own bassia process; its output is shown " +
+				"and its TOML result goes back to the LLM for the next round until it is done. Read-only commands run at once; a command that changes " +
+				"something is confirmed (y/n/a), or needs -yes when stdin is not a terminal. 'prompt' and 'web' are never run. Every [[step]] has the " +
+				"command_line, status (ok, failed, rejected, declined, planned, skipped) and the command's message. Skills are " +
+				".bassia/skills/<name>/SKILL.md files with 'name' and 'description' front matter; the LLM loads the ones it needs."),
 
 		// ----- frontends -----
 
