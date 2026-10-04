@@ -78,6 +78,7 @@ its usage, every switch and examples. Help is TOML too.
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-branch <b>] [-run <id>,...\|all] [-limit <n>] [-page <n>]` |
 | Agentic runs | `run start -select <c[@tag\|hash]>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
+| Natural language and skills | `prompt [-backend <name>] [-llm <command>] [-model <m>] [-skill <s>,...] [-yes] [-dry-run] [-max-rounds <n>] <ask...>`, `skill list`, `skill show -name <s>` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
 
 The commands this replaced - `agent`, `add-component`, `integrate`, `commit`, `branch` and `ui` - fail with exit code
@@ -203,6 +204,8 @@ each change to the meta-repo:
 | `agent.commit.subject` | `agent({short_id}): {summary}` | Subject of a run's result commits |
 | `integration.resolver` | `claude -p --permission-mode acceptEdits` | Command that resolves a semantic merge |
 | `integration.weave` | `weave-driver` | Structural merge driver tried where git conflicts, used when installed; `off` disables it |
+| `llm.backend` | `claude` | LLM backend of `bassia prompt`: `claude` (Claude Code) or `command` |
+| `llm.command` | `claude -p` | Command that backend runs; the prompt goes to its stdin |
 
 `component add|set|remove` edit `.bassia/components.toml` the same way and reject a change that would leave a cycle
 or a reference to an unregistered component.
@@ -418,6 +421,60 @@ Parallel agentic runs often add or change *different* functions, methods or keys
 - Nothing in a component repo is changed: the driver and the attributes that assign it to weave's file types are passed to git with `-c` for each command, and the attributes file lives in the workspace (`.workspace/.structural-merge.gitattributes`). A component's own `.gitattributes` still takes precedence; the `-c core.attributesFile` replaces a user-wide attributes file for these merges only.
 - A merge weave completes with warnings (`weave-warning:` on its stderr, e.g. an entity depends on another entity the other side changed, or the merged file no longer parses) goes to the resolver for review, with the warnings in its brief.
 - What weave still conflicts on goes to the resolver as before, but the resolver starts from weave's entity-labelled conflicts (``<<<<<<< ours — function `process` ...`` with a `refused_by:` line) instead of git's.
+
+### Natural-language prompts
+
+```powershell
+bassia prompt initialize the monorepo at folder C:\mono
+bassia -C C:\mono prompt -dry-run add https://github.com/myrepo/lib.git as a component and tag it v1
+bassia -C C:\mono prompt which runs failed this week and why?
+bassia -C C:\mono prompt -yes /release cut release 3 of app and lib
+```
+
+`prompt` is a thin LLM layer over the command line. Everything after its switches is the ask. Because every command
+has the same shape and answers in TOML, there is no per-command glue:
+
+1. The LLM gets the ask, the context (working directory, platform, the monorepo and its components), a catalog of
+   every command generated from the command table (usage, switches, details, examples) and the skills' names and
+   descriptions.
+2. It answers in TOML: `[[command]]` entries with `args` (the words after `bassia`, as an array, so Windows paths
+   need no shell quoting), `done`, `answer`, and optionally `load_skills`.
+3. Bassia checks each command with the same parser the command line uses and runs it as its own `bassia` process -
+   never through a shell. Its output is shown, and its TOML result goes back to the LLM for the next round until the
+   LLM is done (at most `-max-rounds`, default 8). The LLM's `answer` becomes the result's `message`.
+
+Read-only commands (`status`, `config list|get`, `component list|show|survey`, `tag list|show`, `graph` without
+`-out`, `log`, `run list|show|logs|wait|diff`, `integration plan|list|show|logs|wait`, `skill list|show`, `help`,
+`version`) run at once. Any other command is confirmed first (`y`es, `n`o, `a`ll); when stdin is not a terminal it
+needs `-yes`. `-dry-run` changes nothing: it runs the read-only commands and stops with the plan at the first command
+that would change something. `prompt` and `web` are never run from a prompt. The result lists every proposed command
+as a `[[step]]` with its `command_line`, `status` (`ok`, `failed`, `rejected`, `declined`, `planned`, `skipped`) and
+the command's own `message`.
+
+**Backends.** The LLM is only asked for text, so any model fits. `llm.backend` (or `-backend`) picks one:
+
+- `claude` (default) runs `llm.command` (default `claude -p`, i.e. [Claude Code](https://code.claude.com)) with its
+  tools off (`--tools ""`; it plans, Bassia executes), text output and no saved session; `-model` becomes `--model`.
+- `command` runs `llm.command` as it is - any command that reads the prompt on stdin and prints the reply, such as
+  `ollama run {model}` or `llm -m {model}`; `{model}` is replaced by `-model`.
+
+Another kind of backend (an HTTP API, say) is one class implementing `ILlmBackend` registered in `LlmBackends`.
+
+**Skills** are reusable instructions for recurring asks, versioned in the meta-repo like `config.toml`, in the shape
+Claude Code uses: `.bassia/skills/<name>/SKILL.md`, with optional front matter.
+
+```markdown
+---
+name: release
+description: Cut a release - tag every component release-<n> and integrate the pending runs first.
+---
+1. Run `integration plan -runs all`; stop and report when anything conflicts.
+2. ...
+```
+
+The LLM always sees every skill's name and description and loads the instructions of those it needs, so many skills
+cost little prompt. `-skill <name>,...`, or a `/<name>` word in the ask, hands it a skill up front. `skill list` and
+`skill show -name <skill>` show them; they are added and changed as files and committed with `git -C .bassia commit`.
 
 ### Web dashboard
 

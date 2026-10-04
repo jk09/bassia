@@ -14,6 +14,7 @@ internal static class ShellCommand
 	/// when <paramref name="cancellation"/> fired and the process tree was killed. Without <paramref name="onOutput"/>
 	/// the process inherits this console; with one, stdout and stderr are redirected and delivered line by line.
 	/// <paramref name="standardInput"/>, when given, is written to the process's stdin, which is then closed.
+	/// <paramref name="onError"/>, when given, receives stderr apart from stdout.
 	/// </summary>
 	public static async Task<int?> RunAsync(
 		string command,
@@ -21,7 +22,8 @@ internal static class ShellCommand
 		IReadOnlyDictionary<string, string> environment,
 		string? standardInput,
 		Action<string>? onOutput,
-		CancellationToken cancellation)
+		CancellationToken cancellation,
+		Action<string>? onError = null)
 	{
 		var startInfo = new ProcessStartInfo
 		{
@@ -61,7 +63,17 @@ internal static class ShellCommand
 		if (onOutput is not null)
 		{
 			process.OutputDataReceived += (_, args) => Deliver(args.Data);
-			process.ErrorDataReceived += (_, args) => Deliver(args.Data);
+			process.ErrorDataReceived += (_, args) =>
+			{
+				if (onError is null)
+				{
+					Deliver(args.Data);
+				}
+				else if (args.Data is not null)
+				{
+					onError(args.Data);
+				}
+			};
 			process.BeginOutputReadLine();
 			process.BeginErrorReadLine();
 		}

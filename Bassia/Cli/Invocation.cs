@@ -29,6 +29,14 @@ internal sealed class Invocation
 			var token = args[i];
 			if (SwitchName(token) is not { } name)
 			{
+				// A rest-of-line positional (the ask of 'bassia prompt') starts at the first bare word.
+				if (spec.Positional is not null && spec.FindSwitch(spec.Positional) is { Rest: true } restPositional
+					&& !invocation.values.ContainsKey(restPositional.Name))
+				{
+					invocation.values[restPositional.Name] = [JoinRest(args.Skip(i).ToList())];
+					break;
+				}
+
 				if (spec.Positional is null || invocation.values.ContainsKey(spec.Positional))
 				{
 					throw invocation.Usage($"Unexpected argument '{token}'.");
@@ -59,10 +67,7 @@ internal sealed class Invocation
 					throw invocation.Usage($"-{option.Name} requires {Article(option.Value!)} {option.Value}.");
 				}
 
-				// One quoted string, or the command's own words re-joined into one shell line.
-				invocation.values[option.Name] = [words.Count == 1
-					? words[0]
-					: string.Join(' ', words.Select(word => word.Any(char.IsWhiteSpace) ? $"\"{word}\"" : word))];
+				invocation.values[option.Name] = [JoinRest(words)];
 				break;
 			}
 
@@ -97,6 +102,10 @@ internal sealed class Invocation
 		var name = token.StartsWith("--", StringComparison.Ordinal) ? token[2..] : token.StartsWith('-') ? token[1..] : null;
 		return string.IsNullOrEmpty(name) || char.IsDigit(name[0]) ? null : name;
 	}
+
+	/// <summary>One quoted string, or the command's own words re-joined into one shell line.</summary>
+	private static string JoinRest(IReadOnlyList<string> words) =>
+		words.Count == 1 ? words[0] : string.Join(' ', words.Select(word => word.Any(char.IsWhiteSpace) ? $"\"{word}\"" : word));
 
 	private static string Article(string noun) => "aeiou".Contains(char.ToLowerInvariant(noun[0])) ? "an" : "a";
 
