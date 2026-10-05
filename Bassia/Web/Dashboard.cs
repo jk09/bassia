@@ -157,7 +157,10 @@ internal sealed partial class Dashboard
 		var state = await LoadAsync();
 		var tags = await MultiComponentTag.ReadAllAsync(state.Monorepo);
 		var activity = await ActivityAsync(state, tags);
-		var attention = state.Queue.Attention.ToList();
+		var next = await NextAsync(state);
+		var attention = state.Queue.Attention.Select(item => (Tag: item.ResultTag, item.Component, Note: item.Step?.Note ?? "needs a human", Planned: false))
+			.Concat(next.PlannedManual(state.Queue).Select(pair => (Tag: pair.Step.SourceTag, pair.Component, Note: pair.Step.Note ?? "will need a human", Planned: true)))
+			.ToList();
 
 		var body = new StringBuilder();
 		body.Append("<div class=\"cards\">")
@@ -183,7 +186,7 @@ internal sealed partial class Dashboard
 		body.Append("<div class=\"split\"><section><h2>Needs attention</h2>");
 		body.Append(attention.Count == 0
 			? "<p class=\"muted\">No merge waits for a human.</p>"
-			: string.Concat(attention.Take(6).Select(item => $"<div class=\"attn\">{Ref(item.ResultTag)} in <b>{E(item.Component)}</b> — {E(item.Step?.Note ?? "needs a human")}</div>"))
+			: string.Concat(attention.Take(6).Select(item => $"<div class=\"attn{(item.Planned ? " planned" : "")}\">{Ref(item.Tag)} in <b>{E(item.Component)}</b> — {(item.Planned ? "<i>next integration:</i> " : "")}{E(item.Note)}</div>"))
 				+ "<p><a href=\"/queue#attention\">All merges needing attention →</a></p>");
 		body.Append("</section><section><h2>Latest tags</h2>");
 		var recent = tags.Select(tag => TagStory.For(tag, state.Runs, state.Integrations)).OrderByDescending(story => story.Date, StringComparer.Ordinal).Take(10).ToList();

@@ -309,6 +309,8 @@ public class DashboardTests
 		Assert.Contains("<svg class=\"chart lanes\"", before);
 		Assert.Contains("<svg class=\"chart ring\"", before); // the two runs collide
 		Assert.Contains("will need a human", before);
+		Assert.Contains("<div class=\"n\">1</div><div class=\"muted\">need attention</div>", before); // planned, not yet left by an integration
+		Assert.Contains("<div class=\"n\">1</div><div class=\"muted\">merges need attention</div>", await host.GetAsync("/"));
 		Assert.Contains("merge.semantic = manual", before);
 		Assert.Contains($"bassia integration start -runs {RunMetadata.Key(first)},{RunMetadata.Key(second)} -detach", before);
 
