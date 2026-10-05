@@ -13,17 +13,8 @@ public class DashboardTests
 	{
 		private readonly WebApplication app;
 
-		private Host(MonorepoFixture fixture)
-		{
-			var monorepo = Monorepo.Load(fixture.Root);
-			var git = new GitClient(fixture.Root);
-			Supervisor = new RunSupervisor((select, command, context) => AgentCommand.StartRunAsync(git, monorepo, select, command, context));
-			Dashboard = new Dashboard(monorepo, Supervisor);
-			app = Dashboard.Build("http://127.0.0.1:0");
-		}
+		private Host(MonorepoFixture fixture) => app = new Dashboard(Monorepo.Load(fixture.Root)).Build("http://127.0.0.1:0");
 
-		public RunSupervisor Supervisor { get; }
-		public Dashboard Dashboard { get; }
 		public HttpClient Client { get; private set; } = null!;
 
 		public static async Task<Host> StartAsync(MonorepoFixture fixture)
@@ -44,12 +35,9 @@ public class DashboardTests
 
 		public async ValueTask DisposeAsync()
 		{
-			Supervisor.CancelAll();
-			await Supervisor.WhenAllSettledAsync();
 			Client.Dispose();
 			await app.StopAsync();
 			await app.DisposeAsync();
-			Supervisor.Dispose();
 		}
 	}
 
@@ -78,7 +66,7 @@ public class DashboardTests
 		}
 
 		Assert.Contains("font-family", await host.GetAsync("/style.css"));
-		Assert.Contains("EventSource", await host.GetAsync("/app.js"));
+		Assert.Contains("data-live-src", await host.GetAsync("/app.js"));
 	}
 
 	[Fact]
@@ -89,8 +77,8 @@ public class DashboardTests
 
 		var home = await host.GetAsync("/");
 
-		Assert.Contains("<svg", home);
-		Assert.Contains("<a href=\"/components/lib\">", home);
+		Assert.Contains("<svg class=\"chart map\"", home);
+		Assert.Contains("<a href=\"/components/lib\" class=\"node\" data-node=\"lib\" data-related=\"lib app\">", home);
 		Assert.Contains("<div class=\"n\">3</div><div class=\"muted\">components</div>", home);
 		Assert.Contains("<a href=\"/components/app\">", await host.GetAsync("/graph.svg"));
 	}
@@ -181,82 +169,103 @@ public class DashboardTests
 	}
 
 	[Fact]
-	public async Task NewRun_StartsTheRunInTheBackgroundAndItsPageShowsTheRecord()
+	public async Task Runs_ShowTheChartAndARunsPathFromBaselineToResult()
 	{
 		await using var fixture = await ThreeComponentsAsync();
+		var run = await fixture.RunStartAsync("-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/a.txt", "a"));
+		var runId = TestEnvironment.RunIdOf(run.Output);
 		await using var host = await Host.StartAsync(fixture);
 
-		var form = new FormUrlEncodedContent(new Dictionary<string, string>
-		{
-			["token"] = host.Dashboard.Token,
-			["c"] = "app", // lib joins through the reference, at the tag chosen for it
-			["tag:app"] = "v0",
-			["tag:lib"] = "v0",
-			["prompt"] = "write a",
-			["command"] = TestEnvironment.WriteFileCommand("app/a.txt", "a")
-		});
-		var response = await host.Client.PostAsync("/new", form);
-		var live = await response.Content.ReadAsStringAsync();
+		var runs = await host.GetAsync("/runs");
+		var page = await host.GetAsync($"/runs/{runId}");
 
-		Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-		Assert.Equal("/runs/s1", response.RequestMessage!.RequestUri!.AbsolutePath);
-		Assert.Contains("Agent output", live);
-		await host.Supervisor.WhenAllSettledAsync();
-
-		var card = Assert.Single(host.Supervisor.Cards());
-		Assert.Equal("app@v0,lib@v0", card.Select);
-		Assert.Equal(AgentRunPhase.Completed, card.Phase);
-		var done = await host.GetAsync("/runs/s1");
-		Assert.Contains("completed", done);
-		Assert.Contains(RunMetadata.TagName(card.RunId!, 0), done);
-		Assert.Contains(RunMetadata.Key(card.RunId!), await host.GetAsync("/runs"));
-		Assert.Contains("event: done", await host.GetAsync("/runs/s1/events"));
+		Assert.Contains("<svg class=\"chart gantt\"", runs);
+		Assert.Contains($"href=\"/runs/{runId}\" class=\"row\"", runs);
+		Assert.Contains("<svg class=\"chart donut\"", runs);
+		Assert.Contains("<svg class=\"chart flow\"", page);
+		Assert.Contains(RunMetadata.TagName(runId, 0), page); // its result tag in the flow and the table
+		Assert.Contains($"bassia run diff {RunMetadata.Key(runId)} -patch", page);
+		Assert.Contains("waiting", page); // its result waits in the merge queue
+		Assert.Contains("No agentic run", await host.GetAsync("/runs/agent-run-brave-otter-000000", HttpStatusCode.NotFound));
 	}
 
 	[Fact]
-	public async Task NewRun_WithoutAPromptOrComponent_IsSentBackWithTheError()
+	public async Task LiveRuns_ComeFromTheJobRegistryWithTheirPhaseAndOutput()
 	{
 		await using var fixture = await ThreeComponentsAsync();
+		var monorepo = Monorepo.Load(fixture.Root);
+		var jobs = new JobRegistry(monorepo);
+		var log = Path.Combine(jobs.Dir, "agent-run-quiet-fern-91ab22.log");
+		using var job = jobs.Attach("agent-run-quiet-fern-91ab22", RunCommands.JobKind, log, detached: true);
+		await File.WriteAllTextAsync(log, "bassia: preparing\nhello from the agent\n");
 		await using var host = await Host.StartAsync(fixture);
 
-		var noComponent = await host.Client.PostAsync("/new", new FormUrlEncodedContent(new Dictionary<string, string> { ["token"] = host.Dashboard.Token, ["prompt"] = "x" }));
-		var noPrompt = await host.Client.PostAsync("/new", new FormUrlEncodedContent(new Dictionary<string, string> { ["token"] = host.Dashboard.Token, ["c"] = "other", ["tag:other"] = "v0" }));
+		var overview = await host.GetAsync("/");
+		var fragment = await host.GetAsync("/fragment/live");
 
-		Assert.Equal(HttpStatusCode.BadRequest, noComponent.StatusCode);
-		Assert.Contains("Choose at least one component", await noComponent.Content.ReadAsStringAsync());
-		Assert.Equal(HttpStatusCode.BadRequest, noPrompt.StatusCode);
-		Assert.Contains("Write a prompt", await noPrompt.Content.ReadAsStringAsync());
-		Assert.Empty(host.Supervisor.Cards());
+		Assert.Contains("class=\"livecard\"", overview);
+		Assert.Contains("quiet-fern-91ab22", fragment);
+		Assert.Contains("hello from the agent", fragment);
+		Assert.Contains("<li class=\"now\">preparing</li>", fragment); // no record yet
+		Assert.Equal("finalizing", LiveRuns.PhaseOf(["bassia: x: committing, tagging and pushing the component results."]));
+		Assert.Equal("agent", LiveRuns.PhaseOf(["bassia: x: running agent command in 'y'.", "agent output"]));
 	}
 
 	[Fact]
-	public async Task Compose_BuildsTheCommandTheWayTheTerminalFrontendDoes()
+	public async Task Guard_IsReadOnlyAndRefusesAForeignHost()
 	{
 		await using var fixture = await ThreeComponentsAsync();
 		await using var host = await Host.StartAsync(fixture);
 
-		var command = await host.GetAsync("/new/compose?agent=claude%20-p&model=opus&prompt=do%20it&context=see%20README");
-
-		Assert.Equal(RunCommands.ComposeCommand("claude -p", "opus", null, "do it", "see README"), command);
-	}
-
-	[Fact]
-	public async Task Guard_RefusesAPostWithoutTheTokenAndAForeignHost()
-	{
-		await using var fixture = await ThreeComponentsAsync();
-		await using var host = await Host.StartAsync(fixture);
-
-		var forged = await host.Client.PostAsync("/new", new FormUrlEncodedContent(new Dictionary<string, string>
-		{
-			["c"] = "other", ["tag:other"] = "v0", ["command"] = "echo pwned"
-		}));
+		var post = await host.Client.PostAsync("/runs", new FormUrlEncodedContent(new Dictionary<string, string> { ["command"] = "echo pwned" }));
 		var rebinding = new HttpRequestMessage(HttpMethod.Get, "/");
 		rebinding.Headers.Host = "attacker.example";
 		var foreign = await host.Client.SendAsync(rebinding);
 
-		Assert.Equal(HttpStatusCode.Forbidden, forged.StatusCode);
-		Assert.Empty(host.Supervisor.Cards());
+		Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
 		Assert.Equal(HttpStatusCode.BadRequest, foreign.StatusCode);
+		Assert.DoesNotContain("<form method=\"post\"", await host.GetAsync("/runs"));
+	}
+
+	[Fact]
+	public async Task Tags_ChartTheTagsAcrossComponentsAndTellEachOnesStory()
+	{
+		await using var fixture = await ThreeComponentsAsync();
+		Assert.Equal(0, (await fixture.BassiaAsync("tag", "create", "release-1", "-select", "app,lib")).ExitCode);
+		var run = await fixture.RunStartAsync("-select", "app@release-1,lib@release-1", "-run", TestEnvironment.WriteFileCommand("lib/l.txt", "l"));
+		var runId = TestEnvironment.RunIdOf(run.Output);
+		await using var host = await Host.StartAsync(fixture);
+
+		var tags = await host.GetAsync("/tags");
+		var multi = await host.GetAsync("/tags?multi=1");
+		var baseline = await host.GetAsync("/tag?name=release-1");
+		var result = await host.GetAsync($"/tag?name={Uri.EscapeDataString(RunMetadata.TagName(runId, 0))}");
+
+		Assert.Contains("<svg class=\"chart tags\"", tags);
+		Assert.Contains("href=\"/tag?name=release-1\" class=\"tagcol k-baseline\"", tags);
+		Assert.Contains("class=\"span\"", multi); // release-1 joins app and lib
+		Assert.Contains("set by hand", baseline);
+		Assert.Contains($"href=\"/runs/{runId}\"", baseline); // the run that started from it
+		Assert.Contains("bassia run start -select app@release-1,lib@release-1", baseline);
+		Assert.Contains("<svg class=\"chart flow\"", baseline);
+		Assert.Contains("run <a class=\"id\"", result); // made by the run
+		Assert.Contains("No component has a tag", await host.GetAsync("/tag?name=nope", HttpStatusCode.NotFound));
+	}
+
+	[Fact]
+	public async Task Config_ShowsEveryLayerAndThePolicyPerComponent()
+	{
+		await using var fixture = await ThreeComponentsAsync();
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "merge.component.lib.semantic", "-value", "manual")).ExitCode);
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "merge.advance", "-value", "auto", "-user")).ExitCode);
+		await using var host = await Host.StartAsync(fixture);
+
+		var page = await host.GetAsync("/config");
+
+		Assert.Contains("<code>merge.component.lib.semantic</code>", page);
+		Assert.Contains("class=\"layer user wins\"", page);
+		Assert.Contains("<span class=\"pv v-manual own\"", page);
+		Assert.Contains("bassia config set merge.advance -value &quot;auto&quot;", page);
 	}
 
 	[Fact]
@@ -283,6 +292,34 @@ public class DashboardTests
 		Assert.Contains("Nothing was changed", plan);
 		Assert.Single(await new Bassia.Integration.IntegrationStore(new RunMetadataStore(new GitClient(fixture.Root), fixture.RunsRepo)).ListLatestAsync());
 		await host.GetAsync("/integrations/integration-brave-otter-000000", HttpStatusCode.NotFound);
+	}
+
+	[Fact]
+	public async Task Queue_ShowsTheTriageLanesTheCollisionsAndWhatNeedsAHuman()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		var first = await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "merge.semantic", "-value", "manual")).ExitCode);
+		await using var host = await Host.StartAsync(fixture);
+
+		var before = await host.GetAsync("/queue");
+
+		Assert.Contains("<svg class=\"chart lanes\"", before);
+		Assert.Contains("<svg class=\"chart ring\"", before); // the two runs collide
+		Assert.Contains("will need a human", before);
+		Assert.Contains("merge.semantic = manual", before);
+		Assert.Contains($"bassia integration start -runs {RunMetadata.Key(first)},{RunMetadata.Key(second)} -detach", before);
+
+		Assert.Equal(0, (await fixture.IntegrationStartAsync("-runs", "all")).ExitCode);
+		var after = await host.GetAsync("/queue");
+		var overview = await host.GetAsync("/");
+
+		Assert.Contains("needs attention", after);
+		Assert.Contains($"bassia integration start -runs {RunMetadata.Key(second)} -semantic {RunMetadata.Key(second)}", after);
+		Assert.Contains("bassia integration advance", after); // the first result is integrated, its base not advanced
+		Assert.Contains("<div class=\"n\">1</div><div class=\"muted\">merges need attention</div>", overview);
 	}
 
 	[Fact]

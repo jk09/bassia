@@ -201,23 +201,6 @@ internal static class RunCommands
 		return null;
 	}
 
-	/// <summary>
-	/// The start path of the web dashboard: the run is registered as a hosted job of the <c>web</c> process,
-	/// so <c>bassia run show</c> sees it live and <c>bassia run stop</c> can stop it from another shell.
-	/// </summary>
-	internal static async Task<AgentRunOutcome> StartHostedAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext context)
-	{
-		var runId = RunMetadata.NewRunId();
-		using var job = new JobRegistry(monorepo).Attach(runId, JobKind, hosted: true);
-		using var linked = CancellationTokenSource.CreateLinkedTokenSource(context.Cancellation, job.Cancellation);
-		return await AgentCommand.StartRunAsync(git, monorepo, select, command, new AgentRunContext
-		{
-			Cancellation = linked.Token,
-			OnStep = context.OnStep,
-			OnOutput = context.OnOutput
-		}, runId);
-	}
-
 	// ----- finding a run -----
 
 	private sealed record FoundRun(Monorepo Monorepo, RunMetadataStore Store, JobRegistry Jobs, string RunId, RunMetadata? Record, JobInfo? Job)

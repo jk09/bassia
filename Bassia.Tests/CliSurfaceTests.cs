@@ -173,7 +173,7 @@ public class CliSurfaceTests
 		var (exitCode, output, error) = await monorepo.BassiaAsync("config", "set", "-key", "integration.resolver", "-value", "my-resolver --flag");
 
 		Assert.True(exitCode == 0, error);
-		Assert.Equal("config", Result(output)["source"]);
+		Assert.Equal("monorepo", Result(output)["source"]);
 		var text = await File.ReadAllTextAsync(configPath);
 		Assert.Contains("resolver = \"my-resolver --flag\"", text);
 		Assert.Contains("# Command that resolves a semantic merge", text);
@@ -206,7 +206,73 @@ public class CliSurfaceTests
 		Assert.Equal(0, exitCode);
 		var settings = Tables(Result(output), "setting").ToDictionary(setting => (string)setting["key"]);
 		Assert.Equal("default", settings["workspace.path"]["source"]);
-		Assert.Equal("config", settings["agent.command"]["source"]);
+		Assert.Equal("monorepo", settings["agent.command"]["source"]);
+		Assert.Equal("resolver", settings["merge.semantic"]["value"]);
+	}
+
+	[Fact]
+	public async Task Config_UserLayer_OverridesTheMonorepoIsNeverCommittedAndUnsetFallsBack()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		var status = await TestEnvironment.GitAsync(monorepo.MetaRepo, "status", "--porcelain");
+
+		var (exitCode, output, error) = await monorepo.BassiaAsync("config", "set", "-key", "merge.semantic", "-value", "MANUAL", "-user");
+
+		Assert.True(exitCode == 0, error);
+		Assert.Equal("manual", Result(output)["value"]);
+		Assert.Equal("user", Result(output)["source"]);
+		Assert.True(File.Exists(Path.Combine(monorepo.MetaRepo, ConfigFile.UserFileName)));
+		Assert.Equal(status, await TestEnvironment.GitAsync(monorepo.MetaRepo, "status", "--porcelain"));
+		Assert.True(Monorepo.Load(monorepo.Root).MergePolicyFor("anything").ManualSemantic);
+
+		var (_, get, _) = await monorepo.BassiaAsync("config", "get", "merge.semantic");
+		Assert.Equal("manual", Result(get)["user_value"]);
+		Assert.Equal("resolver", Result(get)["monorepo_value"]);
+
+		var (unsetCode, unset, unsetError) = await monorepo.BassiaAsync("config", "unset", "merge.semantic", "-user");
+		Assert.True(unsetCode == 0, unsetError);
+		Assert.Equal("monorepo", Result(unset)["source"]);
+		Assert.False(Monorepo.Load(monorepo.Root).MergePolicyFor("anything").ManualSemantic);
+	}
+
+	[Fact]
+	public async Task Config_ComponentKey_OverridesTheGlobalSettingForThatComponentOnly()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("lib");
+
+		var (exitCode, _, error) = await monorepo.BassiaAsync("config", "set", "merge.component.lib.manual_paths", "-value", "db/migrations, **/*.csproj");
+		Assert.True(exitCode == 0, error);
+
+		var loaded = Monorepo.Load(monorepo.Root);
+		Assert.True(loaded.MergePolicyFor("lib").ManualPaths.Matches("src/app.csproj"));
+		Assert.True(loaded.MergePolicyFor("other").ManualPaths.IsEmpty);
+		Assert.Contains("[merge.component.lib]", await File.ReadAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml")));
+
+		var (_, list, _) = await monorepo.BassiaAsync("config", "list");
+		var settings = Tables(Result(list), "setting").ToDictionary(setting => (string)setting["key"]);
+		Assert.Equal("db/migrations,**/*.csproj", settings["merge.component.lib.manual_paths"]["value"]);
+
+		var (unsetCode, _, _) = await monorepo.BassiaAsync("config", "unset", "merge.component.lib.manual_paths");
+		Assert.Equal(0, unsetCode);
+		Assert.DoesNotContain("[merge.component.lib]", await File.ReadAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml")));
+		Assert.Equal("", await TestEnvironment.GitAsync(monorepo.MetaRepo, "status", "--porcelain"));
+	}
+
+	[Fact]
+	public async Task Config_InvalidChoiceOrUnregisteredComponent_IsRejectedAndChangesNothing()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		var before = await File.ReadAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml"));
+
+		var (exitCode, _, error) = await monorepo.BassiaAsync("config", "set", "-key", "merge.warnings", "-value", "sometimes");
+		Assert.Equal(1, exitCode);
+		Assert.Contains("resolver | manual | accept", error);
+
+		(exitCode, _, error) = await monorepo.BassiaAsync("config", "set", "-key", "merge.component.ghost.semantic", "-value", "manual");
+		Assert.Equal(1, exitCode);
+		Assert.Contains("'ghost'", error);
+		Assert.Equal(before, await File.ReadAllTextAsync(Path.Combine(monorepo.MetaRepo, "config.toml")));
 	}
 
 	[Fact]

@@ -22,16 +22,19 @@ internal static class PromptCommands
 		var directory = Environment.CurrentDirectory;
 		var root = Monorepo.FindRoot(directory);
 		IReadOnlyList<string> components = [];
+		IReadOnlyList<ConfigValue> settings = [];
 		if (root is not null)
 		{
-			components = Monorepo.Load(root).Components.Select(component => component.Name).ToList();
+			var monorepo = Monorepo.Load(root);
+			components = monorepo.Components.Select(component => component.Name).ToList();
+			settings = ConfigFile.Keys.Concat(monorepo.Config.ComponentKeys()).Select(monorepo.Config.Resolve).ToList();
 		}
 
 		var backendName = invocation.Get("backend") ?? Setting(root, ConfigFile.Find("llm.backend"));
 		var backend = LlmBackends.Create(backendName, new LlmSettings(invocation.Get("llm") ?? Setting(root, ConfigFile.Find("llm.command")), invocation.Get("model"), directory));
 		var skills = SkillStore.Load(root);
 		var session = new PromptSession(backend, ExecutorFactory(directory), skills,
-			new PromptContext(directory, root, components), ConfirmFactory(), Console.Error);
+			new PromptContext(directory, root, components, settings), ConfirmFactory(), Console.Error);
 
 		var outcome = await session.RunAsync(new PromptOptions(
 			ask,
@@ -62,7 +65,7 @@ internal static class PromptCommands
 	}
 
 	private static string Setting(string? root, ConfigKey key) =>
-		root is not null && ConfigFile.Get(root, key) is { } value && !string.IsNullOrWhiteSpace(value) ? value : key.Default;
+		root is null ? key.Default : ConfigSnapshot.Load(root).Resolve(key).Value;
 
 	private static Confirmation AskOnConsole(string commandLine, string? why)
 	{

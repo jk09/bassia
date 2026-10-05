@@ -70,14 +70,14 @@ its usage, every switch and examples. Help is TOML too.
 | Area | Commands |
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version` |
-| Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>` |
+| Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-branch <b>] [-run <id>,...\|all] [-limit <n>] [-page <n>]` |
 | Agentic runs | `run start -select <c[@tag\|hash]>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
-| Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
+| Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-manual] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
 | Natural language and skills | `prompt [-backend <name>] [-llm <command>] [-model <m>] [-skill <s>,...] [-yes] [-dry-run] [-max-rounds <n>] <ask...>`, `skill list`, `skill show -name <s>` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
 
@@ -179,7 +179,7 @@ checked first (a mistake is reported at once), then the run continues in a backg
 the caller's standard handles, and the result — `run_id`, `pid`, `log` — is printed immediately. `integration start
 -detach` works the same way.
 
-Whoever executes a run or integration - a foreground `bassia`, a detached one, or `bassia web` - registers
+Whoever executes a run or integration - a foreground `bassia` or a detached one - registers
 it as a job in `<workspace>/.jobs/`. That is what lets another process, usually another agent:
 
 - see that it is **live** (`run list -status live`, `run show`: `live`, `pid`, `last_output`, and an ASCII `card`),
@@ -187,25 +187,51 @@ it as a job in `<workspace>/.jobs/`. That is what lets another process, usually 
 - **wait** for it (`run wait`, `integration wait`, with an optional `-timeout`),
 - **stop** it (`run stop`, `integration stop`): the job is asked to stop, which kills the agent's (or resolver's)
   process tree and records the work as `cancelled`; a job that does not react within `-timeout` seconds has its
-  process killed - never the process of `bassia web`, which stops its own runs.
+  process killed.
 
 A run recorded as `started` whose process is gone (killed, crashed, machine restarted) shows as `stale`; `run stop`
 records it as `cancelled`.
 
 ### Configuration
 
-`bassia config list|get|set` reads and writes the settings of `.bassia/config.toml`, keeping its comments, and commits
-each change to the meta-repo:
+Settings come in layers. The highest layer that sets a key wins:
+
+1. **user**: `.bassia/config.user.toml`, your own settings for this monorepo. It is git-ignored in the meta-repo
+   (`init` writes a `.gitignore`; an older meta-repo gets the entry in its local `info/exclude`), so it is never
+   committed.
+2. **monorepo**: `.bassia/config.toml`, committed to the meta-repo and shared by everyone.
+3. **default**: built into Bassia.
+
+`bassia config list|get` shows each key's effective value and the layer it comes from (`get` also shows the value in
+each layer). `bassia config set -key <k> -value <v>` writes the monorepo layer, keeping its comments, and commits the
+change. With `-user` it writes the user layer instead. `bassia config unset -key <k> [-user]` removes a key from a
+layer, so the next layer down applies again. A value outside a key's choices, or a key naming an unregistered
+component, is rejected and nothing changes. `bassia prompt` hands the LLM the effective configuration with each
+value's layer, and it reads and changes settings through the same commands.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `workspace.path` | `.workspace` | Folder of the run and integration checkouts (and of `.jobs`) |
-| `agent.command` | `claude -p --permission-mode acceptEdits` | Agent command of a run started from `-prompt` or `bassia web` |
+| `agent.command` | `claude -p --permission-mode acceptEdits` | Agent command of a run started from `-prompt` |
 | `agent.commit.subject` | `agent({short_id}): {summary}` | Subject of a run's result commits |
 | `integration.resolver` | `claude -p --permission-mode acceptEdits` | Command that resolves a semantic merge |
 | `integration.weave` | `weave-driver` | Structural merge driver tried where git conflicts, used when installed; `off` disables it |
+| `merge.semantic` | `resolver` | A result neither git nor weave can merge goes to the resolver, or is left for a human (`manual`) |
+| `merge.warnings` | `resolver` | A result weave merged with warnings: reviewed by the resolver, left for a human (`manual`), or weave's merge stands (`accept`) |
+| `merge.manual_paths` | (none) | Path patterns, as in split plans (`**/*.csproj,db/migrations`), whose conflicts always need a human |
+| `merge.advance` | `manual` | `auto`: a completed integration fast-forwards the base branches itself, as `integration advance` would |
 | `llm.backend` | `claude` | LLM backend of `bassia prompt`: `claude` (Claude Code) or `command` |
 | `llm.command` | `claude -p` | Command that backend runs; the prompt goes to its stdin |
+
+Each `merge.*` key can be overridden for one component as `merge.component.<component>.<setting>` (a
+`[merge.component.<component>]` table). It falls back to the global key, layer by layer:
+
+```powershell
+bassia config set merge.component.db.semantic -value manual        # db's unmergeable conflicts wait for a human
+bassia config set merge.manual_paths -value "**/*.csproj"           # everyone: project files are never auto-resolved
+bassia config set merge.advance -value auto -user                   # just me: land completed integrations at once
+bassia config unset merge.advance -user
+```
 
 `component add|set|remove` edit `.bassia/components.toml` the same way and reject a change that would leave a cycle
 or a reference to an unregistered component.
@@ -406,12 +432,12 @@ bassia integration plan -runs all -weave off                     # the triage wi
 bassia integration advance <id>                                  # fast-forward the base branches to the result
 ```
 
-1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it) or `skip`. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
+1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it), `manual` (left for a human) or `skip`. The **merge policy** (the `merge.*` settings, see [Configuration](#configuration)) decides between the resolver and a human: with `merge.semantic = manual`, with `merge.warnings = manual`, or for conflicts in `merge.manual_paths`, a step is `manual`; with `merge.warnings = accept` weave's merge with warnings stands. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review, and wins over the policy; `-manual` leaves a result for a human; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
 2. **Syntactic and structural steps first.** Each component is merged in its own checkout under `.workspace/integration-<key>/<component>`, on the branch `integration/<key>` started at the base. Every syntactic step is a `git merge --no-ff` of the run's result tag, every structural one the same with weave as the merge driver, in run order. If one conflicts after all (or the structural merge warns), it moves to the back of the semantic queue.
 3. **Semantic steps next.** For each remaining step Bassia starts the merge - with weave as the merge driver when the structural merge is enabled, so only what weave could not merge is left conflicted, in entity-labelled conflicts - with `diff3` conflict markers for what git's own merge leaves, so the common ancestor is visible, and writes a **semantic brief**: the incoming run's prompt, baseline, command and commit records; which runs are already integrated and why; the history and diff of both sides since their common ancestor; the conflicted files (and, with the structural merge, which files git alone conflicted on, which of them weave merged, and weave's warnings); and instructions. The resolver command (by default `claude -p --permission-mode acceptEdits`, configurable as `[integration] resolver` in `config.toml`) runs in the component's working tree with the brief on stdin and these environment variables: `BASSIA_MERGE_BRIEF` (the brief's path), `BASSIA_COMPONENT`, `BASSIA_RUN_ID`, `BASSIA_INTEGRATION_ID` and `BASSIA_ROOT`. When it exits with code 0 and no conflict marker (nor weave's `weave explain` pointer) is left, Bassia commits the merge. A non-zero exit or leftover markers abort that step, which is recorded as `failed`; the other steps still go ahead.
 4. **Result.** Each merge commit's message is a subject and an `[integration]` TOML record (run, source tag, strategy, rationale, conflicts, structural driver and conflicts, resolver). The result is tagged `integration/<key>/<n>` - one identically named annotated tag across the components - and branch and tag are pushed to the component's source-of-truth repo. That tag is a baseline like any other: `run start -select app@integration/<key>/0,...` starts the next run from it. Nothing else moves: `integration advance <id>` fast-forwards each component's base branch to the result, and refuses if the branch moved since the integration was built on it, or if the base was a tag.
 
-The integration's record (`integration.toml`: runs, resolver, structural driver, and per component its base, every step's triage, structural verdict, strategy, conflicts, outcome, merge commit and brief) is committed to `.agentic-runs` next to the run records and tagged `integration/<key>/<lineage>`. Status is `completed`, `partial` (a step or component failed; what did merge is still published), or `cancelled`.
+The integration's record (`integration.toml`: runs, resolver, structural driver, and per component its base, every step's triage, structural verdict, strategy, conflicts, outcome, merge commit and brief) is committed to `.agentic-runs` next to the run records and tagged `integration/<key>/<lineage>`. Status is `completed`, `needs_attention` (everything merged except the steps the policy left for a human; their outcome is `needs_attention`), `partial` (a step or component failed; what did merge is still published), or `cancelled`. With `merge.advance = auto`, a `completed` or `needs_attention` integration advances the base branches of the components whose policy says so.
 
 #### The structural merge (weave)
 
@@ -483,36 +509,49 @@ bassia -C R:\ web                        # http://127.0.0.1:8080/, opened in the
 bassia -C R:\ web -port 9000 -no-open
 ```
 
-`web` serves a dashboard over the monorepo, in the spirit of [Fossil](https://fossil-scm.org)'s built-in web
-interface. It listens on 127.0.0.1 only. If the port is taken it uses the next free one, and it prints the URL. It
-runs until Ctrl-C, which also stops (and records as `cancelled`) any run it started. Every page is plain HTML with
-a menu, and works without JavaScript; the script only makes live parts update in place.
+`web` serves a read-only dashboard over the monorepo, in the spirit of [Fossil](https://fossil-scm.org)'s built-in
+web interface: a place to look at the monorepo, while the command line and `bassia prompt` change it. Every page
+shows the `bassia` commands for what it describes (click one to copy it). It listens on 127.0.0.1 only and answers
+only GET requests. If the port is taken it uses the next free one, and it prints the URL. It runs until Ctrl-C.
+Pages and their pictures are drawn on the server (inline SVG and CSS, nothing loaded from elsewhere) and work
+without JavaScript; the script animates and refreshes the live parts.
 
-- **Home**: counts of components, live, completed and failed runs, and integrations. Below them are the component
-  graph (the same SVG as `bassia graph -format svg`, with every box a link) and the latest runs and
-  integrations.
-- **Components**: each component with what it needs, what uses it, its annotated tags, branches and runs. A
-  component's page lists its branches and tags, and the runs that touched it with their result tags.
-- **Timeline**: one chronological list of commits across the components you choose. Each commit shows its
-  component, hash, subject, refs and author. The components a choice depends on join it automatically, so a
-  library comes along with the application that references it. The whole monorepo is never logged: without a
-  choice the page asks for one, and each component's log is read only as far as the current page needs (`?n=` sets
-  the page size). Agent and integration tags link to the run or integration that made them, and every commit opens
-  with its full message and diffstat.
-- **Runs**: the runs started from this dashboard, updating live, then every recorded run. A run's page shows its
-  record and results. For a live run it also streams the agent's output as it happens and has a **Stop** button.
-- **New run**: a Claude-like prompt. Tick the components and pick an annotated tag for each; components they
-  depend on join at the tag chosen for them. Then write the prompt, where enter sends and shift+enter adds a line,
-  and optionally choose the model, effort and extra context. The composed `-run` command is previewed. Type your
-  own command to run exactly that. Sending starts the run in the background, through the same path as `bassia
-  run start`, and opens its live page.
-- **Integrations**: every integration with its runs and result tags. Each opens to its per-component steps
-  (triage, structural verdict, strategy, conflicts, outcome) and the paths of its semantic briefs. **Preview triage** shows how
-  chosen runs would integrate, like `integration plan`; performing an integration stays with `bassia integration
-  start`.
+- **Overview**: counts (components, live runs, results in the merge queue, merges needing attention, tags across
+  components, integrations), the live runs, the component map, the recent runs over time, runs by status, what
+  needs attention and the latest tags.
+- **Components**: the component map. Components sit in layers below what references them, and arrows point at what
+  each needs. Each box shows its live runs (pulsing), results waiting in the merge queue, merges needing attention
+  and its latest tag. Hovering a box lights up everything it needs and everything that needs it. A component's page
+  adds its merge policy, its results in the queue, its branches and tags, and the runs that touched it.
+- **Tags**: tags as units of progress. A chart has one column per tag, in time order, and one row per component,
+  with a mark where the tag is. The marks are joined when the tag spans several components, and coloured by kind:
+  baseline, run result, integration, unwound submodules, split. You can filter by kind or by tags across
+  components. A tag's page shows the components and commits it marks, what made it (a run, an integration, or by
+  hand), the runs started from it and the integrations that took it in. Its lineage is drawn as a flow: started
+  from → agentic runs → results → integrations → integrated as.
+- **Runs**: the live runs as animated cards. Each card shows its phase as steps (preparing, agent working,
+  finalizing, done) with the current step pulsing, a ticking clock, its components and the latest line of its
+  output. They come from the job registry, so a run started from any terminal appears by itself. Below them, every
+  run over time (live bars reach to now) and runs by status. A run's page streams its output while it is live and
+  draws its path from its baselines to its results and the integrations that took them.
+- **Merge queue**: every result not yet on its component's default branch: `waiting`, `integrated` (its base not
+  advanced) or `needs attention`. For what waits, the triage of the next integration is drawn as one lane per
+  component, in merge order, with each result coloured by who merges it: git, weave, the resolver, or a human. A
+  bar per component shows the split, and a ring joins the runs whose results collide. A table gives each merge's
+  meaning: why the run changed things (its prompt), what git found, how weave saw it, and why it goes where it
+  goes. Then come the integrations waiting for `integration advance`, and every merge that **needs attention**
+  (left for a human by the merge policy, or failed), each with its semantic brief when one was written and the
+  commands that deal with it: hand it to the resolver, merge it by hand, or leave it out.
+- **Integrations**: every integration with a bar of how its steps were merged. An integration's page draws its
+  runs, results and result tags, lists its steps (triage, structural verdict, strategy, conflicts, outcome) and opens
+  each semantic brief. **Preview triage** shows how chosen runs would integrate, like `integration plan`.
+- **Timeline**: one chronological list of commits across the components you choose and the components they depend
+  on (never the whole monorepo at once), paged; every commit opens with its message and diffstat.
+- **Config**: every setting with its effective value and which layer it comes from (default, monorepo, user), and
+  the merge policy each component ends up with.
 
-Forms carry a per-server token, and requests must be addressed to `127.0.0.1` or `localhost`. So a web page
-open in the same browser can neither start runs through the dashboard nor read it through DNS rebinding.
+Requests must be addressed to `127.0.0.1` or `localhost`, so a web page open in the same browser cannot read the
+dashboard through DNS rebinding.
 
 ## Build
 

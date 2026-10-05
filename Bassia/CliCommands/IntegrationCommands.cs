@@ -17,7 +17,10 @@ internal static class IntegrationCommands
 
 	private sealed record Choices(IReadOnlyList<RunMetadata> Runs, IReadOnlyList<ComponentIntegration> Plan, RunMetadataStore Store, StructuralMerge? Structural, string StructuralStatus);
 
-	/// <summary>The runs <c>-runs</c> names and the triage of them under <c>-onto</c>, <c>-semantic</c>, <c>-skip</c> and <c>-weave</c>.</summary>
+	/// <summary>
+	/// The runs <c>-runs</c> names and the triage of them under the merge policy (<c>merge.*</c>), <c>-onto</c>,
+	/// <c>-semantic</c>, <c>-skip</c>, <c>-manual</c> and <c>-weave</c>.
+	/// </summary>
 	private static async Task<Choices> PlanAsync(Invocation invocation, Monorepo monorepo)
 	{
 		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
@@ -40,6 +43,11 @@ internal static class IntegrationCommands
 			strategies[("*", IntegrationSupport.RequireSelected(runs, runId))] = MergeStrategy.Skip;
 		}
 
+		foreach (var runId in invocation.List("manual"))
+		{
+			strategies[("*", IntegrationSupport.RequireSelected(runs, runId))] = MergeStrategy.Manual;
+		}
+
 		var (structural, structuralStatus) = StructuralMerge.Resolve(monorepo, invocation.Get("weave"));
 		var plan = await IntegrationPlanner.PlanAsync(monorepo, runs, new IntegrationChoices { Onto = onto, Strategies = strategies, Structural = structural });
 		return new Choices(runs, plan, store, structural, structuralStatus);
@@ -56,7 +64,8 @@ internal static class IntegrationCommands
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Triage of {runs.Count} run(s): {steps.Count(step => step.Strategy == MergeStrategy.Syntactic)} step(s) for git, " +
 			$"{steps.Count(step => step.Strategy == MergeStrategy.Structural)} for the structural merge, " +
-			$"{steps.Count(step => step.Strategy == MergeStrategy.Semantic)} for the resolver, {steps.Count(step => step.Strategy == MergeStrategy.Skip)} skipped.{weave} Nothing was changed.",
+			$"{steps.Count(step => step.Strategy == MergeStrategy.Semantic)} for the resolver, {steps.Count(step => step.Strategy == MergeStrategy.Manual)} for a human, " +
+			$"{steps.Count(step => step.Strategy == MergeStrategy.Skip)} skipped.{weave} Nothing was changed.",
 			new Dictionary<string, object?>
 			{
 				["plan"] = true,
@@ -357,7 +366,7 @@ internal static class IntegrationCommands
 		}
 
 		found = await ReloadAsync(found);
-		return ProgramCli.WriteResult(found.Record?.Status == "completed", invocation.Command, Describe(found), Details(found));
+		return ProgramCli.WriteResult(found.Record?.Status is "completed" or IntegrationRunner.NeedsAttentionStatus, invocation.Command, Describe(found), Details(found));
 	}
 
 	public static async Task<int> StopAsync(Invocation invocation)

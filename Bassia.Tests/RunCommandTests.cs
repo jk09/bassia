@@ -165,27 +165,6 @@ public class RunCommandTests
 	}
 
 	[Fact]
-	public async Task Stop_OfARunHostedByAFrontend_CancelsItThroughItsJob()
-	{
-		await using var monorepo = await MonorepoFixture.CreateAsync();
-		await monorepo.AddComponentAsync("example");
-		var repo = Monorepo.Load(monorepo.Root);
-		var output = new List<string>();
-
-		// What 'bassia web' does: the run executes inside its process, registered as a hosted job.
-		var run = RunCommands.StartHostedAsync(new Bassia.Git.GitClient(monorepo.Root), repo, "example@v0", TestEnvironment.SleepCommand(60),
-			new AgentRunContext { OnStep = _ => { }, OnOutput = line => { lock (output) output.Add(line); } });
-		var runId = await WaitForLiveRunAsync(monorepo);
-
-		var (exitCode, stopOutput, error) = await monorepo.BassiaAsync("run", "stop", runId);
-
-		Assert.True(exitCode == 0, error);
-		Assert.Equal("cancelled", Result(stopOutput)["status"]);
-		var outcome = await run.WaitAsync(TimeSpan.FromSeconds(30));
-		Assert.Equal("cancelled", outcome.Metadata.Status);
-	}
-
-	[Fact]
 	[Trait("Category", "Process")]
 	public async Task Detached_RunReturnsAtOnce_IsLive_AndCanBeWaitedForAndRead()
 	{
