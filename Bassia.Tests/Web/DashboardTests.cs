@@ -206,6 +206,17 @@ public class DashboardTests
 	}
 
 	[Fact]
+	public void Stack_LabelsOnlyWideSegmentsAndNamesEverySegmentInItsLegend()
+	{
+		var html = Charts.Stack([new Segment("by git", 8, "st-syntactic"), new Segment("by the resolver", 1, "st-semantic")], legend: true);
+
+		Assert.Contains(">8 by git</span>", html);
+		Assert.Contains(">1</span>", html); // too narrow for its label
+		Assert.Contains("title=\"by the resolver: 1\"", html);
+		Assert.Contains("1 by the resolver</span>", html); // named in the legend
+	}
+
+	[Fact]
 	public void RunTimeline_GivesAShortRunAVisibleBarThatStaysInsideThePlot()
 	{
 		var now = DateTimeOffset.UtcNow;
@@ -321,6 +332,7 @@ public class DashboardTests
 		var plan = await host.GetAsync($"/integrations/plan?run={first}&run={second}");
 
 		Assert.Contains($"href=\"/integrations/{record.IntegrationId}\"", list);
+		Assert.Contains("<div class=\"muted\">in example</div>", list); // the result tag, with the components it is in
 		Assert.Contains($"value=\"{second}\"", list); // offered for a triage preview
 		Assert.Contains("SYNTACTIC", detail);
 		Assert.Contains("merged", detail);
