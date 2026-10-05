@@ -84,6 +84,23 @@ public class DashboardTests
 	}
 
 	[Fact]
+	public async Task Overview_ListsMilestonesNotRunResultsAndCountsWaitingResultsApartFromAttention()
+	{
+		await using var fixture = await ThreeComponentsAsync();
+		var run = await fixture.RunStartAsync("-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/a.txt", "a"));
+		Assert.Equal(0, run.ExitCode);
+		await using var host = await Host.StartAsync(fixture);
+
+		var home = await host.GetAsync("/");
+
+		Assert.Contains("Latest milestones", home);
+		Assert.Contains("class=\"tagchip k-baseline\" href=\"/tag?name=v0\"", home);
+		Assert.DoesNotContain("class=\"tagchip k-run\"", home); // a run's result tag is not a milestone
+		Assert.Contains("<div class=\"n\">1</div><div class=\"muted\">results on their way to main</div>", home);
+		Assert.Contains("<div class=\"n\">0</div><div class=\"muted\">merges need attention</div>", home);
+	}
+
+	[Fact]
 	public async Task Component_ShowsItsRefsRunsAndReferences()
 	{
 		await using var fixture = await ThreeComponentsAsync();

@@ -129,7 +129,8 @@ internal static class Html
 		a { color:var(--accent); }
 		section { min-width:0; }
 		.split { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start; } .split > section { flex:1 1 260px; } .split > section.wide { flex:3 1 520px; }
-		.split > section.fit { flex:0 1 auto; }
+		.split > section.fit { flex:0 1 auto; } .split > section.side { flex:1 1 320px; max-width:640px; }
+		h2 .count { font-size:12px; padding:0 7px; border-radius:9px; color:#fff; background:var(--bad); vertical-align:2px; }
 		tr.machine td { color:var(--muted); } tr.machine .ref { opacity:.75; }
 		table.list { border-collapse:collapse; width:100%; margin:6px 0 14px; background:var(--panel); }
 		table.list th { text-align:left; font-weight:600; background:#eef1f6; border-bottom:1px solid var(--line); padding:5px 8px; }
@@ -202,7 +203,7 @@ internal static class Html
 		svg.map .node.attention rect { stroke:var(--bad); }
 		svg.map .node.busy rect { stroke:var(--live); stroke-dasharray:6 4; animation:march 1s linear infinite; }
 		svg.map .node .name { font-weight:600; font-size:14px; fill:var(--fg); }
-		svg.map .node .sub { font-size:11px; fill:var(--muted); }
+		svg.map .node .sub { font-size:11px; fill:var(--muted); } svg.map .mk-integration { fill:var(--violet); font-weight:700; } svg.map .mk-baseline { fill:var(--teal); }
 		svg.map.hovering .node:not(.hl) { opacity:.25; } svg.map.hovering .edge:not(.hl) { opacity:.12; }
 		svg.map .edge.hl { stroke:var(--accent); stroke-width:2.4; }
 		.badge circle { stroke:#fff; stroke-width:1.5; } .badge text { fill:#fff; font-size:10px; font-weight:700; text-anchor:middle; }
