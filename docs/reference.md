@@ -71,6 +71,11 @@ bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
 `bassia help` lists every command, `bassia help <command> [<subcommand>]` (or `-help` on any command) explains one:
 its usage, every switch and examples. Help is TOML too.
 
+Results are TOML by default. Add `-human` to any command (`bassia -help -human`, `bassia component -help -human`,
+`bassia status -human`) to print it for a person instead: the message (or `error: ...`), `key: value` lines, bullets
+for lists and an ASCII table for lists of entries, without the `# bassia result` marker. Only the format changes; the
+exit codes and the stdout/stderr split are the same. `-human` after a rest-of-line switch belongs to that command line.
+
 | Area | Commands |
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version` |

@@ -16,13 +16,14 @@ internal static class ProgramCli
 	/// </summary>
 	public static async Task<int> RunAsync(string[] args)
 	{
+		HumanOutput.Enabled = false;
 		var (remainingArgs, workingDirectoryError) = ConsumeWorkingDirectoryOption(args);
 		if (workingDirectoryError is not null)
 		{
 			return UsageError("bassia", workingDirectoryError);
 		}
 
-		args = remainingArgs;
+		args = ExtractHuman(remainingArgs);
 		if (args.Length == 0 || IsHelp(args[0]))
 		{
 			return Help.Show(args.Skip(1).ToList());
@@ -122,14 +123,14 @@ internal static class ProgramCli
 			}
 		}
 
-		var toml = TomlResult.Serialize(payload);
+		var text = HumanOutput.Enabled ? HumanOutput.Render(payload) : TomlResult.Serialize(payload);
 		if (ok)
 		{
-			Console.WriteLine(toml);
+			Console.WriteLine(text);
 		}
 		else
 		{
-			Console.Error.WriteLine(toml);
+			Console.Error.WriteLine(text);
 		}
 
 		return ok ? 0 : 1;
@@ -167,6 +168,58 @@ internal static class ProgramCli
 		}
 
 		return (args[index..], null);
+	}
+
+	/// <summary>
+	/// Takes <c>-human</c>/<c>--human</c> (print for a person, not as TOML) out of the command line and records it for
+	/// this run. It may appear anywhere except inside a rest-of-line switch's text (the agent command of <c>-run</c>,
+	/// the resolver of <c>-resolve</c>, the ask of <c>prompt</c>), which is the command's own and stays verbatim.
+	/// </summary>
+	private static string[] ExtractHuman(string[] args)
+	{
+		var rest = FirstRestOfLineIndex(args);
+		var kept = new List<string>();
+		HumanOutput.Enabled = false;
+		for (var i = 0; i < args.Length; i++)
+		{
+			if (i < rest && args[i].TrimStart('-').Equals("human", StringComparison.OrdinalIgnoreCase) && args[i].StartsWith('-'))
+			{
+				HumanOutput.Enabled = true;
+			}
+			else
+			{
+				kept.Add(args[i]);
+			}
+		}
+
+		return [.. kept];
+	}
+
+	/// <summary>The index from which the command line is a rest-of-line switch's text, or the length when there is none.</summary>
+	private static int FirstRestOfLineIndex(string[] args)
+	{
+		if (args.Length == 0)
+		{
+			return 0;
+		}
+
+		var group = CommandTable.Group(args[0]);
+		for (var i = 1; i < args.Length; i++)
+		{
+			var token = args[i];
+			if (token.StartsWith('-') && group.Any(command => command.FindSwitch(token.TrimStart('-')) is { Rest: true }))
+			{
+				return i + 1;
+			}
+
+			// 'bassia prompt <ask...>': everything from the first bare word on is the ask.
+			if (!token.StartsWith('-') && group.Any(command => command.Positional is not null && command.FindSwitch(command.Positional) is { Rest: true }))
+			{
+				return i;
+			}
+		}
+
+		return args.Length;
 	}
 
 	private static bool IsHelp(string argument) => argument is "-h" or "--help" or "-help" or "help";
