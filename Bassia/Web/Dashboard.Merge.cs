@@ -18,29 +18,17 @@ internal sealed partial class Dashboard
 		var monorepo = state.Monorepo;
 		var body = new StringBuilder();
 
+		// The triage of what the next integration would take.
+		var next = await NextAsync(state);
+		var (runs, plan, planError, structuralStatus) = (next.Runs, next.Plan, next.Error, next.StructuralStatus);
+		var attention = queue.Attention.Count() + next.PlannedManual(queue).Count();
+
 		body.Append("<div class=\"cards\">")
 			.Append(Card("waiting to be integrated", queue.Items.Count(item => item.State == QueueState.Waiting), "#plan"))
 			.Append(Card("integrated, base not advanced", queue.Items.Count(item => item.State == QueueState.Integrated), "#advance"))
-			.Append(Card("need attention", queue.Attention.Count(), "#attention", queue.Attention.Any() ? "alert" : null))
+			.Append(Card("need attention", attention, "#attention", attention > 0 ? "alert" : null))
 			.Append(Card("landed on the default branch", queue.Items.Count(item => item.State == QueueState.Landed), "/runs"))
 			.Append("</div>");
-
-		// The triage of what the next integration would take.
-		var runs = queue.RunsToIntegrate;
-		IReadOnlyList<ComponentIntegration> plan = [];
-		string? planError = null;
-		var (structural, structuralStatus) = StructuralMerge.Resolve(monorepo);
-		if (runs.Count > 0)
-		{
-			try
-			{
-				plan = await IntegrationPlanner.PlanAsync(monorepo, runs, new IntegrationChoices { Structural = structural });
-			}
-			catch (IntegrationException ex)
-			{
-				planError = ex.Message;
-			}
-		}
 
 		body.Append("<h2 id=\"plan\">The next integration</h2>");
 		if (runs.Count == 0)
@@ -101,8 +89,36 @@ internal sealed partial class Dashboard
 			body.Append("</table>");
 		}
 
-		body.Append("<h2 id=\"attention\">Needs attention</h2>").Append(AttentionTable(state, plan));
+		body.Append("<h2 id=\"attention\">Needs attention</h2>").Append(AttentionTable(state, next));
 		return View("/queue", "Merge queue", body.ToString());
+	}
+
+	/// <summary>The triage of what the next integration would take: the runs still waiting or left for a human.</summary>
+	private sealed record NextIntegration(IReadOnlyList<RunMetadata> Runs, IReadOnlyList<ComponentIntegration> Plan, string? Error, string StructuralStatus)
+	{
+		/// <summary>Steps the merge policy would leave for a human that no recorded integration has left yet.</summary>
+		public IEnumerable<(string Component, IntegrationStep Step)> PlannedManual(MergeQueue queue) => Plan
+			.SelectMany(component => component.Steps.Where(step => step.Strategy == MergeStrategy.Manual).Select(step => (component.Name, step)))
+			.Where(pair => !queue.Attention.Any(item => item.Run.RunId == pair.step.RunId && item.Component == pair.Name));
+	}
+
+	private static async Task<NextIntegration> NextAsync(State state)
+	{
+		var runs = state.Queue.RunsToIntegrate;
+		var (structural, structuralStatus) = StructuralMerge.Resolve(state.Monorepo);
+		if (runs.Count == 0)
+		{
+			return new NextIntegration(runs, [], null, structuralStatus);
+		}
+
+		try
+		{
+			return new NextIntegration(runs, await IntegrationPlanner.PlanAsync(state.Monorepo, runs, new IntegrationChoices { Structural = structural }), null, structuralStatus);
+		}
+		catch (IntegrationException ex)
+		{
+			return new NextIntegration(runs, [], ex.Message, structuralStatus);
+		}
 	}
 
 	/// <summary>
@@ -138,7 +154,7 @@ internal sealed partial class Dashboard
 	/// Every merge that needs a human: the ones a recorded integration left (or failed on), and the ones the next
 	/// integration would leave, each with the commands that deal with it.
 	/// </summary>
-	private static string AttentionTable(State state, IReadOnlyList<ComponentIntegration> plan)
+	private static string AttentionTable(State state, NextIntegration next)
 	{
 		var rows = new List<string>();
 		foreach (var item in state.Queue.Attention)
@@ -154,17 +170,13 @@ internal sealed partial class Dashboard
 				""");
 		}
 
-		foreach (var component in plan)
+		foreach (var (component, step) in next.PlannedManual(state.Queue))
 		{
-			foreach (var step in component.Steps.Where(step => step.Strategy == MergeStrategy.Manual)
-				.Where(step => !state.Queue.Attention.Any(item => item.Run.RunId == step.RunId && item.Component == component.Name)))
-			{
-				rows.Add($"""
-					<tr class="attn-row planned"><td><b>{E(component.Name)}</b></td><td>{RunLink(step.RunId)}<div class="muted">{E(step.Rationale)}</div></td>
-					<td><span class="pill st-manual">will need a human</span><div>{E(step.Note ?? "")}</div>{(step.Conflicts.Count > 0 ? $"<div class=\"muted\">conflicts: {E(string.Join(", ", step.Conflicts))}</div>" : "")}</td>
-					<td>{Remedies(RunMetadata.Key(step.RunId), step.SourceTag, state.Monorepo.SourceRepoDir(component.Name))}</td></tr>
-					""");
-			}
+			rows.Add($"""
+				<tr class="attn-row planned"><td><b>{E(component)}</b></td><td>{RunLink(step.RunId)}<div class="muted">{E(step.Rationale)}</div></td>
+				<td><span class="pill st-manual">will need a human</span><div>{E(step.Note ?? "")}</div>{(step.Conflicts.Count > 0 ? $"<div class=\"muted\">conflicts: {E(string.Join(", ", step.Conflicts))}</div>" : "")}</td>
+				<td>{Remedies(RunMetadata.Key(step.RunId), step.SourceTag, state.Monorepo.SourceRepoDir(component))}</td></tr>
+				""");
 		}
 
 		return rows.Count == 0

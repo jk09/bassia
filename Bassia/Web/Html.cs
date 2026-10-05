@@ -225,7 +225,7 @@ internal static class Html
 		.st-syntactic { background:var(--git); } .st-structural { background:var(--weave); } .st-semantic { background:var(--resolver); }
 		.st-manual { background:var(--human); } .st-failed { background:#7b1e14; } .st-uptodate { background:var(--grey); } .st-skip { background:#c9ced8; color:var(--fg) !important; }
 		.pill { display:inline-block; padding:0 8px; border-radius:10px; color:#fff; font-size:11.5px; font-weight:600; }
-		svg.lanes .lane { stroke:#c9ced8; stroke-width:3; } svg.lanes .lane-name { font-weight:600; fill:var(--fg); }
+		svg.lanes .lane { stroke:#c9ced8; stroke-width:3; } svg.lanes .track { stroke:#e6e9ef; stroke-width:3; stroke-dasharray:2 6; } svg.lanes .lane-name { font-weight:600; fill:var(--fg); }
 		svg.lanes .base { fill:var(--head); } svg.lanes .base-label { fill:#fff; font-size:11px; text-anchor:middle; }
 		svg.lanes .qitem circle { stroke:#fff; stroke-width:2; } svg.lanes .qlabel { text-anchor:middle; font-size:10.5px; fill:var(--muted); font-family:ui-monospace, monospace; }
 		svg.lanes .st-syntactic circle { fill:var(--git); } svg.lanes .st-structural circle { fill:var(--weave); } svg.lanes .st-semantic circle { fill:var(--resolver); }
@@ -234,7 +234,7 @@ internal static class Html
 		svg.lanes .qitem { background:none; }
 		svg.ring .clash { stroke:var(--bad); stroke-width:2.5; stroke-dasharray:6 4; animation:march 1.2s linear infinite; }
 		svg.ring .rnode circle { fill:var(--live); stroke:#fff; stroke-width:2; } svg.ring .rnode.clashing circle { fill:var(--bad); }
-		svg.ring .rnode text { text-anchor:middle; font-size:11px; fill:var(--fg); font-family:ui-monospace, monospace; }
+		svg.ring .rnode text { font-size:11px; fill:var(--fg); font-family:ui-monospace, monospace; }
 
 		svg.tags .stripe { fill:#fff; } svg.tags .stripe.odd { fill:#f6f8fb; }
 		svg.tags .rowname { font-weight:600; fill:var(--fg); } svg.tags .colname { font-size:11px; fill:var(--muted); font-family:ui-monospace, monospace; }
@@ -273,7 +273,7 @@ internal static class Html
 
 		/* merge queue and config */
 		.qs { font-weight:600; } .qs.waiting { color:var(--warn); } .qs.integrated { color:var(--violet); } .qs.attention { color:var(--bad); } .qs.landed { color:var(--ok); }
-		.attn { border-left:3px solid var(--bad); background:var(--panel); padding:5px 9px; margin:5px 0; }
+		.attn { border-left:3px solid var(--bad); background:var(--panel); padding:5px 9px; margin:5px 0; } .attn.planned { border-left-style:dashed; }
 		tr.attn-row td:first-child { border-left:3px solid var(--bad); } tr.attn-row.planned td:first-child { border-left-style:dashed; }
 		table.meaning td { font-size:13px; }
 		.layer { display:inline-block; padding:0 7px; border-radius:9px; font-size:11px; margin-right:3px; border:1px solid var(--line); color:var(--muted); }

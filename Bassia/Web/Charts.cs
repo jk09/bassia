@@ -359,9 +359,12 @@ internal static class Charts
 			return "";
 		}
 
-		const int labelWidth = 150, baseWidth = 96, step = 116, rowHeight = 62, margin = 12;
-		var widest = lanes.Max(lane => lane.Items.Count);
-		var width = labelWidth + baseWidth + Math.Max(1, widest) * step + margin * 2;
+		const int labelWidth = 150, baseWidth = 96, rowHeight = 62, margin = 12, targetWidth = 1200;
+		var widest = Math.Max(1, lanes.Max(lane => lane.Items.Count));
+
+		// The longest lane spans the chart's full width: few results get room, many still get at least 116 units each.
+		var step = Math.Clamp((targetWidth - labelWidth - baseWidth - margin * 2) / widest, 116, 280);
+		var width = labelWidth + baseWidth + widest * step + margin * 2;
 		var height = lanes.Count * rowHeight + margin;
 		var svg = new StringBuilder($"<svg class=\"chart lanes\" viewBox=\"0 0 {width} {height}\" width=\"{width}\" role=\"img\" aria-label=\"Merge queue\">");
 		for (var i = 0; i < lanes.Count; i++)
@@ -370,6 +373,7 @@ internal static class Charts
 			var y = margin + i * rowHeight + 20;
 			svg.Append($"<a href=\"/components/{Url(component)}\"><text class=\"lane-name\" x=\"{margin}\" y=\"{y + 5}\">{E(Clip(component, 18))}</text></a>");
 			var lineEnd = labelWidth + baseWidth + Math.Max(0, items.Count - 1) * step + 20;
+			svg.Append($"<line class=\"track\" x1=\"{lineEnd}\" y1=\"{y}\" x2=\"{width - margin}\" y2=\"{y}\"/>");
 			svg.Append($"<line class=\"lane\" x1=\"{labelWidth}\" y1=\"{y}\" x2=\"{lineEnd}\" y2=\"{y}\"/>");
 			svg.Append($"<rect class=\"base\" x=\"{labelWidth}\" y=\"{y - 12}\" width=\"{baseWidth - 20}\" height=\"24\" rx=\"12\"/><text class=\"base-label\" x=\"{labelWidth + (baseWidth - 20) / 2}\" y=\"{y + 4}\">{E(Clip(baseRef, 10))}</text>");
 			for (var j = 0; j < items.Count; j++)
@@ -393,15 +397,16 @@ internal static class Charts
 			return "";
 		}
 
-		const double size = 320, radius = 112, center = size / 2;
+		// Labels sit outside the ring, pointing away from its centre, so neighbours never overlap.
+		const double width = 560, height = 330, radius = 110, cx = width / 2, cy = height / 2;
 		var position = new Dictionary<string, (double X, double Y)>(StringComparer.Ordinal);
 		for (var i = 0; i < runs.Count; i++)
 		{
 			var angle = -Math.PI / 2 + 2 * Math.PI * i / runs.Count;
-			position[runs[i].RunId] = runs.Count == 1 ? (center, center) : (center + radius * Math.Cos(angle), center + radius * Math.Sin(angle));
+			position[runs[i].RunId] = runs.Count == 1 ? (cx, cy) : (cx + radius * Math.Cos(angle), cy + radius * Math.Sin(angle));
 		}
 
-		var svg = new StringBuilder($"<svg class=\"chart ring\" viewBox=\"0 0 {size} {size}\" width=\"{size}\" role=\"img\" aria-label=\"Conflicts between queued runs\">");
+		var svg = new StringBuilder($"<svg class=\"chart ring\" viewBox=\"0 0 {width} {height}\" width=\"{width}\" role=\"img\" aria-label=\"Conflicts between queued runs\">");
 		foreach (var (a, b, where) in conflicts)
 		{
 			if (position.TryGetValue(a, out var p) && position.TryGetValue(b, out var q))
@@ -414,8 +419,11 @@ internal static class Charts
 		foreach (var (runId, label) in runs)
 		{
 			var (x, y) = position[runId];
+			var (dx, dy) = runs.Count == 1 ? (0.0, 1.0) : ((x - cx) / radius, (y - cy) / radius);
+			var anchor = dx > 0.3 ? "start" : dx < -0.3 ? "end" : "middle";
+			var (tx, ty) = (x + dx * 20, y + dy * 22 + 4);
 			svg.Append($"<a href=\"/runs/{Url(runId)}\"><g class=\"rnode{(clashing.Contains(runId) ? " clashing" : "")}\"><circle cx=\"{N(x)}\" cy=\"{N(y)}\" r=\"13\"/>" +
-				$"<text x=\"{N(x)}\" y=\"{N(y + 30)}\">{E(Clip(label, 18))}</text></g></a>");
+				$"<text x=\"{N(tx)}\" y=\"{N(ty)}\" text-anchor=\"{anchor}\">{E(Clip(label, 18))}</text></g></a>");
 		}
 
 		return $"<div class=\"chart-box\">{svg}</svg></div>";
