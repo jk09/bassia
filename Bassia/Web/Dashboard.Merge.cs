@@ -285,12 +285,32 @@ internal sealed partial class Dashboard
 
 		var rows = string.Concat(records.Select(record => $"""
 			<tr><td>{IntegrationLink(record.IntegrationId)}</td><td>{Status(record.Status)}</td><td>{Time(record.Created)}</td>
-			<td>{string.Join(" ", record.Runs.Select(RunLink))}</td>
-			<td class="stackcell">{Charts.Stack(StrategySegments(record.AllSteps))}</td>
-			<td>{string.Concat(record.Components.Where(component => component.ResultTag is not null).Select(component => $"{E(component.Name)} {Ref(component.ResultTag!)}{(component.Advanced ? "<span class=\"muted\">→ " + E(component.BaseRef) + "</span> " : "")}"))}</td></tr>
+			<td>{RunList(record.Runs)}</td>
+			<td class="stackcell">{Charts.Stack(StrategySegments(record.AllSteps), legend: true)}</td>
+			<td>{ResultTagsOf(record)}</td></tr>
 			"""));
 		return $"<table class=\"list\"><tr><th>Integration</th><th>Status</th><th>Created</th><th>Runs</th><th>How merged</th><th>Results</th></tr>{rows}</table>";
 	}
+
+	/// <summary>A few runs as links; many as a count that opens to the full list (works without JavaScript).</summary>
+	private static string RunList(IReadOnlyList<string> runs) =>
+		runs.Count <= 3
+			? string.Join("<br>", runs.Select(RunLink))
+			: $"<details class=\"runs\"><summary>{runs.Count} runs</summary>{string.Join("<br>", runs.Select(RunLink))}</details>";
+
+	/// <summary>
+	/// What an integration made: its result tag (one name in every component it changed) with those components, and
+	/// which base branches were advanced to it.
+	/// </summary>
+	private static string ResultTagsOf(IntegrationRecord record) => string.Concat(record.Components
+		.Where(component => component.ResultTag is not null)
+		.GroupBy(component => component.ResultTag!, StringComparer.Ordinal)
+		.Select(group =>
+		{
+			var advanced = group.Where(component => component.Advanced).Select(component => $"{component.Name}:{component.BaseRef}").ToList();
+			return $"<div class=\"result\">{Ref(group.Key)}<div class=\"muted\">in {E(string.Join(", ", group.Select(component => component.Name)))}</div>" +
+				(advanced.Count == 0 ? "" : $"<div class=\"advanced\">→ advanced {E(string.Join(", ", advanced))}</div>") + "</div>";
+		}));
 
 	private async Task<IResult> PlanAsync(HttpRequest request)
 	{
@@ -348,7 +368,7 @@ internal sealed partial class Dashboard
 			<tr><td>Finished</td><td>{Time(record.Finished)}</td></tr>
 			<tr><td>Workspace</td><td><code>{E(record.WorkspacePath)}</code></td></tr>
 			</table></section><section>
-			<h3>How merged</h3>{Charts.Stack(StrategySegments(record.AllSteps))}
+			<h3>How merged</h3>{Charts.Stack(StrategySegments(record.AllSteps), legend: true)}
 			<p>{Cmd($"bassia integration show {key}")}</p>
 			{(record.Components.Any(component => component.ResultStatus == ResultStatus.Pushed && !component.Advanced) ? $"<p>{Cmd($"bassia integration advance {key}")}</p>" : "")}
 			</section></div>

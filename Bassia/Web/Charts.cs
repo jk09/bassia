@@ -339,7 +339,11 @@ internal static class Charts
 	}
 
 	/// <summary>A horizontal bar split by counts, e.g. how the steps of an integration are merged.</summary>
-	public static string Stack(IReadOnlyList<Segment> segments)
+	/// <remarks>
+	/// A segment of at least a quarter of the bar carries its label; a narrower one only its count, which always
+	/// fits. With <paramref name="legend"/> every segment is named with its count under the bar.
+	/// </remarks>
+	public static string Stack(IReadOnlyList<Segment> segments, bool legend = false)
 	{
 		var shown = segments.Where(segment => segment.Count > 0).ToList();
 		if (shown.Count == 0)
@@ -347,8 +351,11 @@ internal static class Charts
 			return "<div class=\"stack empty\"><span>nothing</span></div>";
 		}
 
-		return "<div class=\"stack\">" + string.Concat(shown.Select(segment =>
-			$"<span class=\"{E(segment.Class)}\" style=\"flex:{segment.Count}\" title=\"{E(segment.Label)}: {segment.Count}\">{segment.Count} {E(segment.Label)}</span>")) + "</div>";
+		var total = shown.Sum(segment => segment.Count);
+		var bar = "<div class=\"stack\">" + string.Concat(shown.Select(segment =>
+			$"<span class=\"{E(segment.Class)}\" style=\"flex:{segment.Count}\" title=\"{E(segment.Label)}: {segment.Count}\">" +
+			$"{segment.Count}{(segment.Count * 4 >= total ? " " + E(segment.Label) : "")}</span>")) + "</div>";
+		return legend ? bar + Legend(shown.Select(segment => (segment.Class, $"{segment.Count} {segment.Label}")).ToArray()) : bar;
 	}
 
 	public static string Legend(params (string Class, string Label)[] items) =>

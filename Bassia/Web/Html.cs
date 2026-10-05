@@ -136,7 +136,9 @@ internal static class Html
 		table.list td { border-bottom:1px solid #eceff4; padding:5px 8px; vertical-align:top; }
 		table.list tr:hover td { background:#f5f7fb; }
 		table.facts td:first-child { color:var(--muted); padding-right:16px; white-space:nowrap; }
-		td.stackcell { width:55%; }
+		td.stackcell { width:45%; } td.stackcell .legend { margin-top:3px; }
+		details.runs summary { cursor:pointer; color:var(--accent); white-space:nowrap; } details.runs[open] summary { margin-bottom:3px; }
+		td .result + .result { margin-top:6px; } td .result .advanced { color:var(--ok); font-size:12.5px; }
 		.id, code, pre, .hash { font-family:ui-monospace, "Cascadia Mono", monospace; font-size:12.5px; }
 		code.cmd { background:#11161f; color:#d9e1ee; padding:2px 7px; border-radius:4px; cursor:copy; white-space:pre-wrap; overflow-wrap:anywhere; display:inline-block; margin:1px 0; max-width:100%; }
 		code.cmd::before { content:"$ "; color:#7d8799; }
@@ -150,7 +152,7 @@ internal static class Html
 		.status.needs_attention { color:var(--human); }
 		.ref { display:inline-block; font:11.5px ui-monospace, monospace; padding:0 5px; margin:0 3px 2px 0; border-radius:3px;
 		       background:#eef1f6; border:1px solid var(--line); color:var(--fg); text-decoration:none; }
-		td .ref { white-space:nowrap; }
+		td .ref, td a.id { white-space:nowrap; }
 		.ref.agent { background:#e9f3ff; border-color:#b9d4f5; } .ref.integration { background:#f3ecff; border-color:#d6c3f7; }
 		.chip { display:inline-block; padding:0 6px; border-radius:3px; background:var(--soft); margin:0 4px 2px 0; text-decoration:none; color:var(--fg); }
 		.cards { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 16px; }
