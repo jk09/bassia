@@ -264,9 +264,14 @@ internal static class Charts
 		{
 			var bar = bars[i];
 			var y = top + i * rowHeight;
+			// A run of a few seconds still gets a bar you can see and hover; one that would run past the plot ends at its edge.
+			var x2 = Math.Max(X(bar.Start) + MinBarWidth, X(bar.End ?? now));
 			var x1 = X(bar.Start);
-			var x2 = Math.Max(x1 + 4, X(bar.End ?? now));
-			svg.Append($"<a href=\"/runs/{Url(bar.RunId)}\" class=\"row\"><title>{E(bar.Label)} · {E(bar.Status)} · {E(bar.Detail)}</title>");
+			if (x2 > labelWidth + plotWidth)
+			{
+				(x1, x2) = (Math.Min(x1, labelWidth + plotWidth - MinBarWidth), labelWidth + plotWidth);
+			}
+			svg.Append($"<a href=\"/runs/{Url(bar.RunId)}\" class=\"row\"><title>{E(bar.Label)} · {E(bar.Status)} · {E(Duration((bar.End ?? now) - bar.Start))} · {E(bar.Detail)}</title>");
 			svg.Append($"<rect class=\"rowbg\" x=\"0\" y=\"{y}\" width=\"{width}\" height=\"{rowHeight}\"/>");
 			svg.Append($"<circle class=\"dot s-{E(bar.Status)}{(bar.Live ? " live" : "")}\" cx=\"10\" cy=\"{y + rowHeight / 2}\" r=\"5\"/>");
 			svg.Append($"<text class=\"label\" x=\"22\" y=\"{y + 16}\">{E(Clip(bar.Label, 24))}</text>");
@@ -278,6 +283,12 @@ internal static class Charts
 		svg.Append("</svg>");
 		return $"<div class=\"chart-box\">{svg}</div>";
 	}
+
+	/// <summary>The narrowest bar the run chart draws, in chart units (the plot is 760 wide).</summary>
+	internal const int MinBarWidth = 18;
+
+	private static string Duration(TimeSpan span) =>
+		span.TotalHours >= 1 ? $"{(int)span.TotalHours}h {span.Minutes:00}m" : span.TotalMinutes >= 1 ? $"{(int)span.TotalMinutes}m {span.Seconds:00}s" : $"{Math.Max(0, (int)span.TotalSeconds)}s";
 
 	private static string TickLabel(DateTimeOffset time, double span) =>
 		time.ToUniversalTime().ToString(span > 2 * 86400 ? "MM-dd HH:mm" : span > 600 ? "HH:mm" : "HH:mm:ss", CultureInfo.InvariantCulture);
