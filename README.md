@@ -191,3 +191,7 @@ bassia -C R:\acme web
   [unwinding submodules](docs/reference.md#unwinding-submodules).
 - [Building and testing Bassia](docs/reference.md#build).
 - [`feat/`](feat/README.md): the feature records that drive Bassia's development, written before the code.
+
+## License
+
+Bassia is released under the [MIT License](LICENSE).
