@@ -190,6 +190,22 @@ public class DashboardTests
 	}
 
 	[Fact]
+	public void ComponentRefs_PutTheDefaultBranchAndBaselinesBeforeWhatBassiaMade()
+	{
+		GitRef Branch(string name) => new(name, GitRefKind.Branch, "c", "");
+		GitRef Tag(string name) => new(name, GitRefKind.AnnotatedTag, "c", "");
+		var refs = new[]
+		{
+			Branch("agent-run/fox-aaaaaa"), Branch("integration/owl-bbbbbb"), Branch("main"), Branch("feature"),
+			Tag("agent-run/fox-aaaaaa/0"), Tag("integration/owl-bbbbbb/0"), Tag("v1.0")
+		};
+
+		var ordered = Dashboard.OrderRefs(refs, "main").Select(reference => reference.Name);
+
+		Assert.Equal(["main", "feature", "v1.0", "integration/owl-bbbbbb/0", "agent-run/fox-aaaaaa/0", "integration/owl-bbbbbb", "agent-run/fox-aaaaaa"], ordered);
+	}
+
+	[Fact]
 	public void RunTimeline_GivesAShortRunAVisibleBarThatStaysInsideThePlot()
 	{
 		var now = DateTimeOffset.UtcNow;

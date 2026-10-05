@@ -129,6 +129,8 @@ internal static class Html
 		a { color:var(--accent); }
 		section { min-width:0; }
 		.split { display:flex; flex-wrap:wrap; gap:18px; align-items:flex-start; } .split > section { flex:1 1 260px; } .split > section.wide { flex:3 1 520px; }
+		.split > section.fit { flex:0 1 auto; }
+		tr.machine td { color:var(--muted); } tr.machine .ref { opacity:.75; }
 		table.list { border-collapse:collapse; width:100%; margin:6px 0 14px; background:var(--panel); }
 		table.list th { text-align:left; font-weight:600; background:#eef1f6; border-bottom:1px solid var(--line); padding:5px 8px; }
 		table.list td { border-bottom:1px solid #eceff4; padding:5px 8px; vertical-align:top; }
@@ -148,6 +150,7 @@ internal static class Html
 		.status.needs_attention { color:var(--human); }
 		.ref { display:inline-block; font:11.5px ui-monospace, monospace; padding:0 5px; margin:0 3px 2px 0; border-radius:3px;
 		       background:#eef1f6; border:1px solid var(--line); color:var(--fg); text-decoration:none; }
+		td .ref { white-space:nowrap; }
 		.ref.agent { background:#e9f3ff; border-color:#b9d4f5; } .ref.integration { background:#f3ecff; border-color:#d6c3f7; }
 		.chip { display:inline-block; padding:0 6px; border-radius:3px; background:var(--soft); margin:0 4px 2px 0; text-decoration:none; color:var(--fg); }
 		.cards { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 16px; }
@@ -166,7 +169,7 @@ internal static class Html
 		.filters a.filter.active { background:var(--head); color:#fff; border-color:var(--head); }
 
 		/* charts */
-		.chart-box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; overflow:auto; margin:6px 0 10px; }
+		.chart-box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; overflow:auto; margin:6px 0 10px; width:fit-content; max-width:100%; }
 		svg.chart { max-width:100%; height:auto; font-family:system-ui, sans-serif; font-size:12px; display:block; }
 		svg .edge { fill:none; stroke:#8792a6; stroke-width:1.6; transition:stroke .15s, opacity .15s; }
 		svg .arrowhead { fill:#8792a6; }

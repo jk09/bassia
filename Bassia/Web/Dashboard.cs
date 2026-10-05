@@ -175,7 +175,7 @@ internal sealed partial class Dashboard
 
 		body.Append("<div data-live-src=\"/fragment/live\">").Append(LiveCards(state.Live)).Append("</div>");
 
-		body.Append("<div class=\"split\"><section class=\"wide\"><h2>Components and what they need</h2>")
+		body.Append("<div class=\"split\"><section class=\"fit\"><h2>Components and what they need</h2>")
 			.Append(Charts.ComponentMap(state.Monorepo.Components, activity))
 			.Append("</section><section><h2>Runs by status</h2>")
 			.Append(Charts.Donut(StatusSegments(state.Runs), "agentic runs"))
@@ -211,21 +211,21 @@ internal sealed partial class Dashboard
 		{
 			var info = activity[component.Name];
 			rows.Append($"""
-				<tr><td><a href="{ComponentHref(component.Name)}"><b>{E(component.Name)}</b></a></td>
+				<tr><td><a href="{ComponentHref(component.Name)}" title="{E(component.Url)}"><b>{E(component.Name)}</b></a></td>
 				<td>{References(component.References.Select(reference => reference.Name))}</td>
 				<td>{References(graph.ReferrersOf(component.Name).Select(reference => reference.Name))}</td>
 				<td>{(info.LatestTag is null ? "<span class=\"muted\">-</span>" : Ref(info.LatestTag))}</td>
-				<td>{info.Runs}</td><td>{info.Live}</td><td>{info.Queued}</td><td>{(info.Attention > 0 ? $"<b class=\"bad\">{info.Attention}</b>" : "0")}</td>
-				<td class="muted">{E(component.Url)}</td></tr>
+				<td>{info.Runs}</td><td>{info.Live}</td><td>{info.Queued}</td><td>{(info.Attention > 0 ? $"<b class=\"bad\">{info.Attention}</b>" : "0")}</td></tr>
 				""");
 		}
 
 		var body = $"""
 			<p class="muted">Each box is a component; an arrow points at what it needs. Hover one to light up everything it needs and everything that needs it. <a href="/graph.svg">graph.svg</a> is the plain picture.</p>
-			{Charts.ComponentMap(state.Monorepo.Components, activity)}
-			<table class="list"><tr><th>Component</th><th>Needs</th><th>Used by</th><th>Latest tag</th><th>Runs</th><th>Live</th><th>Queued</th><th>Attention</th><th>URL</th></tr>
+			<div class="split"><section class="fit">{Charts.ComponentMap(state.Monorepo.Components, activity)}</section><section class="wide">
+			<table class="list"><tr><th>Component</th><th>Needs</th><th>Used by</th><th>Latest tag</th><th>Runs</th><th>Live</th><th>Queued</th><th>Attention</th></tr>
 			{rows}</table>
 			<p>{Cmd("bassia component add -url <url> -references <component,...>")} {Cmd("bassia graph -format tree")}</p>
+			</section></div>
 			""";
 		return View("/components", "Components", body);
 	}
@@ -300,7 +300,8 @@ internal sealed partial class Dashboard
 		else
 		{
 			body.Append("<h2>Branches and tags</h2><table class=\"list\"><tr><th>Kind</th><th>Name</th><th>Commit</th><th>Subject</th></tr>");
-			foreach (var reference in refs)
+			var defaultBranch = await DefaultBranchAsync(state.Monorepo, name);
+			foreach (var reference in OrderRefs(refs, defaultBranch))
 			{
 				var kind = reference.Kind switch
 				{
@@ -309,7 +310,8 @@ internal sealed partial class Dashboard
 					_ => "<span class=\"muted\">lightweight tag</span>"
 				};
 				var label = reference.IsTag ? $"<a class=\"ref\" href=\"/tag?name={Url(reference.Name)}\">{E(reference.Name)}</a>" : Ref(reference.Name);
-				body.Append($"<tr><td>{kind}</td><td>{label}</td><td><a class=\"hash\" href=\"/commit/{Url(name)}/{Url(reference.Commit)}\">{E(Short(reference.Commit))}</a></td><td>{E(reference.Subject)}</td></tr>");
+				var machine = RefRank(reference, defaultBranch) >= 3;
+				body.Append($"<tr{(machine ? " class=\"machine\"" : "")}><td>{kind}{(reference.Name == defaultBranch ? " <span class=\"muted\">(default)</span>" : "")}</td><td>{label}</td><td><a class=\"hash\" href=\"/commit/{Url(name)}/{Url(reference.Commit)}\">{E(Short(reference.Commit))}</a></td><td>{E(reference.Subject)}</td></tr>");
 			}
 
 			body.Append("</table>");
@@ -326,6 +328,29 @@ internal sealed partial class Dashboard
 
 		body.Append("</table>");
 		return View("/components", $"Component {name}", body.ToString());
+	}
+
+	/// <summary>
+	/// The order a component's refs are listed in: what a person picks from first - the default branch, other branches,
+	/// baselines - then what Bassia made: integration tags, run result tags, and the integration and run branches.
+	/// </summary>
+	internal static IEnumerable<GitRef> OrderRefs(IEnumerable<GitRef> refs, string? defaultBranch) =>
+		refs.OrderBy(reference => RefRank(reference, defaultBranch)).ThenBy(reference => reference.Name, StringComparer.Ordinal);
+
+	private static int RefRank(GitRef reference, string? defaultBranch)
+	{
+		var made = reference.Name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal) ? 2
+			: reference.Name.StartsWith(IntegrationRecord.RefPrefix, StringComparison.Ordinal) ? 1
+			: 0;
+		return reference.Kind == GitRefKind.Branch
+			? reference.Name == defaultBranch ? 0 : made == 0 ? 1 : 4 + made
+			: made == 0 ? 2 : 2 + made;
+	}
+
+	private static async Task<string?> DefaultBranchAsync(Monorepo monorepo, string component)
+	{
+		var head = await GitClient.In(monorepo.SourceRepoDir(component)).RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+		return head.ExitCode == 0 ? head.Output.Trim() : null;
 	}
 
 	internal static string PolicyText(MergePolicy policy) =>
