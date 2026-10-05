@@ -546,7 +546,11 @@ without JavaScript; the script animates and refreshes the live parts.
   runs, results and result tags, lists its steps (triage, structural verdict, strategy, conflicts, outcome) and opens
   each semantic brief. **Preview triage** shows how chosen runs would integrate, like `integration plan`.
 - **Timeline**: one chronological list of commits across the components you choose and the components they depend
-  on (never the whole monorepo at once), paged; every commit opens with its message and diffstat.
+  on (never the whole monorepo at once), paged. Without a choice it offers each component with what it needs as a
+  one-click start; ticking a component reloads at once. Each component has a colour and a lane, and each commit is a
+  dot in its component's lane: hollow for a plain commit, filled for a run's result, ringed for an integration's
+  merge. A "Made by" column names the run or integration behind a commit. A run's branch is not repeated next to
+  its tag. Every commit opens with its message and diffstat.
 - **Config**: every setting with its effective value and which layer it comes from (default, monorepo, user), and
   the merge policy each component ends up with.
 
