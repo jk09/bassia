@@ -185,7 +185,7 @@ public class IntegrateCommandTests
 		var (exitCode, output, error) = await fixture.BassiaAsync("integration", "plan", "-runs", "all");
 
 		Assert.True(exitCode == 0, error);
-		Assert.Contains("2 step(s) for git, 0 for the structural merge, 1 for the resolver, 0 skipped. Structural merge: off. Nothing was changed.", output);
+		Assert.Contains("2 step(s) for git, 0 for the structural merge, 1 for the resolver, 0 for a human, 0 skipped. Structural merge: off. Nothing was changed.", output);
 		// Git's steps come first, in run order; the run that collides with the first moves behind them.
 		var order = new[] { first, third, second }.Select(run => output.IndexOf($"run_id = \"{run}\"", StringComparison.Ordinal)).ToList();
 		Assert.All(order, index => Assert.True(index > 0));
@@ -195,6 +195,50 @@ public class IntegrateCommandTests
 		Assert.Contains("triage = \"fast_forward\"", output);
 		Assert.Equal(refsBefore, await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "for-each-ref"));
 		Assert.Empty(await Store(fixture).ListLatestAsync());
+	}
+
+	[Fact]
+	public async Task Integrate_ManualSemanticPolicy_LeavesTheConflictForAHumanAndAutoAdvanceMovesTheBase()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		var first = await fixture.RunWritingAsync("example", "same.txt", "from-first");
+		var second = await fixture.RunWritingAsync("example", "same.txt", "from-second");
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "merge.component.example.semantic", "-value", "manual")).ExitCode);
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "merge.advance", "-value", "auto", "-user")).ExitCode);
+
+		var (planCode, plan, planError) = await fixture.BassiaAsync("integration", "plan", "-runs", "all");
+		Assert.True(planCode == 0, planError);
+		Assert.Contains("1 step(s) for git, 0 for the structural merge, 0 for the resolver, 1 for a human", plan);
+
+		var (exitCode, output, error) = await fixture.IntegrationStartAsync("-runs", "all", "-resolve", TestEnvironment.FailingCommand);
+
+		Assert.True(exitCode == 0, error + output);
+		var record = await SingleIntegrationAsync(fixture);
+		Assert.Equal(IntegrationRunner.NeedsAttentionStatus, record.Status);
+		var steps = Assert.Single(record.Components).Steps;
+		Assert.Equal([first, second], steps.Select(step => step.RunId));
+		Assert.Equal([StepOutcome.Merged, StepOutcome.NeedsAttention], steps.Select(step => step.Outcome));
+		Assert.Contains("merge.semantic = manual", steps[1].Note);
+		Assert.True(record.Components[0].Advanced);
+		Assert.Equal(record.Components[0].ResultCommit, (await TestEnvironment.GitAsync(fixture.SourceRepo("example"), "rev-parse", "main")).Trim());
+	}
+
+	[Fact]
+	public async Task Plan_ManualPathsAndTheManualSwitch_LeaveResultsForAHuman()
+	{
+		await using var fixture = await MonorepoFixture.CreateAsync();
+		await fixture.AddComponentAsync("example");
+		await fixture.RunWritingAsync("example", "db.sql", "from-first");
+		await fixture.RunWritingAsync("example", "db.sql", "from-second");
+		var third = await fixture.RunWritingAsync("example", "other.txt", "other");
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "merge.manual_paths", "-value", "**/*.sql")).ExitCode);
+
+		var (exitCode, output, error) = await fixture.BassiaAsync("integration", "plan", "-runs", "all", "-manual", RunMetadata.Key(third));
+
+		Assert.True(exitCode == 0, error);
+		Assert.Contains("1 step(s) for git, 0 for the structural merge, 0 for the resolver, 2 for a human", output);
+		Assert.Contains("match merge.manual_paths", output);
 	}
 
 	[Fact]

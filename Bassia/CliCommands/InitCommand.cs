@@ -27,6 +27,18 @@ internal static class InitCommand
 		"# (https://github.com/Ataraxy-Labs/weave). Used when installed; 'off' disables it.\n" +
 		"weave = \"" + Monorepo.DefaultStructuralDriver + "\"\n" +
 		"\n" +
+		"[merge]\n" +
+		"# How 'bassia integration' merges results git and weave cannot merge cleanly. Override one component in a\n" +
+		"# [merge.component.<name>] table, or for yourself only in config.user.toml ('bassia config set -user').\n" +
+		"# semantic: resolver (the resolver merges it) | manual (left for a human).\n" +
+		"semantic = \"resolver\"\n" +
+		"# warnings: a merge weave completed with warnings - resolver (reviewed by it) | manual | accept (weave's merge stands).\n" +
+		"warnings = \"resolver\"\n" +
+		"# manual_paths: path patterns whose conflicts always need a human, e.g. [\"**/*.csproj\", \"db/migrations\"].\n" +
+		"manual_paths = []\n" +
+		"# advance: manual (wait for 'bassia integration advance') | auto (a completed integration fast-forwards the base branches).\n" +
+		"advance = \"manual\"\n" +
+		"\n" +
 		"[llm]\n" +
 		"# LLM behind 'bassia prompt <ask>': 'claude' (Claude Code, run as the command below with its tools off) or 'command' (the\n" +
 		"# command below as it is, reading the prompt on stdin, with {model} replaced by -model). Skills live in skills/<name>/SKILL.md.\n" +
@@ -68,6 +80,7 @@ internal static class InitCommand
 
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "config.toml"), DefaultConfigToml);
 		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, "components.toml"), DefaultComponentsToml);
+		await File.WriteAllTextAsync(Path.Combine(metaRepoDir, ".gitignore"), $"# Each user's own settings (bassia config set -user); never committed.\n/{ConfigFile.UserFileName}\n");
 
 		var commitResult = await GitClient.In(metaRepoDir).CommitAllAsync("Initialize Bassia meta-repo");
 		if (commitResult.ExitCode != 0)

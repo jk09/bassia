@@ -42,9 +42,10 @@ internal enum StructuralTriage
 
 /// <summary>
 /// How a step is merged: by git alone, by git with the structural merge driver (weave), by the resolver (an LLM) with
-/// the semantic brief, or not at all.
+/// the semantic brief, by a human (the merge policy, <see cref="MergePolicy"/>, leaves it for manual attention), or
+/// not at all.
 /// </summary>
-internal enum MergeStrategy { Syntactic, Structural, Semantic, Skip }
+internal enum MergeStrategy { Syntactic, Structural, Semantic, Skip, Manual }
 
 internal enum StepOutcome
 {
@@ -60,7 +61,10 @@ internal enum StepOutcome
 	Resolved,
 
 	Skipped,
-	Failed
+	Failed,
+
+	/// <summary>Left unmerged for a human, as the merge policy says (<c>merge.*</c>) or <c>-manual</c> asked.</summary>
+	NeedsAttention
 }
 
 /// <summary>One run's result in one component, and what the integration did (or will do) with it.</summary>
@@ -107,6 +111,9 @@ internal sealed class IntegrationStep
 
 	public bool IsSemantic => Strategy == MergeStrategy.Semantic;
 
+	/// <summary>Needs a human: planned for one, or left for one by the integration.</summary>
+	public bool NeedsAttention => Strategy == MergeStrategy.Manual || Outcome is StepOutcome.NeedsAttention or StepOutcome.Failed;
+
 	/// <summary>Merged deterministically, without the resolver: by git alone or with the structural merge driver.</summary>
 	public bool IsDeterministic => Strategy is MergeStrategy.Syntactic or MergeStrategy.Structural;
 }
@@ -120,7 +127,7 @@ internal sealed class ComponentIntegration
 	public required string BaseRef { get; set; }
 	public required string BaseCommit { get; set; }
 
-	/// <summary>The steps in execution order: every syntactic and structural step before every semantic one, skipped steps last.</summary>
+	/// <summary>The steps in execution order: every syntactic and structural step before every semantic one, then the manual ones, skipped steps last.</summary>
 	public List<IntegrationStep> Steps { get; } = [];
 
 	public string? Branch { get; set; }

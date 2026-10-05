@@ -32,6 +32,9 @@ internal sealed record IntegrationOutcome(bool Ok, string Message, IntegrationRe
 /// </summary>
 internal static class IntegrationRunner
 {
+	/// <summary>The status of an integration that merged everything except the steps its merge policy left for a human.</summary>
+	public const string NeedsAttentionStatus = "needs_attention";
+
 	public static async Task<IntegrationOutcome> RunAsync(
 		GitClient git,
 		Monorepo monorepo,
@@ -86,11 +89,24 @@ internal static class IntegrationRunner
 		record.Finished = RunMetadata.Timestamp();
 		var failed = record.AllSteps.Any(step => step.Outcome == StepOutcome.Failed)
 			|| record.Components.Any(component => component.ResultStatus is ResultStatus.Failed);
-		record.Status = session.Cancelled ? "cancelled" : failed ? "partial" : "completed";
+		var attention = record.AllSteps.Any(step => step.Outcome == StepOutcome.NeedsAttention);
+		record.Status = session.Cancelled ? "cancelled" : failed ? "partial" : attention ? NeedsAttentionStatus : "completed";
 		tags.Add(await store.CommitAsync(record));
 		session.Report($"{id}: {record.Status}.");
 
-		return new IntegrationOutcome(record.Status == "completed", Summary(record), record, tags);
+		// merge.advance = auto: the components whose policy says so move their base branches at once.
+		var message = Summary(record);
+		var ok = record.Status is "completed" or NeedsAttentionStatus;
+		if (ok && record.Components.Any(component => monorepo.MergePolicyFor(component.Name).AutoAdvance && component.ResultStatus == ResultStatus.Pushed))
+		{
+			var advanced = await AdvanceAsync(git, monorepo, record, component => monorepo.MergePolicyFor(component.Name).AutoAdvance);
+			tags.AddRange(advanced.RecordTags);
+			message += $" merge.advance = auto: {advanced.Message}";
+			ok = advanced.Ok;
+			session.Report(advanced.Message);
+		}
+
+		return new IntegrationOutcome(ok, message, record, tags);
 	}
 
 	internal static string Summary(IntegrationRecord record)
@@ -100,6 +116,7 @@ internal static class IntegrationRunner
 		var structured = steps.Count(step => step.Outcome == StepOutcome.Merged && step.Strategy == MergeStrategy.Structural);
 		var resolved = steps.Count(step => step.Outcome == StepOutcome.Resolved);
 		var failed = steps.Count(step => step.Outcome == StepOutcome.Failed);
+		var manual = steps.Count(step => step.Outcome == StepOutcome.NeedsAttention);
 		var tagged = record.Components.Where(component => component.ResultTag is not null && component.ResultStatus == ResultStatus.Pushed).ToList();
 		var where = tagged.Count == 0
 			? "no component changed"
@@ -108,6 +125,8 @@ internal static class IntegrationRunner
 		return record.Status switch
 		{
 			"completed" => $"Integration '{record.IntegrationId}' completed: {merged} result(s) merged by git, {Structured()}{resolved} resolved semantically; {where}.",
+			NeedsAttentionStatus => $"Integration '{record.IntegrationId}' merged {merged} result(s) by git, {Structured()}{resolved} semantically, and left {manual} for a human " +
+				$"as the merge policy says; {where}. 'bassia integration show {IntegrationRecord.Key(record.IntegrationId)}' lists them.",
 			"cancelled" => $"Integration '{record.IntegrationId}' was cancelled; {where}. The workspace '{record.WorkspacePath}' is kept for inspection.",
 			_ => $"Integration '{record.IntegrationId}' finished with failures: {merged} merged, {Structured()}{resolved} resolved, {failed} failed; {where}. " +
 				$"The workspace '{record.WorkspacePath}' and the briefs in it are kept for inspection."
@@ -121,7 +140,7 @@ internal static class IntegrationRunner
 	/// Fast-forwards every integrated component's base branch to the integration result, but only if the branch has
 	/// not moved since the integration started (a compare-and-swap on the ref). A base given as a tag is never moved.
 	/// </summary>
-	public static async Task<IntegrationOutcome> AdvanceAsync(GitClient git, Monorepo monorepo, IntegrationRecord record)
+	public static async Task<IntegrationOutcome> AdvanceAsync(GitClient git, Monorepo monorepo, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null)
 	{
 		if (record.Status is "started" or "cancelled")
 		{
@@ -130,7 +149,7 @@ internal static class IntegrationRunner
 
 		var errors = new List<string>();
 		var advanced = new List<string>();
-		foreach (var component in record.Components.Where(component => component.ResultStatus == ResultStatus.Pushed && component.ResultCommit is not null))
+		foreach (var component in record.Components.Where(component => component.ResultStatus == ResultStatus.Pushed && component.ResultCommit is not null && (which?.Invoke(component) ?? true)))
 		{
 			if (component.Advanced)
 			{
@@ -191,10 +210,10 @@ internal static class IntegrationRunner
 
 		public async Task IntegrateAsync(ComponentIntegration component)
 		{
-			if (component.Steps.All(step => step.Strategy == MergeStrategy.Skip))
+			if (component.Steps.All(step => step.Strategy is MergeStrategy.Skip or MergeStrategy.Manual))
 			{
 				Settle(component);
-				Report($"'{component.Name}': every result is skipped; nothing to integrate.", component.Name);
+				Report($"'{component.Name}': every result is skipped or left for a human; nothing to integrate.", component.Name);
 				return;
 			}
 
@@ -267,7 +286,10 @@ internal static class IntegrationRunner
 			}
 		}
 
-		/// <summary>Skipped steps are recorded as such; the only pending steps left are the ones a cancellation cut off.</summary>
+		/// <summary>
+		/// Skipped steps are recorded as such, manual ones as needing attention; the only pending steps left are the ones
+		/// a cancellation cut off.
+		/// </summary>
 		private static void Settle(ComponentIntegration component)
 		{
 			foreach (var step in component.Steps.Where(step => step.Strategy == MergeStrategy.Skip))
@@ -275,7 +297,12 @@ internal static class IntegrationRunner
 				step.Outcome = StepOutcome.Skipped;
 			}
 
-			if (component.Steps.All(step => step.Outcome is StepOutcome.Skipped))
+			foreach (var step in component.Steps.Where(step => step.Strategy == MergeStrategy.Manual))
+			{
+				step.Outcome = StepOutcome.NeedsAttention;
+			}
+
+			if (component.Steps.All(step => step.Outcome is StepOutcome.Skipped or StepOutcome.NeedsAttention))
 			{
 				component.ResultStatus = ResultStatus.Unchanged;
 			}
@@ -316,7 +343,8 @@ internal static class IntegrationRunner
 			{
 				// Only a conflict is the resolver's business. Anything else (no git identity, a failing hook, a locked
 				// index) would fail its merge commit just the same, so it fails the step with git's own message.
-				var conflicted = Lines((await checkout.RunAsync(["diff", "--name-only", "--diff-filter=U"])).Output).Count > 0;
+				var conflictedFiles = Lines((await checkout.RunAsync(["diff", "--name-only", "--diff-filter=U"])).Output);
+				var conflicted = conflictedFiles.Count > 0;
 				await RestoreAsync(checkout, head);
 				if (!conflicted)
 				{
@@ -324,8 +352,21 @@ internal static class IntegrationRunner
 					return true;
 				}
 
-				step.Strategy = MergeStrategy.Semantic;
 				step.Triage = Triage.Conflict;
+				var policy = monorepo.MergePolicyFor(component.Name);
+				var pathReason = policy.ManualPathReason(conflictedFiles);
+				if (pathReason is not null || policy.ManualSemantic)
+				{
+					step.Strategy = MergeStrategy.Manual;
+					step.Outcome = StepOutcome.NeedsAttention;
+					step.Conflicts.Clear();
+					step.Conflicts.AddRange(conflictedFiles);
+					step.Note = pathReason ?? "it conflicts onto the steps before it, and merge.semantic = manual leaves that for a human";
+					Report($"'{component.Name}': run {Short(step)} conflicts after all; it is left for a human.", component.Name, step.RunId);
+					return true;
+				}
+
+				step.Strategy = MergeStrategy.Semantic;
 				step.Note = driver is null
 					? "git could not merge it onto the steps before it; handed to the resolver"
 					: "git and the structural merge could not merge it onto the steps before it; handed to the resolver";
@@ -333,10 +374,24 @@ internal static class IntegrationRunner
 				return false;
 			}
 
-			if (driver is not null && StructuralMerge.Warnings(merge.Error) is { Count: > 0 } warnings)
+			var warningsPolicy = monorepo.MergePolicyFor(component.Name).Warnings;
+			if (driver is not null && warningsPolicy != WarningsPolicy.Accept && StructuralMerge.Warnings(merge.Error) is { Count: > 0 } warnings)
 			{
-				// Clean, but weave doubts it means what both sides meant: like the triage, leave that to the resolver.
+				// Clean, but weave doubts it means what both sides meant: like the triage, leave that to the resolver -
+				// or to a human, when merge.warnings says so.
 				await RestoreAsync(checkout, head);
+				if (warningsPolicy == WarningsPolicy.Manual)
+				{
+					step.Strategy = MergeStrategy.Manual;
+					step.Outcome = StepOutcome.NeedsAttention;
+					step.Structural = StructuralTriage.Warnings;
+					step.StructuralWarnings.Clear();
+					step.StructuralWarnings.AddRange(warnings);
+					step.Note = "weave merged it with warnings, which merge.warnings = manual leaves for a human";
+					Report($"'{component.Name}': run {Short(step)} merged structurally with {warnings.Count} warning(s); it is left for a human.", component.Name, step.RunId);
+					return true;
+				}
+
 				step.Strategy = MergeStrategy.Semantic;
 				step.Structural = StructuralTriage.Warnings;
 				step.StructuralWarnings.Clear();

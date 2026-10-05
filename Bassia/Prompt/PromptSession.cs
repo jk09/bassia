@@ -5,8 +5,11 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Bassia.Cli;
 
-/// <summary>Where the ask is made: the working directory, and the monorepo and its components when inside one.</summary>
-internal sealed record PromptContext(string WorkingDirectory, string? MonorepoRoot, IReadOnlyList<string> Components)
+/// <summary>
+/// Where the ask is made: the working directory, and the monorepo, its components and its effective configuration
+/// when inside one.
+/// </summary>
+internal sealed record PromptContext(string WorkingDirectory, string? MonorepoRoot, IReadOnlyList<string> Components, IReadOnlyList<ConfigValue>? Settings = null)
 {
 	public static string Platform =>
 		OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsMacOS() ? "macos" : OperatingSystem.IsLinux() ? "linux" : RuntimeInformation.OSDescription;
@@ -252,6 +255,15 @@ internal sealed class PromptSession(
 		{
 			builder.Append("monorepo_root = ").Append(Literal(context.MonorepoRoot)).Append('\n');
 			builder.Append("components = [").Append(string.Join(", ", context.Components.Select(name => $"\"{name}\""))).Append("]\n");
+			if (context.Settings is { Count: > 0 } settings)
+			{
+				builder.Append("\n# Configuration: each setting's effective value and its layer (default, monorepo = .bassia/config.toml, ")
+					.Append("user = .bassia/config.user.toml). Change one with 'config set' (add -user for the user layer), remove one with 'config unset'.\n\n");
+				foreach (var setting in settings)
+				{
+					builder.Append(setting.Key.Key).Append(" = ").Append(ConfigFile.Quote(setting.Value)).Append("   # ").Append(setting.Source).Append('\n');
+				}
+			}
 		}
 
 		builder.Append("\n# Skills\n\n");

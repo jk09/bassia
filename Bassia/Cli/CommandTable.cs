@@ -23,8 +23,16 @@ internal static class CommandTable
 	private static readonly SwitchSpec Onto = new("onto", "component@ref,...", "Integrate a component onto this branch or tag instead of its default branch.");
 	private static readonly SwitchSpec Semantic = new("semantic", "run-id,...", "Send these runs' results to the resolver even without a textual conflict.");
 	private static readonly SwitchSpec Skip = new("skip", "run-id,...", "Leave these runs out.");
+	private static readonly SwitchSpec Manual = new("manual", "run-id,...", "Leave these runs' results for a human (needs_attention) instead of merging them.");
 	private static readonly SwitchSpec Weave = new("weave", "command|off", "The structural merge driver instead of integration.weave (default weave-driver, used when installed); off disables it.");
 	private static readonly SwitchSpec Log = new("log", "path", "The log of a detached job (set by -detach).", Hidden: true);
+
+	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
+		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
+		"merge.component.<component>.<setting>, which falls back to merge.<setting>. merge.semantic (resolver|manual): a result git and weave cannot " +
+		"merge goes to the resolver or is left for a human; merge.warnings (resolver|manual|accept): a result weave merged with warnings; " +
+		"merge.manual_paths (patterns): conflicts in these paths always need a human; merge.advance (manual|auto): a completed integration " +
+		"fast-forwards the base branches itself. 'integration plan|start -semantic/-skip/-manual' override the policy for one integration.";
 
 	public static readonly IReadOnlyList<CommandSpec> Commands =
 	[
@@ -40,27 +48,38 @@ internal static class CommandTable
 			["bassia status", "bassia -C R:\\ status"],
 			MonorepoCommands.StatusAsync),
 
-		new("config", "list", "List every setting of .bassia/config.toml with its value, default and where it comes from.",
+		new("config", "list", "List every setting with its effective value and the layer it comes from: default, monorepo (.bassia/config.toml) or user (.bassia/config.user.toml).",
 			[],
 			["bassia config list"],
-			MonorepoCommands.ConfigListAsync),
+			MonorepoCommands.ConfigListAsync,
+			Details: ConfigDetails),
 
-		new("config", "get", "Show one setting.",
-			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, llm.backend or llm.command.", Required: true)],
-			["bassia config get -key integration.resolver", "bassia config get agent.command"],
-			MonorepoCommands.ConfigGetAsync, Positional: "key"),
+		new("config", "get", "Show one setting: its effective value, where it comes from, and its value in each layer.",
+			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, llm.backend or llm.command.", Required: true)],
+			["bassia config get -key integration.resolver", "bassia config get merge.component.app.semantic"],
+			MonorepoCommands.ConfigGetAsync, Positional: "key", Details: ConfigDetails),
 
-		new("config", "set", "Change one setting in .bassia/config.toml (comments are kept) and commit it to the meta-repo.",
+		new("config", "set", "Change one setting: in .bassia/config.toml (comments are kept, committed to the meta-repo), or with -user in your own .bassia/config.user.toml (never committed).",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, llm.backend or llm.command.", Required: true),
-				new("value", "value", "The new value. An empty value is not allowed; set the default explicitly to go back.", Required: true)
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, llm.backend or llm.command.", Required: true),
+				new("value", "value", "The new value; a choice setting accepts only its choices, a list setting takes comma-separated values.", Required: true),
+				new("user", null, "Write the user layer (.bassia/config.user.toml) instead of the monorepo's.")
 			],
 			[
 				"bassia config set -key agent.command -value \"claude -p --permission-mode acceptEdits --model opus\"",
-				"bassia config set -key workspace.path -value D:\\bassia-workspace",
-				"bassia config set agent.commit.subject -value \"agent({short_id}): {summary}\""
+				"bassia config set -key merge.semantic -value manual",
+				"bassia config set merge.component.db.manual_paths -value \"migrations,**/*.sql\"",
+				"bassia config set -key merge.advance -value auto -user"
 			],
-			MonorepoCommands.ConfigSetAsync, Positional: "key"),
+			MonorepoCommands.ConfigSetAsync, Positional: "key", Details: ConfigDetails),
+
+		new("config", "unset", "Remove one setting from a layer, so the next layer down (or the default) applies again.",
+			[
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, llm.backend or llm.command.", Required: true),
+				new("user", null, "Remove it from the user layer instead of the monorepo's.")
+			],
+			["bassia config unset -key merge.semantic", "bassia config unset merge.advance -user"],
+			MonorepoCommands.ConfigUnsetAsync, Positional: "key", Details: ConfigDetails),
 
 		new("version", null, "Show the bassia version.",
 			[],
@@ -296,14 +315,14 @@ internal static class CommandTable
 
 		// ----- integration -----
 
-		new("integration", "plan", "Triage how runs' results would merge, per component: up_to_date, fast_forward, clean or conflict for git, and whether git, the structural merge (weave) or the resolver merges each. Changes nothing.",
-			[Runs, Onto, Semantic, Skip, Weave],
+		new("integration", "plan", "Triage how runs' results would merge, per component: up_to_date, fast_forward, clean or conflict for git, and whether git, the structural merge (weave), the resolver or a human (the merge.* policy) merges each. Changes nothing.",
+			[Runs, Onto, Semantic, Skip, Manual, Weave],
 			["bassia integration plan -runs all", "bassia integration plan -runs brave-otter-3f2a91,quiet-fern-91ab22 -onto lib@v1", "bassia integration plan -runs all -weave off"],
 			IntegrationCommands.PlanCommandAsync),
 
 		new("integration", "start", "Integrate runs' results per component: git merges what it can, the structural merge (weave) what git cannot, then the resolver the rest from a semantic brief; the result is tagged integration/<key>/<n> in every component.",
 			[
-				Runs, Onto, Semantic, Skip, Weave,
+				Runs, Onto, Semantic, Skip, Manual, Weave,
 				new("detach", null, "Return at once and continue in the background; follow with integration show/logs/wait, stop with integration stop."),
 				new("id", "integration-id", "The integration's id (set by -detach).", Hidden: true),
 				Log,

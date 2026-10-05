@@ -72,8 +72,16 @@ internal sealed class Monorepo
 
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
-	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand, IReadOnlyList<ComponentDefinition> components)
+	/// <summary>The configuration layers as read when the monorepo was loaded (see <see cref="ConfigSnapshot"/>).</summary>
+	public ConfigSnapshot Config { get; }
+
+	/// <summary>How the integration merges <paramref name="component"/>'s results: the <c>merge.*</c> settings for it.</summary>
+	public Integration.MergePolicy MergePolicyFor(string component) => Integration.MergePolicy.For(Config, component);
+
+	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand,
+		IReadOnlyList<ComponentDefinition> components, ConfigSnapshot config)
 	{
+		Config = config;
 		Root = root;
 		WorkspaceDir = workspaceDir;
 		CommitSubject = commitSubject;
@@ -100,46 +108,18 @@ internal sealed class Monorepo
 	public static Monorepo Load(string root)
 	{
 		var metaRepoDir = Path.Combine(root, MetaRepoFolderName);
-		var config = ReadToml(Path.Combine(metaRepoDir, "config.toml"));
-		var workspaceDir = Path.Combine(root, DefaultWorkspaceFolderName);
-
-		if (config.TryGetValue("workspace", out var workspaceSection) && workspaceSection is TomlTable workspace
-			&& workspace.TryGetValue("path", out var path) && path is string workspacePath && !string.IsNullOrWhiteSpace(workspacePath))
+		var config = ConfigSnapshot.Load(root);
+		if (config.Problems() is { Count: > 0 } problems)
 		{
-			workspaceDir = Path.GetFullPath(workspacePath, root);
+			throw new MonorepoException($"Invalid configuration: {string.Join("; ", problems)}.");
 		}
 
-		var commitSubject = DefaultCommitSubject;
-		if (config.TryGetValue("agent", out var agentSection) && agentSection is TomlTable agent
-			&& agent.TryGetValue("commit", out var commitSection) && commitSection is TomlTable commit
-			&& commit.TryGetValue("subject", out var subject) && subject is string subjectTemplate && !string.IsNullOrWhiteSpace(subjectTemplate))
-		{
-			commitSubject = subjectTemplate;
-		}
-
-		var resolver = DefaultResolver;
-		if (config.TryGetValue("integration", out var integrationSection) && integrationSection is TomlTable integration
-			&& integration.TryGetValue("resolver", out var resolverValue) && resolverValue is string configuredResolver && !string.IsNullOrWhiteSpace(configuredResolver))
-		{
-			resolver = configuredResolver;
-		}
-
-		var structuralDriver = DefaultStructuralDriver;
-		if (config.TryGetValue("integration", out var structuralSection) && structuralSection is TomlTable structural
-			&& structural.TryGetValue("weave", out var weaveValue) && weaveValue is string configuredWeave && !string.IsNullOrWhiteSpace(configuredWeave))
-		{
-			structuralDriver = configuredWeave.Trim();
-		}
-
-		var agentCommand = DefaultAgentCommand;
-		if (config.TryGetValue("agent", out var agentTable) && agentTable is TomlTable agentConfig
-			&& agentConfig.TryGetValue("command", out var commandValue) && commandValue is string configuredCommand && !string.IsNullOrWhiteSpace(configuredCommand))
-		{
-			agentCommand = configuredCommand;
-		}
+		var workspace = config.Resolve(ConfigFile.Find("workspace.path"));
+		var workspaceDir = Path.GetFullPath(workspace.Value, root);
 
 		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
-		return new Monorepo(root, workspaceDir, commitSubject, resolver, structuralDriver, agentCommand, components);
+		return new Monorepo(root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
+			config.Value("integration.weave").Trim(), config.Value("agent.command"), components, config);
 	}
 
 	public ComponentDefinition? FindComponent(string name) =>

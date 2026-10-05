@@ -18,6 +18,9 @@ internal sealed record IntegrationChoices
 	/// <summary>The structural merge (weave) tried where git conflicts; null leaves every conflict to the resolver.</summary>
 	public StructuralMerge? Structural { get; init; }
 
+	/// <summary>One merge policy for every component instead of each component's configured one (tests, previews).</summary>
+	public MergePolicy? Policy { get; init; }
+
 	public MergeStrategy? StrategyFor(string component, string runId) =>
 		Strategies.TryGetValue((component, runId), out var strategy) ? strategy
 		: Strategies.TryGetValue(("*", runId), out strategy) ? strategy
@@ -112,12 +115,16 @@ internal static class IntegrationPlanner
 		}
 
 		// Chain every result git (or the structural merge) can merge on its own onto a simulated head, oldest first.
+		var policy = choices.Policy ?? monorepo.MergePolicyFor(name);
+		var acceptWarnings = policy.Warnings == WarningsPolicy.Accept;
 		var head = baseCommit;
-		List<IntegrationStep> deterministic = [], semantic = [], skipped = [];
+		List<IntegrationStep> deterministic = [], semantic = [], manual = [], skipped = [];
 		foreach (var step in candidates)
 		{
 			var chosen = choices.StrategyFor(name, step.RunId);
-			var probe = await ClassifyAsync(git, head, step, choices.Structural);
+			var probe = await ClassifyAsync(git, head, step, choices.Structural, acceptWarnings);
+			var unmerged = step.Triage == Triage.Conflict && step.Structural != StructuralTriage.Clean
+				&& !(acceptWarnings && step.Structural == StructuralTriage.Warnings);
 
 			if (chosen == MergeStrategy.Skip)
 			{
@@ -130,10 +137,35 @@ internal static class IntegrationPlanner
 				step.Strategy = MergeStrategy.Syntactic;
 				deterministic.Add(step);
 			}
-			else if (chosen == MergeStrategy.Semantic || (step.Triage == Triage.Conflict && step.Structural != StructuralTriage.Clean))
+			else if (chosen == MergeStrategy.Manual)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Overridden = true;
+				step.Note = "left for a human by -manual";
+				manual.Add(step);
+			}
+			else if (chosen != MergeStrategy.Semantic && step.Triage == Triage.Conflict && policy.ManualPathReason(step.Conflicts) is { } reason)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = reason;
+				manual.Add(step);
+			}
+			else if (chosen != MergeStrategy.Semantic && unmerged && step.Structural == StructuralTriage.Warnings && policy.Warnings == WarningsPolicy.Manual)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = "weave merged it with warnings, which merge.warnings = manual leaves for a human";
+				manual.Add(step);
+			}
+			else if (chosen != MergeStrategy.Semantic && unmerged && policy.ManualSemantic)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = "neither git nor weave can merge it, and merge.semantic = manual leaves that for a human";
+				manual.Add(step);
+			}
+			else if (chosen == MergeStrategy.Semantic || unmerged)
 			{
 				step.Strategy = MergeStrategy.Semantic;
-				step.Overridden = step.Triage != Triage.Conflict || step.Structural == StructuralTriage.Clean;
+				step.Overridden = !unmerged;
 				semantic.Add(step);
 			}
 			else
@@ -154,7 +186,7 @@ internal static class IntegrationPlanner
 		// Which results collide with each other on their own - the reason a result that merges cleanly onto the base
 		// can still need the resolver, and what the semantic brief points the resolver at. What the structural merge
 		// combines cleanly is no collision.
-		var active = candidates.Where(step => step.Strategy != MergeStrategy.Skip).ToList();
+		var active = candidates.Where(step => step.Strategy is not (MergeStrategy.Skip or MergeStrategy.Manual)).ToList();
 		for (var i = 0; i < active.Count; i++)
 		{
 			for (var j = i + 1; j < active.Count; j++)
@@ -173,16 +205,16 @@ internal static class IntegrationPlanner
 			}
 		}
 
-		component.Steps.AddRange([.. deterministic, .. semantic, .. skipped]);
+		component.Steps.AddRange([.. deterministic, .. semantic, .. manual, .. skipped]);
 		return component;
 	}
 
 	/// <summary>
 	/// Records on the step how <paramref name="head"/> and its result merge: git's verdict always, and where git
 	/// conflicts, the structural merge's. Returns the probe whose tree a deterministic merge would produce: the
-	/// structural one when git conflicts and weave merges cleanly, git's otherwise.
+	/// structural one when git conflicts and weave merges cleanly (or with warnings the policy accepts), git's otherwise.
 	/// </summary>
-	private static async Task<MergeProbe.Result> ClassifyAsync(GitClient git, string head, IntegrationStep step, StructuralMerge? structural)
+	private static async Task<MergeProbe.Result> ClassifyAsync(GitClient git, string head, IntegrationStep step, StructuralMerge? structural, bool acceptWarnings = false)
 	{
 		var probe = await MergeProbe.ProbeAsync(git, head, step.SourceCommit);
 		step.Triage = probe.Triage;
@@ -202,7 +234,7 @@ internal static class IntegrationPlanner
 		step.Structural = structured.Triage == Triage.Conflict ? StructuralTriage.Conflict
 			: structured.Warnings.Count > 0 ? StructuralTriage.Warnings
 			: StructuralTriage.Clean;
-		return step.Structural == StructuralTriage.Clean ? structured : probe;
+		return step.Structural == StructuralTriage.Clean || (acceptWarnings && step.Structural == StructuralTriage.Warnings) ? structured : probe;
 	}
 
 	/// <summary>The branch the component repo's <c>HEAD</c> names: what <c>component add</c> cloned, usually <c>main</c>.</summary>
