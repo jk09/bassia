@@ -190,6 +190,26 @@ public class DashboardTests
 	}
 
 	[Fact]
+	public void RunTimeline_GivesAShortRunAVisibleBarThatStaysInsideThePlot()
+	{
+		var now = DateTimeOffset.UtcNow;
+		var svg = Charts.RunTimeline(
+		[
+			new RunBar("agent-run-quick-fox-aaaaaa", "quick-fox", "completed", now.AddHours(-1), now.AddHours(-1).AddSeconds(1), false, "one second"),
+			new RunBar("agent-run-late-owl-bbbbbb", "late-owl", "started", now.AddSeconds(-1), null, true, "just started")
+		], now);
+
+		var widths = System.Text.RegularExpressions.Regex.Matches(svg, "class=\"bar [^\"]*\" x=\"([0-9.]+)\" y=\"[0-9.]+\" width=\"([0-9.]+)\"")
+			.Select(match => (X: double.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture),
+				Width: double.Parse(match.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture)))
+			.ToList();
+		Assert.Equal(2, widths.Count);
+		Assert.All(widths, bar => Assert.True(bar.Width >= Charts.MinBarWidth, $"bar width {bar.Width}"));
+		Assert.All(widths, bar => Assert.True(bar.X + bar.Width <= 190 + 760 + 0.01, $"bar ends at {bar.X + bar.Width}"));
+		Assert.Contains("· 1s ·", svg); // the real duration stays in the tooltip
+	}
+
+	[Fact]
 	public async Task LiveRuns_ComeFromTheJobRegistryWithTheirPhaseAndOutput()
 	{
 		await using var fixture = await ThreeComponentsAsync();
