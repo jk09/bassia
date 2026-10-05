@@ -162,12 +162,13 @@ internal sealed partial class Dashboard
 			.Concat(next.PlannedManual(state.Queue).Select(pair => (Tag: pair.Step.SourceTag, pair.Component, Note: pair.Step.Note ?? "will need a human", Planned: true)))
 			.ToList();
 
+		var waiting = state.Queue.Pending.Count(item => item.State != QueueState.NeedsAttention);
 		var body = new StringBuilder();
 		body.Append("<div class=\"cards\">")
 			.Append(Card("components", state.Monorepo.Components.Count, "/components"))
 			.Append(Card("live runs", state.Live.Count, "/runs", state.Live.Count > 0 ? "live" : null))
 			.Append(Card("runs", state.Runs.Count, "/runs"))
-			.Append(Card("results in the merge queue", state.Queue.Pending.Count(), "/queue"))
+			.Append(Card("results on their way to main", waiting, "/queue"))
 			.Append(Card("merges need attention", attention.Count, "/queue#attention", attention.Count > 0 ? "alert" : null))
 			.Append(Card("tags across components", tags.Count(tag => tag.Components.Count > 1), "/tags?multi=1"))
 			.Append(Card("integrations", state.Integrations.Count, "/integrations"))
@@ -175,24 +176,31 @@ internal sealed partial class Dashboard
 
 		body.Append("<div data-live-src=\"/fragment/live\">").Append(LiveCards(state.Live)).Append("</div>");
 
+		// The map on the left; beside it what asks for a decision, then where the monorepo stands.
 		body.Append("<div class=\"split\"><section class=\"fit\"><h2>Components and what they need</h2>")
 			.Append(Charts.ComponentMap(state.Monorepo.Components, activity))
-			.Append("</section><section><h2>Runs by status</h2>")
-			.Append(Charts.Donut(StatusSegments(state.Runs), "agentic runs"))
-			.Append("</section></div>");
+			.Append("</section><section class=\"side\">");
 
-		body.Append("<h2>Recent agentic runs</h2>").Append(Charts.RunTimeline(Bars(state, 12), DateTimeOffset.UtcNow));
-
-		body.Append("<div class=\"split\"><section><h2>Needs attention</h2>");
+		body.Append($"<h2>Needs attention{(attention.Count > 0 ? $" <span class=\"count bad\">{attention.Count}</span>" : "")}</h2>");
 		body.Append(attention.Count == 0
 			? "<p class=\"muted\">No merge waits for a human.</p>"
-			: string.Concat(attention.Take(6).Select(item => $"<div class=\"attn{(item.Planned ? " planned" : "")}\">{Ref(item.Tag)} in <b>{E(item.Component)}</b> — {(item.Planned ? "<i>next integration:</i> " : "")}{E(item.Note)}</div>"))
-				+ "<p><a href=\"/queue#attention\">All merges needing attention →</a></p>");
-		body.Append("</section><section><h2>Latest tags</h2>");
-		var recent = tags.Select(tag => TagStory.For(tag, state.Runs, state.Integrations)).OrderByDescending(story => story.Date, StringComparer.Ordinal).Take(10).ToList();
-		body.Append(recent.Count == 0 ? "<p class=\"muted\">No tags yet.</p>" : "<ul class=\"taglist\">" + string.Concat(recent.Select(story =>
-			$"<li><a class=\"tagchip k-{story.Kind}\" href=\"/tag?name={Url(story.Tag.Name)}\">{E(story.Tag.Name)}</a> <span class=\"muted\">{story.Tag.Components.Count} component(s) · {Time(story.Date)}</span></li>")) + "</ul>");
+			: string.Concat(attention.Take(5).Select(item => $"<div class=\"attn{(item.Planned ? " planned" : "")}\"><b>{E(item.Component)}</b> {Ref(item.Tag)}" +
+				$"<div class=\"muted\">{(item.Planned ? "next integration: " : "")}{E(item.Note)}</div></div>"))
+				+ $"<p><a href=\"/queue#attention\">{(attention.Count > 5 ? $"All {attention.Count} merges needing attention" : "What to do about them")} →</a></p>");
+
+		// Milestones: baselines and integrations mark where the monorepo stands; a run's result tag is one step of one run.
+		body.Append("<h2>Latest milestones</h2>");
+		var milestones = tags.Select(tag => TagStory.For(tag, state.Runs, state.Integrations))
+			.Where(story => story.Kind != "run")
+			.OrderByDescending(story => story.Date, StringComparer.Ordinal).Take(6).ToList();
+		body.Append(milestones.Count == 0 ? "<p class=\"muted\">No baseline or integration tag yet.</p>" : "<ul class=\"taglist\">" + string.Concat(milestones.Select(story =>
+			$"<li><a class=\"tagchip k-{story.Kind}\" href=\"/tag?name={Url(story.Tag.Name)}\">{E(story.Tag.Name)}</a> <span class=\"muted\">{story.Tag.Components.Count} component(s) · {Time(story.Date)}</span></li>")) + "</ul>"
+			+ "<p><a href=\"/tags\">All tags →</a></p>");
+
+		body.Append("<h2>Runs by status</h2>").Append(Charts.Donut(StatusSegments(state.Runs), "agentic runs"));
 		body.Append("</section></div>");
+
+		body.Append("<h2>Recent agentic runs</h2>").Append(Charts.RunTimeline(Bars(state, 12), DateTimeOffset.UtcNow));
 		return View("/", "Overview", body.ToString());
 	}
 

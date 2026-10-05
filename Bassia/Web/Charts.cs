@@ -107,7 +107,9 @@ internal static class Charts
 			svg.Append($"<title>{E(component.Name)}: {info.Live} live run(s), {info.Queued} result(s) in the merge queue, {info.Attention} needing attention, {info.Runs} run(s) in all</title>");
 			svg.Append($"<rect x=\"{N(nx)}\" y=\"{N(ny)}\" width=\"{width}\" height=\"{height}\" rx=\"9\"/>");
 			svg.Append($"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 24)}\" class=\"name\">{E(Clip(component.Name, 18))}</text>");
-			svg.Append($"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{E(info.LatestTag is null ? $"{info.Runs} run(s)" : "◆ " + Clip(info.LatestTag, 22))}</text>");
+			svg.Append(info.LatestTag is null
+				? $"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{info.Runs} run(s)</text>"
+				: $"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{TagLabel(info.LatestTag)}<title>latest tag: {E(info.LatestTag)}</title></text>");
 
 			// Badges, right to left: attention (red), queued results (amber), live runs (blue, pulsing).
 			var bx = nx + width - 14;
@@ -128,6 +130,17 @@ internal static class Charts
 		svg.Append("</svg>");
 		return $"<div class=\"chart-box\">{svg}</div>" + Legend(
 			("b-live", "live runs"), ("b-queued", "results in the merge queue"), ("b-attention", "merges needing attention"), ("arrowhead", "needs (references)"));
+	}
+
+	/// <summary>
+	/// A tag in a component box, short enough to read: an integration's tag by its key (<c>integration/&lt;key&gt;/0</c>
+	/// shows as "⇄ &lt;key&gt;"), anything else as itself; the mark is coloured by kind.
+	/// </summary>
+	private static string TagLabel(string tag)
+	{
+		var integration = tag.StartsWith(Integration.IntegrationRecord.RefPrefix, StringComparison.Ordinal);
+		var text = integration ? tag[Integration.IntegrationRecord.RefPrefix.Length..].Split('/')[0] : tag;
+		return $"<tspan class=\"{(integration ? "mk-integration" : "mk-baseline")}\">{(integration ? "⇄" : "◆")}</tspan> {E(Clip(text, 22))}";
 	}
 
 	/// <summary>Everything a component needs (transitively) and everything that needs it.</summary>

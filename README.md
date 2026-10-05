@@ -516,9 +516,10 @@ only GET requests. If the port is taken it uses the next free one, and it prints
 Pages and their pictures are drawn on the server (inline SVG and CSS, nothing loaded from elsewhere) and work
 without JavaScript; the script animates and refreshes the live parts.
 
-- **Overview**: counts (components, live runs, results in the merge queue, merges needing attention, tags across
-  components, integrations), the live runs, the component map, the recent runs over time, runs by status, what
-  needs attention and the latest tags.
+- **Overview**: counts (components, live runs, results on their way to their default branch, merges needing
+  attention, tags across components, integrations) and the live runs. Next to the component map: what needs
+  attention, the latest milestones (baseline and integration tags; a run's own result tag is not one) and runs by
+  status. Below: the recent runs over time.
 - **Components**: the component map. Components sit in layers below what references them, and arrows point at what
   each needs. Each box shows its live runs (pulsing), results waiting in the merge queue, merges needing attention
   and its latest tag. Hovering a box lights up everything it needs and everything that needs it. A component's page
