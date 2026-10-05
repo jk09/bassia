@@ -31,7 +31,7 @@ internal sealed partial class Dashboard
 				<td><b>{E(value.Value.Length == 0 ? "(empty)" : value.Value)}</b><div class="muted">{E(value.Source)}</div></td>
 				<td class="layers">{Layer("default", key.Default, value.Layer == ConfigLayer.Default)}{Layer("monorepo", monorepoValue, value.Layer == ConfigLayer.Monorepo)}{Layer("user", userValue, value.Layer == ConfigLayer.User)}</td>
 				<td class="muted">{E(key.Allowed)}</td>
-				<td>{Cmd($"bassia config set {key.Key} -value \"{value.Value}\"")}</td></tr>
+				<td>{Cmd($"bassia config set {key.Key} -value \"{value.Value}\"{(value.Layer == ConfigLayer.User ? " -user" : "")}")}</td></tr>
 				""");
 		}
 

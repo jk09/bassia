@@ -301,7 +301,8 @@ public class DashboardTests
 		Assert.Contains("<code>merge.component.lib.semantic</code>", page);
 		Assert.Contains("class=\"layer user wins\"", page);
 		Assert.Contains("<span class=\"pv v-manual own\"", page);
-		Assert.Contains("bassia config set merge.advance -value &quot;auto&quot;", page);
+		Assert.Contains("bassia config set merge.advance -value &quot;auto&quot; -user</code>", page); // set in the user layer, changed there
+		Assert.Contains("bassia config set merge.component.lib.semantic -value &quot;manual&quot;</code>", page); // set in the monorepo
 	}
 
 	[Fact]
