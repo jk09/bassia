@@ -1,18 +1,15 @@
 namespace Bassia;
 
 using System.Diagnostics;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using Bassia.Cli;
-using Bassia.CliCommands.Agent;
-using Bassia.Git;
 using Bassia.Web;
 using Microsoft.Extensions.Hosting;
 
 /// <summary>
-/// <c>bassia web</c>: serves the web dashboard over the monorepo the current directory belongs to, on the loopback
-/// interface only, until Ctrl-C. Runs started from the dashboard are stopped (and recorded as cancelled) on the way out.
+/// <c>bassia web</c>: serves the read-only web dashboard over the monorepo the current directory belongs to, on the
+/// loopback interface only, until Ctrl-C. Everything it shows is changed with the command line or <c>bassia prompt</c>.
 /// </summary>
 internal static class WebCommand
 {
@@ -47,10 +44,8 @@ internal static class WebCommand
 			return ProgramCli.WriteResult(false, "web", $"No free port in {port}-{port + PortAttempts - 1} on 127.0.0.1; choose one with -port.");
 		}
 
-		var git = new GitClient(root);
-		using var supervisor = new RunSupervisor((select, command, context) => RunCommands.StartHostedAsync(git, monorepo, select, command, context));
 		var url = $"http://127.0.0.1:{free}/";
-		await using var app = new Dashboard(monorepo, supervisor).Build(url);
+		await using var app = new Dashboard(monorepo).Build(url);
 		await app.StartAsync();
 
 		Console.Error.WriteLine($"bassia: dashboard for '{root}' at {url} (Ctrl-C stops it).");
@@ -60,15 +55,6 @@ internal static class WebCommand
 		}
 
 		await app.WaitForShutdownAsync();
-
-		// The runs are tasks of this process: stop them so none is orphaned without its final record.
-		if (supervisor.HasLive)
-		{
-			Console.Error.WriteLine("bassia: stopping the runs started from the dashboard.");
-			supervisor.CancelAll();
-		}
-
-		await supervisor.WhenAllSettledAsync();
 		return ProgramCli.WriteResult(true, "web", $"Dashboard at {url} stopped.", new Dictionary<string, object?> { ["url"] = url });
 	}
 

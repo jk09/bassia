@@ -186,7 +186,7 @@ internal static class IntegrationPlanner
 		// Which results collide with each other on their own - the reason a result that merges cleanly onto the base
 		// can still need the resolver, and what the semantic brief points the resolver at. What the structural merge
 		// combines cleanly is no collision.
-		var active = candidates.Where(step => step.Strategy is not (MergeStrategy.Skip or MergeStrategy.Manual)).ToList();
+		var active = candidates.Where(step => step.Strategy != MergeStrategy.Skip).ToList();
 		for (var i = 0; i < active.Count; i++)
 		{
 			for (var j = i + 1; j < active.Count; j++)

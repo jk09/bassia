@@ -293,7 +293,7 @@ internal static class CommandTable
 			["bassia run wait brave-otter-3f2a91", "bassia run wait -id brave-otter-3f2a91 -timeout 600"],
 			RunCommands.WaitAsync, Positional: "id"),
 
-		new("run", "stop", "Stop a live run (started from any shell, detached, or in bassia web): kill the agent's process tree, record the run as cancelled and keep its folder.",
+		new("run", "stop", "Stop a live run (started from any shell, or detached): kill the agent's process tree, record the run as cancelled and keep its folder.",
 			[Id, new("timeout", "seconds", "How long to wait for it to stop before killing its process (default: 30).")],
 			["bassia run stop brave-otter-3f2a91"],
 			RunCommands.StopAsync, Positional: "id"),
@@ -406,7 +406,7 @@ internal static class CommandTable
 
 		// ----- frontends -----
 
-		new("web", null, "Serve the web dashboard on 127.0.0.1 until Ctrl-C: components and their graph, a timeline, runs started from a prompt and streamed live, and integrations.",
+		new("web", null, "Serve the read-only web dashboard on 127.0.0.1 until Ctrl-C: the component map, tags across components, live and past runs, the merge queue with its triage and the merges needing attention, and the configuration layers.",
 			[new("port", "n", "The port to try first (default: 8080; the next free one is used when taken)."), new("no-open", null, "Do not open the browser.")],
 			["bassia web", "bassia web -port 9000 -no-open"],
 			WebCommand.RunAsync),
