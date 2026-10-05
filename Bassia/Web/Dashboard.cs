@@ -373,27 +373,53 @@ internal sealed partial class Dashboard
 		var chosen = request.Query["c"].Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToList();
 		var page = int.TryParse(request.Query["page"], out var p) ? p : 1;
 		var size = int.TryParse(request.Query["n"], out var n) ? n : Timeline.DefaultPageSize;
+		var colour = monorepo.Components.Select((component, index) => (component.Name, index)).ToDictionary(pair => pair.Name, pair => pair.index % 8, StringComparer.Ordinal);
 
-		var form = new StringBuilder("<form method=\"get\" action=\"/timeline\"><div class=\"pick\">");
+		// Ticking a component reloads the timeline at once (the script submits the form); the button is for no-JS use.
+		var form = new StringBuilder("<form method=\"get\" action=\"/timeline\" class=\"autosubmit\"><div class=\"pick\">");
 		foreach (var component in monorepo.Components)
 		{
 			var check = chosen.Contains(component.Name) ? " checked" : "";
-			form.Append($"<label><input type=\"checkbox\" name=\"c\" value=\"{E(component.Name)}\"{check}> {E(component.Name)}</label>");
+			form.Append($"<label class=\"pickchip c{colour[component.Name]}\"><input type=\"checkbox\" name=\"c\" value=\"{E(component.Name)}\"{check}> {E(component.Name)}</label>");
 		}
 
-		form.Append($"</div>Per page <input type=\"number\" name=\"n\" min=\"1\" max=\"{Timeline.MaxPageSize}\" value=\"{size}\"> <button>Show timeline</button></form>");
+		form.Append($"</div><span class=\"muted\">Per page</span> <input type=\"number\" name=\"n\" min=\"1\" max=\"{Timeline.MaxPageSize}\" value=\"{size}\"> <button>Show timeline</button></form>");
 
 		if (chosen.Count == 0)
 		{
-			return View("/timeline", "Timeline", form + Notice("Choose the components to follow. Their dependencies join them automatically; the whole monorepo is never logged at once."));
+			// Not the whole monorepo, but one click away from any unit: each component with what it needs.
+			var starts = monorepo.Components.Select(component => (component.Name, Unit: Timeline.Unit(monorepo, [component.Name])))
+				.OrderByDescending(start => start.Unit.Count).ThenBy(start => start.Name, StringComparer.Ordinal);
+			var links = string.Concat(starts.Select(start =>
+				$"<a class=\"start\" href=\"/timeline?c={Url(start.Name)}\"><b class=\"pickchip c{colour[start.Name]}\">{E(start.Name)}</b>" +
+				$"<span class=\"muted\">{(start.Unit.Count == 1 ? "on its own" : $"with {E(string.Join(", ", start.Unit.Where(name => name != start.Name)))}")}</span></a>"));
+			return View("/timeline", "Timeline", form + $"""
+				<p class="muted">The timeline follows a unit: the components you tick plus everything they need, never the whole monorepo at once. Start from one:</p>
+				<div class="starts">{links}</div>
+				""");
 		}
 
 		var unit = Timeline.Unit(monorepo, chosen);
 		var timeline = await Timeline.ReadAsync(monorepo, unit, page, size);
 		var added = unit.Where(name => !chosen.Contains(name)).ToList();
+		var lane = unit.Select((name, index) => (name, index)).ToDictionary(pair => pair.name, pair => pair.index, StringComparer.Ordinal);
+
+		var query = string.Join("&", chosen.Select(name => $"c={Url(name)}")) + $"&n={timeline.PageSize}";
+		var pager = new StringBuilder("<div class=\"pager\">");
+		if (timeline.Page > 1)
+		{
+			pager.Append($"<a href=\"/timeline?{query}&page={timeline.Page - 1}\">← newer</a>");
+		}
+
+		if (timeline.HasMore)
+		{
+			pager.Append($"<a href=\"/timeline?{query}&page={timeline.Page + 1}\">older →</a>");
+		}
+
+		pager.Append($"<span class=\"muted\">page {timeline.Page}</span></div>");
 
 		var body = new StringBuilder(form.ToString());
-		body.Append($"<p>Unit: {string.Join(" ", unit.Select(name => $"<a class=\"chip\" href=\"{ComponentHref(name)}\">{E(name)}</a>"))}");
+		body.Append($"<p>Unit: {string.Join(" ", unit.Select(name => $"<a class=\"pickchip c{colour[name]}\" href=\"{ComponentHref(name)}\">{E(name)}</a>"))}");
 		if (added.Count > 0)
 		{
 			body.Append($" <span class=\"muted\">({E(string.Join(", ", added))} joined as dependencies)</span>");
@@ -406,7 +432,8 @@ internal sealed partial class Dashboard
 		}
 		else
 		{
-			body.Append("<table class=\"list\"><tr><th>Time</th><th>Component</th><th>Commit</th><th>Subject</th><th>Author</th></tr>");
+			body.Append(timeline.Page > 1 || timeline.HasMore ? pager.ToString() : "").Append(Charts.Legend(("tl-plain", "commit"), ("tl-result", "a run's result"), ("tl-integration", "an integration's merge")));
+			body.Append($"<table class=\"list timeline\"><tr><th>Time</th><th style=\"width:{unit.Count * 14 + 12}px\"></th><th>Component</th><th>Commit</th><th>Subject</th><th>Made by</th></tr>");
 			string? day = null;
 			foreach (var entry in timeline.Entries)
 			{
@@ -414,36 +441,45 @@ internal sealed partial class Dashboard
 				if (entryDay != day)
 				{
 					day = entryDay;
-					body.Append($"<tr><th colspan=\"5\">{E(day)}</th></tr>");
+					body.Append($"<tr><th colspan=\"6\">{E(day)}</th></tr>");
 				}
 
+				var kind = entry.Provenance?.Kind switch
+				{
+					CommitProvenance.Result => "tl-result",
+					CommitProvenance.Integration => "tl-integration",
+					_ => "tl-plain"
+				};
+				var madeBy = entry.Provenance switch
+				{
+					{ Kind: CommitProvenance.Integration, IntegrationId: { } integration } => $"{IntegrationLink(integration)}<div class=\"muted\">merging {RunLink(entry.Provenance.RunId)}</div>",
+					{ } provenance => $"run {RunLink(provenance.RunId)}",
+					_ => $"<span class=\"muted\">{E(entry.Author)}</span>"
+				};
 				body.Append($"""
 					<tr><td class="muted">{entry.Date.ToUniversalTime():HH:mm}</td>
-					<td><a class="chip" href="{ComponentHref(entry.Component)}">{E(entry.Component)}</a></td>
+					<td class="lanes" style="--lanes:{unit.Count}"><span class="lanedot {kind} c{colour[entry.Component]}" style="--lane:{lane[entry.Component]}" title="{E(entry.Component)}"></span></td>
+					<td><a class="pickchip c{colour[entry.Component]}" href="{ComponentHref(entry.Component)}">{E(entry.Component)}</a></td>
 					<td><a class="hash" href="/commit/{Url(entry.Component)}/{Url(entry.Hash)}">{E(entry.ShortHash)}</a></td>
-					<td>{E(entry.Subject)} {string.Concat(entry.Refs.Select(Ref))}</td>
-					<td class="muted">{E(entry.Author)}</td></tr>
+					<td>{E(entry.Subject)} {string.Concat(TimelineRefs(entry.Refs).Select(Ref))}</td>
+					<td>{madeBy}</td></tr>
 					""");
 			}
 
 			body.Append("</table>");
 		}
 
-		var query = string.Join("&", chosen.Select(name => $"c={Url(name)}")) + $"&n={timeline.PageSize}";
-		body.Append("<div class=\"pager\">");
-		if (timeline.Page > 1)
-		{
-			body.Append($"<a href=\"/timeline?{query}&page={timeline.Page - 1}\">← newer</a>");
-		}
-
-		if (timeline.HasMore)
-		{
-			body.Append($"<a href=\"/timeline?{query}&page={timeline.Page + 1}\">older →</a>");
-		}
-
-		body.Append($"<span class=\"muted\">page {timeline.Page}</span></div>");
+		body.Append(pager);
 		return View("/timeline", "Timeline", body.ToString());
 	}
+
+	/// <summary>
+	/// The refs worth a chip: a run's or an integration's branch (<c>agent-run/&lt;key&gt;</c>) is dropped where its own
+	/// tag (<c>agent-run/&lt;key&gt;/&lt;n&gt;</c>) is on the same commit, since both name the same thing.
+	/// </summary>
+	internal static IEnumerable<string> TimelineRefs(IReadOnlyList<string> refs) =>
+		refs.Where(name => !refs.Any(other => other.Length > name.Length && other.StartsWith(name + "/", StringComparison.Ordinal)
+			&& (name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal) || name.StartsWith(IntegrationRecord.RefPrefix, StringComparison.Ordinal))));
 
 	private async Task<IResult> CommitAsync(string component, string hash)
 	{

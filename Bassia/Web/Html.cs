@@ -164,11 +164,33 @@ internal static class Html
 		.notice { background:#eef6ee; border:1px solid #bfdcbf; color:var(--ok); padding:8px 12px; border-radius:4px; margin:10px 0; }
 		button { font:inherit; padding:4px 12px; border:1px solid var(--head); background:var(--head); color:#fff; border-radius:4px; cursor:pointer; }
 		input[type=number] { font:inherit; padding:3px 6px; border:1px solid var(--line); border-radius:4px; width:80px; }
-		.pick { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:6px 16px; margin:6px 0 12px; }
+		.pick { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:6px 16px; margin:6px 0 10px; }
 		.pager { margin:10px 0; } .pager a { margin-right:14px; }
 		.filters { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 10px; }
 		.filters a.filter { padding:2px 10px; border:1px solid var(--line); border-radius:12px; text-decoration:none; color:var(--fg); background:var(--panel); }
 		.filters a.filter.active { background:var(--head); color:#fff; border-color:var(--head); }
+
+		/* timeline */
+		.pickchip { display:inline-block; padding:1px 8px; border-radius:10px; border:1px solid var(--line); background:#fff; color:var(--fg); text-decoration:none; margin:0 4px 2px 0; }
+		label.pickchip { cursor:pointer; } label.pickchip input { margin:0 4px 0 0; vertical-align:-1px; }
+		.pickchip.c0 { border-color:#3b6fd0; } .pickchip.c1 { border-color:#1f8a4c; } .pickchip.c2 { border-color:#c27c0e; } .pickchip.c3 { border-color:#7a4cc2; }
+		.pickchip.c4 { border-color:#0f8b8d; } .pickchip.c5 { border-color:#c0392b; } .pickchip.c6 { border-color:#5b6b82; } .pickchip.c7 { border-color:#b0458f; }
+		.pickchip { border-left-width:5px; }
+		form.autosubmit .pick { display:flex; flex-wrap:wrap; gap:4px; }
+		.starts { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); gap:8px; margin:8px 0; }
+		.starts a.start { display:block; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; text-decoration:none; color:var(--fg); }
+		.starts a.start:hover { border-color:var(--accent); } .starts a.start .muted { display:block; font-size:12.5px; margin-top:3px; }
+		table.timeline td.lanes { position:relative; padding:0;
+		  background:repeating-linear-gradient(to right, transparent 0 13px, #d9dee7 13px 14px, transparent 14px 14px) 6px 0 / calc(var(--lanes) * 14px) 100% no-repeat; }
+		.lanedot { position:absolute; top:11px; left:calc(6px + var(--lane) * 14px + 13.5px - 6px); width:12px; height:12px; border-radius:50%; background:#fff; border:2.5px solid; box-sizing:border-box; }
+		.lanedot.c0 { border-color:#3b6fd0; } .lanedot.c1 { border-color:#1f8a4c; } .lanedot.c2 { border-color:#c27c0e; } .lanedot.c3 { border-color:#7a4cc2; }
+		.lanedot.c4 { border-color:#0f8b8d; } .lanedot.c5 { border-color:#c0392b; } .lanedot.c6 { border-color:#5b6b82; } .lanedot.c7 { border-color:#b0458f; }
+		.lanedot.tl-result { background:currentColor; } .lanedot.tl-result.c0 { color:#3b6fd0; } .lanedot.tl-result.c1 { color:#1f8a4c; } .lanedot.tl-result.c2 { color:#c27c0e; }
+		.lanedot.tl-result.c3 { color:#7a4cc2; } .lanedot.tl-result.c4 { color:#0f8b8d; } .lanedot.tl-result.c5 { color:#c0392b; } .lanedot.tl-result.c6 { color:#5b6b82; } .lanedot.tl-result.c7 { color:#b0458f; }
+		.lanedot.tl-integration { box-shadow:0 0 0 2.5px #fff, 0 0 0 4.5px #7a4cc2; }
+		i.tl-plain { background:#fff; border:2px solid var(--grey); box-sizing:border-box; } i.tl-result { background:var(--grey); }
+		i.tl-integration { background:#fff; border:2px solid var(--grey); box-shadow:0 0 0 2px #fff, 0 0 0 3.5px #7a4cc2; margin-right:9px !important; }
+		table.timeline .pager { margin:4px 0; }
 
 		/* charts */
 		.chart-box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; overflow:auto; margin:6px 0 10px; width:fit-content; max-width:100%; }
@@ -302,6 +324,11 @@ internal static class Html
 		        return r.text().then(function (html) { el.innerHTML = html; tick(); if (!live) clearInterval(timer); });
 		      }).catch(function () { clearInterval(timer); });
 		    }, 2000);
+		  });
+
+		  // A filter form reloads the page as soon as a choice changes.
+		  document.querySelectorAll('form.autosubmit input[type=checkbox]').forEach(function (box) {
+		    box.addEventListener('change', function () { box.form.submit(); });
 		  });
 
 		  // Clocks of live runs tick every second between refreshes.

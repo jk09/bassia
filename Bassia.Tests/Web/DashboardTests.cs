@@ -111,7 +111,9 @@ public class DashboardTests
 		var empty = await host.GetAsync("/timeline");
 		var unit = await host.GetAsync("/timeline?c=app");
 
-		Assert.Contains("Choose the components to follow", empty);
+		Assert.Contains("never the whole monorepo at once", empty);
+		Assert.Contains("href=\"/timeline?c=app\"", empty); // a one-click start per component
+		Assert.Contains("with lib</span>", empty);
 		Assert.DoesNotContain("Initial commit", empty);
 		Assert.Contains("lib joined as dependencies", unit);
 		Assert.Contains("href=\"/components/app\">app</a></td>", unit);
@@ -149,6 +151,8 @@ public class DashboardTests
 		var page = await host.GetAsync("/timeline?c=app&n=3");
 		Assert.Contains("older →", page);
 		Assert.Contains($"href=\"/runs/{TestEnvironment.RunIdOf(run.Output)}\"", page); // the run's tag links to it
+		Assert.Contains("class=\"lanedot tl-result", page); // its result commits are marked as such
+		Assert.Contains("run <a class=\"id\"", page); // and say which run made them
 		Assert.Contains("← newer", await host.GetAsync("/timeline?c=app&n=3&page=2"));
 	}
 
@@ -214,6 +218,14 @@ public class DashboardTests
 		Assert.Contains(">1</span>", html); // too narrow for its label
 		Assert.Contains("title=\"by the resolver: 1\"", html);
 		Assert.Contains("1 by the resolver</span>", html); // named in the legend
+	}
+
+	[Fact]
+	public void TimelineRefs_DropARunsBranchWhereItsTagIsOnTheSameCommit()
+	{
+		Assert.Equal(["main", "agent-run/fox-aaaaaa/0", "integration/owl-bbbbbb/0", "release/1"],
+			Dashboard.TimelineRefs(["main", "agent-run/fox-aaaaaa/0", "agent-run/fox-aaaaaa", "integration/owl-bbbbbb/0", "integration/owl-bbbbbb", "release/1"]));
+		Assert.Equal(["agent-run/fox-aaaaaa"], Dashboard.TimelineRefs(["agent-run/fox-aaaaaa"])); // a branch alone stays
 	}
 
 	[Fact]
