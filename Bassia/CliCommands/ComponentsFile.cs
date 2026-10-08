@@ -13,8 +13,11 @@ internal static class ComponentsFile
 {
 	public static string PathOf(string root) => Path.Combine(root, Monorepo.MetaRepoFolderName, "components.toml");
 
-	/// <summary>Appends a new <c>[[component]]</c> block; an empty <paramref name="url"/> (a component with no upstream) is left out.</summary>
-	public static void Add(string root, string name, string url, IReadOnlyList<ComponentReference> references)
+	/// <summary>
+	/// Appends a new <c>[[component]]</c> block; an empty <paramref name="url"/> (a component with no upstream) is left out.
+	/// A fork records the component it came from and the commit it forked at.
+	/// </summary>
+	public static void Add(string root, string name, string url, IReadOnlyList<ComponentReference> references, string? forkOf = null, string? forkCommit = null)
 	{
 		var builder = new StringBuilder($"\n[[component]]\nname = {ConfigFile.Quote(name)}\n");
 		if (url.Length > 0)
@@ -25,6 +28,16 @@ internal static class ComponentsFile
 		if (references.Count > 0)
 		{
 			builder.Append(ReferencesLine(references)).Append('\n');
+		}
+
+		if (forkOf is not null)
+		{
+			builder.Append($"fork_of = {ConfigFile.Quote(forkOf)}\n");
+		}
+
+		if (forkCommit is not null)
+		{
+			builder.Append($"fork_commit = {ConfigFile.Quote(forkCommit)}\n");
 		}
 
 		Edit(root, text => text + builder);

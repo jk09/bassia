@@ -80,7 +80,7 @@ exit codes and the stdout/stderr split are the same. `-human` after a rest-of-li
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
-| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]` |
+| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
@@ -348,6 +348,21 @@ bassia -C R:\ component unwind -name app
   commits missing from a repository are fetched from the submodule's URL. A pinned commit that cannot be found, a
   submodule without a URL, a cycle, or a path where the parent already nests another component fails the unwind and
   nothing changes (`component add -unwind` then adds nothing either). The meta-repo is committed once.
+
+### Forking instead of branching
+
+A component has a single main branch. To work in parallel, fork it:
+
+```
+bassia component fork -name app -as app-search            # fork at the head of app's main branch
+bassia component fork -name app -as app-hotfix -ref v1    # fork at a tag or commit on that branch
+```
+
+The fork is a new component with its own repository and its own main branch (named like the parent's). It keeps
+the parent's history up to the fork point with the same commit ids, and the tags on that history; the parent's run
+and integration tags stay behind. Afterwards the two are independent. `components.toml` records `fork_of` and
+`fork_commit`, and the fork references what the parent does unless `-references` says otherwise. Components that
+referenced the parent keep doing so; point one at the fork with `component set`.
 
 ### Tags across components
 
