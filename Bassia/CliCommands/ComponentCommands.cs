@@ -22,6 +22,7 @@ internal static class ComponentCommands
 		{
 			["name"] = status.Name,
 			["url"] = status.Definition.Url,
+			["fork_of"] = status.Definition.ForkOf,
 			["path"] = monorepo.SourceRepoDir(status.Name),
 			["has_repo"] = status.HasRepo,
 			["references"] = status.Definition.References.Select(Describe).ToList(),
@@ -136,6 +137,8 @@ internal static class ComponentCommands
 			{
 				["name"] = component.Name,
 				["url"] = component.Url,
+				["fork_of"] = component.ForkOf,
+				["fork_commit"] = component.ForkCommit,
 				["path"] = sourceDir,
 				["has_repo"] = hasRepo,
 				["default_branch"] = defaultBranch is { ExitCode: 0 } ? defaultBranch.Output.Trim() : null,
@@ -221,12 +224,7 @@ internal static class ComponentCommands
 		var purged = false;
 		if (invocation.Has("purge") && Directory.Exists(sourceDir))
 		{
-			foreach (var file in Directory.EnumerateFiles(sourceDir, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
-			{
-				File.SetAttributes(file, FileAttributes.Normal);
-			}
-
-			Directory.Delete(sourceDir, recursive: true);
+			DeleteDirectory(sourceDir);
 			purged = true;
 		}
 
@@ -275,6 +273,127 @@ internal static class ComponentCommands
 				["commit"] = commit.Output.Trim(),
 				["tag_message"] = message,
 				["select"] = $"{component.Name}@{tag}"
+			});
+	}
+
+	// ----- bassia component fork -----
+
+	/// <summary>Run and integration tags belong to the parent's runs; a fork starts without them.</summary>
+	private static readonly string[] ForeignTagPrefixes = ["agent-run/", "integration/"];
+
+	public static async Task<int> ForkAsync(Invocation invocation)
+	{
+		var monorepo = AgentCommand.LoadMonorepo();
+		var parent = RequireComponent(monorepo, invocation.Require("name"));
+		var name = invocation.Require("as");
+		if (name.StartsWith('.') || name.Any(c => char.IsWhiteSpace(c) || c is '/' or '\\' or ':'))
+		{
+			throw new MonorepoException($"'{name}' is not a valid component name: no whitespace, path separators or leading dot.");
+		}
+
+		if (monorepo.FindComponent(name) is not null)
+		{
+			throw new MonorepoException($"Component '{name}' is already registered.");
+		}
+
+		var forkDir = monorepo.SourceRepoDir(name);
+		if (Directory.Exists(forkDir) || File.Exists(forkDir))
+		{
+			throw new MonorepoException($"'{forkDir}' already exists; choose another name with -as.");
+		}
+
+		var references = invocation.Has("references") ? ComponentsFile.ParseReferences(invocation.List("references")) : parent.References;
+		foreach (var reference in references.Where(reference => monorepo.FindComponent(reference.Name) is null))
+		{
+			throw new MonorepoException($"-references names '{reference.Name}', which is not registered.");
+		}
+
+		var url = invocation.Get("url") ?? "";
+		var parentDir = RequireRepo(monorepo, parent.Name);
+		var source = GitClient.In(parentDir);
+		var head = await source.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+		if (head.ExitCode != 0 || head.Output.Trim().Length == 0)
+		{
+			throw new GitException($"Component '{parent.Name}' has no main branch to fork.");
+		}
+
+		var branch = head.Output.Trim();
+		var target = invocation.Get("ref") ?? branch;
+		var resolved = await source.RunAsync(["rev-parse", "--verify", "--quiet", $"{target}^{{commit}}"]);
+		if (resolved.ExitCode != 0)
+		{
+			throw new GitException($"'{target}' does not name a commit in component '{parent.Name}'.");
+		}
+
+		var commit = resolved.Output.Trim();
+		var onMain = await source.RunAsync(["merge-base", "--is-ancestor", commit, $"refs/heads/{branch}"]);
+		if (onMain.ExitCode != 0)
+		{
+			throw new GitException($"'{target}' ({commit[..10]}) is not on the main branch '{branch}' of component '{parent.Name}'.");
+		}
+
+		var tags = (await source.RunOrThrowAsync(["tag", "--merged", commit, "--format=%(refname:strip=2)"]))
+			.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+			.Where(tag => !ForeignTagPrefixes.Any(prefix => tag.StartsWith(prefix, StringComparison.Ordinal)))
+			.ToList();
+
+		string meta;
+		try
+		{
+			var clone = await new GitClient(monorepo.Root).RunAsync(
+				["clone", "--bare", "--single-branch", "--no-tags", "--branch", branch, parentDir, Path.Combine(forkDir, ".git")]);
+			if (clone.ExitCode != 0)
+			{
+				throw new GitException($"git clone failed: {clone.Error.Trim()}");
+			}
+
+			var fork = GitClient.In(forkDir);
+			if (tags.Count > 0)
+			{
+				await fork.RunOrThrowAsync(["fetch", "--quiet", "--no-tags", "origin", .. tags.Select(tag => $"+refs/tags/{tag}:refs/tags/{tag}")]);
+			}
+
+			await fork.RunOrThrowAsync(["remote", "remove", "origin"]);
+			if (url.Length > 0)
+			{
+				await fork.RunOrThrowAsync(["remote", "add", "origin", url]);
+			}
+
+			var tip = await fork.RunOrThrowAsync(["rev-parse", $"refs/heads/{branch}"]);
+			if (tip != commit)
+			{
+				// Fork before the head: drop the later commits, which only the clone brought along.
+				await fork.RunOrThrowAsync(["update-ref", $"refs/heads/{branch}", commit]);
+				await fork.RunOrThrowAsync(["reflog", "expire", "--expire=now", "--all"]);
+				await fork.RunOrThrowAsync(["gc", "--quiet", "--prune=now"]);
+			}
+
+			ComponentsFile.Add(monorepo.Root, name, url, references, parent.Name, commit);
+			meta = await MonorepoCommands.CommitMetaRepoAsync(monorepo.Root, $"Fork component '{parent.Name}' as '{name}' at {commit[..10]}") ?? "";
+		}
+		catch
+		{
+			if (Directory.Exists(forkDir))
+			{
+				DeleteDirectory(forkDir);
+			}
+
+			throw;
+		}
+
+		return ProgramCli.WriteResult(true, invocation.Command,
+			$"Forked '{parent.Name}' as '{name}' at {commit[..10]} on '{branch}'; select it for a run with -select {name}@<tag> after tagging a baseline with 'bassia component tag -name {name} -tag <tag>'.",
+			new Dictionary<string, object?>
+			{
+				["name"] = name,
+				["fork_of"] = parent.Name,
+				["fork_commit"] = commit,
+				["branch"] = branch,
+				["url"] = url,
+				["path"] = forkDir,
+				["tags"] = tags,
+				["references"] = references.Select(Describe).ToList(),
+				["meta_repo_commit"] = meta.Length > 0 ? meta : null
 			});
 	}
 
@@ -343,6 +462,17 @@ internal static class ComponentCommands
 	{
 		var sourceDir = monorepo.SourceRepoDir(name);
 		return Directory.Exists(sourceDir) ? sourceDir : throw new MonorepoException($"Component '{name}' has no repository at '{sourceDir}'.");
+	}
+
+	/// <summary>Deletes a folder tree, including the read-only pack files git leaves behind.</summary>
+	private static void DeleteDirectory(string directory)
+	{
+		foreach (var file in Directory.EnumerateFiles(directory, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+		{
+			File.SetAttributes(file, FileAttributes.Normal);
+		}
+
+		Directory.Delete(directory, recursive: true);
 	}
 
 	/// <summary>How many live runs work on each component: recorded runs still <c>started</c> whose process is alive.</summary>

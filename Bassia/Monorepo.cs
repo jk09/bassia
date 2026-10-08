@@ -7,7 +7,8 @@ using Tomlyn.Model;
 /// A component registered in the meta-repo's <c>components.toml</c>. <paramref name="References"/> are the
 /// outgoing edges of the (acyclic) component reference graph: components this one nests as subfolders.
 /// </summary>
-internal sealed record ComponentDefinition(string Name, string Url, IReadOnlyList<ComponentReference> References);
+/// <remarks><paramref name="ForkOf"/> and <paramref name="ForkCommit"/> name the component this one was forked from and the commit it forked at.</remarks>
+internal sealed record ComponentDefinition(string Name, string Url, IReadOnlyList<ComponentReference> References, string? ForkOf = null, string? ForkCommit = null);
 
 /// <summary>A nested component and the subfolder (relative to the referencing component) where it is expected.</summary>
 internal sealed record ComponentReference(string Name, string Path);
@@ -220,7 +221,9 @@ internal sealed class Monorepo
 			}
 
 			var url = componentTable.TryGetValue("url", out var urlValue) ? urlValue as string ?? "" : "";
-			components.Add(new ComponentDefinition(name, url, ReadReferences(name, componentTable)));
+			var forkOf = componentTable.TryGetValue("fork_of", out var forkOfValue) ? forkOfValue as string : null;
+			var forkCommit = componentTable.TryGetValue("fork_commit", out var forkCommitValue) ? forkCommitValue as string : null;
+			components.Add(new ComponentDefinition(name, url, ReadReferences(name, componentTable), forkOf, forkCommit));
 		}
 
 		return components;

@@ -13,7 +13,7 @@ internal static class CommandTable
 		["add-component"] = "'bassia add-component' was replaced by 'bassia component add -url <url> [-name <name>]'.",
 		["integrate"] = "'bassia integrate' was replaced by 'bassia integration plan|start|advance'.",
 		["commit"] = "'bassia commit' was removed: 'bassia config set' and the 'bassia component' commands commit the meta-repo themselves; use 'git -C .bassia commit' for hand edits.",
-		["branch"] = "'bassia branch' was removed: 'bassia component show -name <component>' lists a component's branches and tags.",
+		["branch"] = "'bassia branch' was removed: a component has a single main branch; use 'bassia component fork -name <component> -as <fork>' to work in parallel ('bassia component show -name <component>' lists its tags).",
 		["ui"] = "'bassia ui' was removed: use the command line, or 'bassia web' for the web dashboard."
 	};
 
@@ -144,6 +144,21 @@ internal static class CommandTable
 			],
 			["bassia component remove -name old-lib", "bassia component remove -name old-lib -purge"],
 			ComponentCommands.RemoveAsync, Positional: "name"),
+
+		new("component", "fork", "Fork a component into a new one with its own main branch that keeps the parent's main-branch history up to the fork point - Bassia's replacement for branching.",
+			[
+				new("name", "component", "The component to fork (the parent).", Required: true),
+				new("as", "fork", "The name of the new component.", Required: true),
+				new("ref", "commit-ish", "Where to fork: a tag or commit on the parent's main branch (default: its head)."),
+				new("url", "url", "Upstream repository of the fork, set as its origin (default: none)."),
+				new("references", "component[:path],...", "Components the fork nests (default: the parent's references).")
+			],
+			["bassia component fork -name app -as app-search", "bassia component fork app -as app-hotfix -ref v1"],
+			ComponentCommands.ForkAsync, Positional: "name",
+			Details: "The fork is a bare repository next to the meta-repo with a single branch, named like the parent's, at the fork point; commit ids " +
+				"of the history are unchanged and the tags on that history come along (run and integration tags do not). Parent and fork are " +
+				"independent afterwards. components.toml records fork_of and fork_commit; the parent and the components referencing it are not " +
+				"changed - point a referrer at the fork with 'bassia component set'. Bring the work back with a run and an integration."),
 
 		new("component", "tag", "Create an annotated tag in a component - the baseline a run selects with -select <component>@<tag>.",
 			[
