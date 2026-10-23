@@ -52,6 +52,22 @@ internal sealed partial class Dashboard
 		}
 
 		body.Append("</table><p class=\"muted\">A bold value is set for that component itself; the others come from <code>merge.*</code>.</p>");
+
+		body.Append("<h2>Lock filter per component</h2><p class=\"muted\">The <code>lock.*</code> settings as each component gets them; override one component with <code>lock.component.&lt;name&gt;.&lt;setting&gt;</code>. <a href=\"/locks\">Who holds what</a>.</p>");
+		body.Append("<table class=\"list\"><tr><th>Component</th><th>Files</th><th>Folders</th><th>Lock conflict</th></tr>");
+		foreach (var component in monorepo.Components)
+		{
+			string Cell(string setting)
+			{
+				var value = config.Resolve(ConfigFile.ComponentKey("lock", component.Name, setting));
+				var own = value.SetAs == value.Key.Key && value.Layer != ConfigLayer.Default;
+				return $"<td><span class=\"pv v-{E(value.Value.Split(',')[0])}{(own ? " own" : "")}\" title=\"{E(value.Source)}\">{E(value.Value.Length == 0 ? "-" : value.Value)}</span></td>";
+			}
+
+			body.Append($"<tr><td><a href=\"{ComponentHref(component.Name)}\"><b>{E(component.Name)}</b></a></td>{Cell("files")}{Cell("folders")}{Cell("conflict")}</tr>");
+		}
+
+		body.Append("</table>");
 		return View("/config", "Configuration", body.ToString());
 	}
 }

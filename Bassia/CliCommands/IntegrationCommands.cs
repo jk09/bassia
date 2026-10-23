@@ -494,6 +494,7 @@ internal static class IntegrationCommands
 					MergeStrategy.Syntactic => "SYNTAX",
 					MergeStrategy.Structural => "STRUCT",
 					MergeStrategy.Semantic => "SEMANTIC",
+					MergeStrategy.Manual => "MANUAL",
 					_ => "SKIP"
 				} + (step.Overridden ? "*" : "");
 				builder.Append(i == component.Steps.Count - 1 ? "`-- " : "|-- ")
@@ -508,6 +509,11 @@ internal static class IntegrationCommands
 				if (step.Conflicts.Count > 0)
 				{
 					builder.Append("  [").Append(string.Join(", ", step.Conflicts)).Append(']');
+				}
+
+				if (step.LockConflicts.Count > 0)
+				{
+					builder.Append("  lock conflict(s): ").Append(step.LockConflicts.Count);
 				}
 
 				if (step.Structural is { } structural)

@@ -42,8 +42,7 @@ internal sealed class JobRegistry(Monorepo monorepo)
 	{
 		Directory.CreateDirectory(Dir);
 		File.Delete(StopPath(id));
-		using var self = Process.GetCurrentProcess();
-		var job = new JobInfo(id, kind, Environment.ProcessId, Stamp(self.StartTime), RunMetadata.Timestamp(), log, detached, hosted, null);
+		var job = new JobInfo(id, kind, Environment.ProcessId, CurrentProcessStart(), RunMetadata.Timestamp(), log, detached, hosted, null);
 		Write(job);
 		return new JobHandle(this, job, StopPath(id));
 	}
@@ -93,22 +92,27 @@ internal sealed class JobRegistry(Monorepo monorepo)
 	/// Whether the job's process is still running. The process's start time has to match the registration too, so a
 	/// recycled process id never makes a long-finished job look live.
 	/// </summary>
-	public static bool IsAlive(JobInfo? job)
-	{
-		if (job is null || job.Finished is not null)
-		{
-			return false;
-		}
+	public static bool IsAlive(JobInfo? job) => job is not null && job.Finished is null && IsProcessAlive(job.Pid, job.ProcessStart);
 
+	/// <summary>Whether the process <paramref name="pid"/> runs and started at <paramref name="processStart"/> (as <see cref="CurrentProcessStart"/> records it).</summary>
+	public static bool IsProcessAlive(int pid, string processStart)
+	{
 		try
 		{
-			using var process = Process.GetProcessById(job.Pid);
-			return !process.HasExited && Stamp(process.StartTime) == job.ProcessStart;
+			using var process = Process.GetProcessById(pid);
+			return !process.HasExited && Stamp(process.StartTime) == processStart;
 		}
 		catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
 		{
 			return false;
 		}
+	}
+
+	/// <summary>This process's start time, as recorded and compared to tell a live process from a recycled id.</summary>
+	public static string CurrentProcessStart()
+	{
+		using var self = Process.GetCurrentProcess();
+		return Stamp(self.StartTime);
 	}
 
 	/// <summary>Asks the job's process to stop; it notices within a fraction of a second.</summary>

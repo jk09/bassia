@@ -94,6 +94,16 @@ internal static class MergeBrief
 			brief.AppendLine($"- Collides on its own with the run(s): {string.Join(", ", input.ConflictsWith.Select(id => $"`{id}`"))}");
 		}
 
+		if (incoming.LockConflicts.Count > 0)
+		{
+			brief.AppendLine("- Lock conflicts: this run changed locked paths it did not hold, so it likely rewrote them without the other " +
+				"run's change. Even where git merged the text, make sure the result keeps what both runs meant:");
+			foreach (var conflict in incoming.LockConflicts)
+			{
+				brief.AppendLine($"  - {conflict}");
+			}
+		}
+
 		AppendSide(brief, input.Theirs);
 
 		brief.AppendLine("## What is already integrated (ours)");

@@ -82,6 +82,7 @@ internal sealed partial class Dashboard
 				<div class="progress"><span></span></div>
 				<div class="muted">{E(run.Record is null ? "selecting and checking out the components" : AgentCommand(run.Record))}</div>
 				<div class="comps">{string.Join(" ", components.Select(component => $"<span class=\"chip\">{E(component)}</span>"))}</div>
+				{(run.Holds is { Count: > 0 } || run.Waits is { Count: > 0 } ? $"<div class=\"comps\">{LockLine(run)}</div>" : "")}
 				<div class="tail">{E(run.LastLine ?? (run.Detached ? "" : "running in a terminal; its output is there"))}</div>
 				</a>
 				""");
@@ -172,7 +173,63 @@ internal sealed partial class Dashboard
 			body.Append("</table>");
 		}
 
+		body.Append(RunLocks(state, runId, metadata));
 		return View("/runs", $"Run {key}", body.ToString());
+	}
+
+	/// <summary>
+	/// A run's locks: what it holds and waits for now, and from its record what it held, which paths collided with
+	/// other runs and whose results it caught up with.
+	/// </summary>
+	private static string RunLocks(State state, string runId, RunMetadata? metadata)
+	{
+		var holds = state.Locks.OfRun(runId).ToList();
+		var waits = state.Locks.Waits.Where(wait => wait.Entry.RunId == runId).ToList();
+		var components = metadata?.Components ?? [];
+		if (holds.Count == 0 && waits.Count == 0 && components.All(component => component.Held.Count == 0 && component.LockConflicts.Count == 0 && component.CaughtUp.Count == 0))
+		{
+			return "";
+		}
+
+		var body = new StringBuilder("<h2>Locks</h2><table class=\"list facts\">");
+		if (holds.Count > 0)
+		{
+			body.Append($"<tr><td>{(holds[0].State == Locks.LockState.Released ? "Remembered until its results land" : "Holds now")}</td><td>" +
+				string.Concat(holds.Select(row => $"<span class=\"lockchip {LockCommands.StateName(row.State)}\">{E(row.Hold.Key.Display)}</span>")) + "</td></tr>");
+		}
+
+		if (waits.Count > 0)
+		{
+			body.Append("<tr><td>Waits for</td><td>" + string.Concat(waits.Select(wait =>
+				$"<span class=\"lockchip waiting\">{E(wait.Wait.Key.Display)}</span> {string.Join(" ", wait.HeldBy.Select(RunLink))}")) + "</td></tr>");
+		}
+
+		foreach (var component in components.Where(component => component.Held.Count > 0))
+		{
+			body.Append($"<tr><td>Held in {E(component.Name)}</td><td>{string.Concat(component.Held.Select(key => $"<span class=\"lockchip\">{E(key.Display)}</span>"))}</td></tr>");
+		}
+
+		foreach (var component in components.Where(component => component.CaughtUp.Count > 0))
+		{
+			body.Append($"<tr><td>Caught up in {E(component.Name)}</td><td>{string.Join("<br>", component.CaughtUp.Select(catchUp =>
+				$"{Ref(catchUp.Tag)} <span class=\"muted\">{E(string.Join(", ", catchUp.Files))}</span>"))}</td></tr>");
+		}
+
+		body.Append("</table>");
+		var conflicts = components.SelectMany(component => component.LockConflicts).ToList();
+		if (conflicts.Count > 0)
+		{
+			body.Append("<table class=\"list\"><tr><th>Lock conflict</th><th>With</th><th>Integration</th></tr>");
+			foreach (var conflict in conflicts)
+			{
+				body.Append($"<tr class=\"attn-row\"><td>{E(conflict.Describe())}</td><td>{RunLink(conflict.With)}</td>" +
+					$"<td>{LockPolicyText(Locks.LockFilter.ConflictPolicy(state.Monorepo.Config, conflict.Component))}</td></tr>");
+			}
+
+			body.Append("</table>");
+		}
+
+		return body.Append($"<p>{Cmd($"bassia lock list -run {RunMetadata.Key(runId)}")}</p>").ToString();
 	}
 
 	private async Task<IResult> RunFragmentAsync(HttpResponse response, string id)

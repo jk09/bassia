@@ -2,6 +2,7 @@ namespace Bassia;
 
 using System.Globalization;
 using Bassia.Git;
+using Bassia.Locks;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -30,6 +31,15 @@ internal sealed class ComponentRun
 	public string? ResultCommit { get; set; }
 	public string? ResultTag { get; set; }
 	public string? ResultError { get; set; }
+
+	/// <summary>What the run held in this component when its agent was done (see <see cref="Locks.RunLocks"/>).</summary>
+	public List<LockKey> Held { get; } = [];
+
+	/// <summary>Paths the run changed although another run held them, or without another run's result that changed them.</summary>
+	public List<LockConflict> LockConflicts { get; } = [];
+
+	/// <summary>Other runs' results brought into the checkout before the agent changed what they had changed (<c>bassia lock wait</c>).</summary>
+	public List<LockCatchUp> CaughtUp { get; } = [];
 }
 
 /// <summary>The agentic run record committed (as <c>run.toml</c>) into the <c>.agentic-runs</c> bare repo.</summary>
@@ -50,6 +60,13 @@ internal sealed class RunMetadata
 	/// <summary>The run folder holding every component's checkout.</summary>
 	public required string WorkspacePath { get; set; }
 	public int? AgentExitCode { get; set; }
+
+	/// <summary>The run's own lock patterns (<c>-lock-files</c>, <c>-lock-folders</c>), added to the configured ones; null when none.</summary>
+	public string? LockFiles { get; set; }
+	public string? LockFolders { get; set; }
+
+	/// <summary>Whether the run collided with another run's hold in any component.</summary>
+	public bool HasLockConflicts => Components.Any(component => component.LockConflicts.Count > 0);
 	public List<ComponentRun> Components { get; } = [];
 
 	public static string Timestamp() => DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
@@ -104,6 +121,8 @@ internal sealed class RunMetadata
 		};
 		if (Finished is not null) table["finished"] = Finished;
 		if (AgentExitCode is not null) table["agent_exit_code"] = (long)AgentExitCode.Value;
+		if (LockFiles is not null) table["lock_files"] = LockFiles;
+		if (LockFolders is not null) table["lock_folders"] = LockFolders;
 
 		var components = new TomlTableArray();
 		foreach (var component in Components)
@@ -131,6 +150,27 @@ internal sealed class RunMetadata
 				componentTable["junctions"] = junctions;
 			}
 
+			if (component.Held.Count > 0)
+			{
+				componentTable["held"] = Tables(component.Held, key => new TomlTable { ["path"] = key.Path, ["kind"] = LockKey.KindName(key.Kind) });
+			}
+
+			if (component.LockConflicts.Count > 0)
+			{
+				componentTable["lock_conflict"] = Tables(component.LockConflicts, conflict => new TomlTable
+				{
+					["path"] = conflict.Path, ["kind"] = conflict.Kind, ["with"] = conflict.With, ["with_path"] = conflict.WithPath, ["at"] = conflict.At
+				});
+			}
+
+			if (component.CaughtUp.Count > 0)
+			{
+				componentTable["caught_up"] = Tables(component.CaughtUp, catchUp => new TomlTable
+				{
+					["run"] = catchUp.Run, ["tag"] = catchUp.Tag, ["commit"] = catchUp.Commit, ["at"] = catchUp.At, ["files"] = LockEntry.Strings(catchUp.Files)
+				});
+			}
+
 			components.Add(componentTable);
 		}
 
@@ -151,7 +191,9 @@ internal sealed class RunMetadata
 			Select = Str(table, "select"),
 			Command = Str(table, "command"),
 			WorkspacePath = Str(table, "workspace"),
-			AgentExitCode = table.TryGetValue("agent_exit_code", out var exitCode) ? (int)(long)exitCode : null
+			AgentExitCode = table.TryGetValue("agent_exit_code", out var exitCode) ? (int)(long)exitCode : null,
+			LockFiles = OptStr(table, "lock_files"),
+			LockFolders = OptStr(table, "lock_folders")
 		};
 
 		if (table.TryGetValue("component", out var components) && components is TomlTableArray componentTables)
@@ -178,6 +220,22 @@ internal sealed class RunMetadata
 					}
 				}
 
+				foreach (var held in TablesOf(componentTable, "held"))
+				{
+					component.Held.Add(new LockKey(component.Name, Str(held, "path"), LockKey.ParseKind(Str(held, "kind"))));
+				}
+
+				foreach (var conflict in TablesOf(componentTable, "lock_conflict"))
+				{
+					component.LockConflicts.Add(new LockConflict(component.Name, Str(conflict, "path"), Str(conflict, "kind"), Str(conflict, "with"), Str(conflict, "with_path"), Str(conflict, "at")));
+				}
+
+				foreach (var catchUp in TablesOf(componentTable, "caught_up"))
+				{
+					component.CaughtUp.Add(new LockCatchUp(component.Name, Str(catchUp, "run"), Str(catchUp, "tag"), Str(catchUp, "commit"), Str(catchUp, "at"),
+						catchUp.TryGetValue("files", out var files) && files is TomlArray array ? array.OfType<string>().ToList() : []));
+				}
+
 				metadata.Components.Add(component);
 			}
 		}
@@ -186,6 +244,20 @@ internal sealed class RunMetadata
 	}
 
 	private static string Str(TomlTable table, string key) => (string)table[key];
+
+	private static TomlTableArray Tables<T>(IEnumerable<T> items, Func<T, TomlTable> map)
+	{
+		var array = new TomlTableArray();
+		foreach (var item in items)
+		{
+			array.Add(map(item));
+		}
+
+		return array;
+	}
+
+	private static IEnumerable<TomlTable> TablesOf(TomlTable table, string key) =>
+		table.TryGetValue(key, out var value) && value is TomlTableArray array ? array : [];
 	private static string? OptStr(TomlTable table, string key) => table.TryGetValue(key, out var value) ? value as string : null;
 }
 

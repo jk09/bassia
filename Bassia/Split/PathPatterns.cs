@@ -13,6 +13,7 @@ using System.Text.RegularExpressions;
 internal sealed class PathPatterns
 {
 	private readonly List<Regex> include = [];
+	private readonly List<Regex> exactInclude = [];
 	private readonly List<Regex> exclude = [];
 
 	public PathPatterns(IReadOnlyList<string> patterns)
@@ -28,6 +29,10 @@ internal sealed class PathPatterns
 			}
 
 			(negated ? exclude : include).Add(new Regex(ToRegex(body), RegexOptions.CultureInvariant | RegexOptions.Compiled));
+			if (!negated)
+			{
+				exactInclude.Add(new Regex(ToRegex(body, below: false), RegexOptions.CultureInvariant | RegexOptions.Compiled));
+			}
 		}
 	}
 
@@ -40,10 +45,18 @@ internal sealed class PathPatterns
 	public bool Matches(string path) =>
 		include.Any(regex => regex.IsMatch(path)) && !exclude.Any(regex => regex.IsMatch(path));
 
+	/// <summary>
+	/// Whether a pattern names <paramref name="path"/> itself rather than something above it: <c>src/*</c> names
+	/// <c>src/api</c> but not <c>src/api/v1</c>, which it only matches as being below <c>src/api</c>. An exclusion still
+	/// excludes everything below what it matches.
+	/// </summary>
+	public bool Names(string path) =>
+		exactInclude.Any(regex => regex.IsMatch(path)) && !exclude.Any(regex => regex.IsMatch(path));
+
 	private static string Normalize(string pattern) =>
 		pattern.Trim().Replace('\\', '/').TrimStart('/').TrimEnd('/');
 
-	private static string ToRegex(string glob)
+	private static string ToRegex(string glob, bool below = true)
 	{
 		var builder = new StringBuilder("^");
 		for (var i = 0; i < glob.Length; i++)
@@ -79,6 +92,6 @@ internal sealed class PathPatterns
 		}
 
 		// Whatever a pattern matches, it matches with everything below it.
-		return builder.Append("(?:/.*)?$").ToString();
+		return builder.Append(below ? "(?:/.*)?$" : "$").ToString();
 	}
 }

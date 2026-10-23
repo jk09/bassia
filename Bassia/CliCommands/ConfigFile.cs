@@ -14,9 +14,10 @@ internal enum ConfigLayer { Default, Monorepo, User }
 /// <summary>
 /// A setting <c>bassia config</c> reads and writes: its dotted key, the TOML table it lives in (<paramref name="Section"/>,
 /// one entry per table name) and its name there. <paramref name="Choices"/> limits the values; a
-/// <paramref name="IsList"/> setting is a TOML array, written as a comma-separated value. A merge setting can be
-/// overridden per component (<c>merge.component.&lt;name&gt;.&lt;setting&gt;</c>); such a key names its
-/// <paramref name="Component"/> and falls back to the global one.
+/// <paramref name="IsList"/> setting is a TOML array, written as a comma-separated value; an <paramref name="IsInteger"/>
+/// one takes a positive whole number. A merge or lock setting can be overridden per component
+/// (<c>merge.component.&lt;name&gt;.&lt;setting&gt;</c>, <c>lock.component.&lt;name&gt;.&lt;setting&gt;</c>); such a key names
+/// its <paramref name="Component"/> and falls back to the global one.
 /// </summary>
 internal sealed record ConfigKey(
 	string Key,
@@ -27,15 +28,17 @@ internal sealed record ConfigKey(
 	IReadOnlyList<string>? Choices = null,
 	bool IsList = false,
 	bool PerComponent = false,
-	string? Component = null)
+	string? Component = null,
+	bool IsInteger = false)
 {
 	/// <summary>The <c>[table]</c> header text, with names quoted where TOML needs it.</summary>
 	public string SectionText => string.Join('.', Section.Select(ConfigFile.TomlKey));
 
 	/// <summary>The global key a per-component key falls back to; the key itself otherwise.</summary>
-	public string GlobalKey => Component is null ? Key : $"merge.{Name}";
+	public string GlobalKey => Component is null ? Key : $"{Section[0]}.{Name}";
 
-	public string Allowed => Choices is null ? (IsList ? "a comma-separated list" : "any text") : string.Join(" | ", Choices);
+	public string Allowed => Choices is not null ? string.Join(" | ", Choices)
+		: IsList ? "a comma-separated list" : IsInteger ? "a whole number" : "any text";
 }
 
 /// <summary>A setting's effective value, the layer it comes from, and the key that was set (a component key or its global key).</summary>
@@ -52,7 +55,7 @@ internal sealed record ConfigValue(ConfigKey Key, string Value, ConfigLayer Laye
 /// <summary>
 /// Both configuration files as read at one moment. Every consumer reads settings through it, so the layering is
 /// decided in one place: a value in the user layer wins over the monorepo's, which wins over the default; a
-/// per-component merge setting is looked up first for the component, then globally.
+/// per-component merge or lock setting is looked up first for the component, then globally.
 /// </summary>
 internal sealed class ConfigSnapshot
 {
@@ -114,22 +117,25 @@ internal sealed class ConfigSnapshot
 
 	public string Value(string key) => Resolve(ConfigFile.Find(key)).Value;
 
-	/// <summary>The per-component merge keys set in either layer, in name order.</summary>
+	/// <summary>The per-component merge and lock keys set in either layer, in name order.</summary>
 	public IReadOnlyList<ConfigKey> ComponentKeys()
 	{
 		var keys = new SortedSet<string>(StringComparer.Ordinal);
 		foreach (var table in new[] { monorepo, user })
 		{
-			if (table.TryGetValue("merge", out var merge) && merge is TomlTable mergeTable
-				&& mergeTable.TryGetValue("component", out var components) && components is TomlTable componentTables)
+			foreach (var (group, known) in ConfigFile.ComponentSettings)
 			{
-				foreach (var (component, settings) in componentTables)
+				if (table.TryGetValue(group, out var groupValue) && groupValue is TomlTable groupTable
+					&& groupTable.TryGetValue("component", out var components) && components is TomlTable componentTables)
 				{
-					if (settings is TomlTable settingTable)
+					foreach (var (component, settings) in componentTables)
 					{
-						foreach (var name in settingTable.Keys.Where(name => ConfigFile.MergeSettings.Contains(name)))
+						if (settings is TomlTable settingTable)
 						{
-							keys.Add(ConfigFile.ComponentKey(component, name).Key);
+							foreach (var name in settingTable.Keys.Where(known.Contains))
+							{
+								keys.Add(ConfigFile.ComponentKey(group, component, name).Key);
+							}
 						}
 					}
 				}
@@ -139,17 +145,26 @@ internal sealed class ConfigSnapshot
 		return keys.Select(ConfigFile.Find).ToList();
 	}
 
-	/// <summary>Every value set outside its key's choices, as one message per value.</summary>
+	/// <summary>Every value set outside its key's choices (or not a whole number where one is needed), as one message per value.</summary>
 	public IReadOnlyList<string> Problems()
 	{
 		var problems = new List<string>();
-		foreach (var key in ConfigFile.Keys.Concat(ComponentKeys()).Where(key => key.Choices is not null))
+		foreach (var key in ConfigFile.Keys.Concat(ComponentKeys()).Where(key => key.Choices is not null || key.IsInteger))
 		{
 			foreach (var layer in new[] { ConfigLayer.Monorepo, ConfigLayer.User })
 			{
-				if (Raw(layer, key) is { } value && !key.Choices!.Contains(value.Trim(), StringComparer.OrdinalIgnoreCase))
+				if (Raw(layer, key) is not { } value)
+				{
+					continue;
+				}
+
+				if (key.Choices is { } choices && !choices.Contains(value.Trim(), StringComparer.OrdinalIgnoreCase))
 				{
 					problems.Add($"{key.Key} = '{value}' in {ConfigFile.FileName(layer)} is not one of {key.Allowed}");
+				}
+				else if (key.IsInteger && !ConfigFile.IsPositiveInteger(value))
+				{
+					problems.Add($"{key.Key} = '{value}' in {ConfigFile.FileName(layer)} is not a positive whole number");
 				}
 			}
 		}
@@ -170,6 +185,12 @@ internal static class ConfigFile
 
 	/// <summary>The merge settings a component can override.</summary>
 	public static readonly IReadOnlySet<string> MergeSettings = new HashSet<string>(StringComparer.Ordinal) { "semantic", "warnings", "manual_paths", "advance" };
+
+	/// <summary>The lock settings a component can override.</summary>
+	public static readonly IReadOnlySet<string> LockSettings = new HashSet<string>(StringComparer.Ordinal) { "files", "folders", "conflict" };
+
+	/// <summary>The groups with per-component settings (<c>&lt;group&gt;.component.&lt;name&gt;.&lt;setting&gt;</c>) and their settings.</summary>
+	public static readonly IReadOnlyList<(string Group, IReadOnlySet<string> Settings)> ComponentSettings = [("merge", MergeSettings), ("lock", LockSettings)];
 
 	public static readonly IReadOnlyList<ConfigKey> Keys =
 	[
@@ -195,13 +216,25 @@ internal static class ConfigFile
 		new("merge.advance", ["merge"], "advance", "manual",
 			"Whether a completed integration fast-forwards the base branches itself (auto) or waits for 'bassia integration advance' (manual).",
 			["manual", "auto"], PerComponent: true),
+		new("lock.files", ["lock"], "files", "",
+			"Path patterns (as in split plans, e.g. **/*.cs) of files a run holds one by one while its agent changes them; other runs see the hold and can wait for it.",
+			IsList: true, PerComponent: true),
+		new("lock.folders", ["lock"], "folders", "",
+			"Path patterns of folders a run holds as a whole while its agent changes any file in them: src/* is each folder directly under src, ** the folder of every file.",
+			IsList: true, PerComponent: true),
+		new("lock.conflict", ["lock"], "conflict", "resolver",
+			"What the integration does with a result that changed a path another run held: the resolver reviews it even if git merges it (resolver), it is left for a human (manual), or it merges like any other (merge).",
+			["resolver", "manual", "merge"], PerComponent: true),
+		new("lock.ttl", ["lock"], "ttl", "120",
+			"Seconds a hold lasts without its run renewing it: the holds of a crashed or suspended run expire after this.",
+			IsInteger: true),
 		new("llm.backend", ["llm"], "backend", Prompt.LlmBackends.DefaultName,
 			"LLM backend of 'bassia prompt': claude (Claude Code) or command (any command that reads the prompt on stdin and prints the reply)."),
 		new("llm.command", ["llm"], "command", Prompt.LlmBackends.DefaultCommand,
 			"Command the LLM backend of 'bassia prompt' runs; the prompt goes to its stdin. For the command backend, {model} is replaced by -model.")
 	];
 
-	private static readonly Regex ComponentKeyPattern = new(@"^merge\.component\.(?<component>.+)\.(?<setting>[a-z_]+)$", RegexOptions.CultureInvariant);
+	private static readonly Regex ComponentKeyPattern = new(@"^(?<group>merge|lock)\.component\.(?<component>.+)\.(?<setting>[a-z_]+)$", RegexOptions.CultureInvariant);
 
 	public static string PathOf(string root, ConfigLayer layer = ConfigLayer.Monorepo) =>
 		Path.Combine(root, Monorepo.MetaRepoFolderName, FileName(layer));
@@ -216,27 +249,34 @@ internal static class ConfigFile
 		}
 
 		var match = ComponentKeyPattern.Match(key);
-		if (match.Success && MergeSettings.Contains(match.Groups["setting"].Value))
+		if (match.Success && ComponentSettings.Any(entry => entry.Group == match.Groups["group"].Value && entry.Settings.Contains(match.Groups["setting"].Value)))
 		{
-			return ComponentKey(match.Groups["component"].Value, match.Groups["setting"].Value);
+			return ComponentKey(match.Groups["group"].Value, match.Groups["component"].Value, match.Groups["setting"].Value);
 		}
 
 		throw new MonorepoException($"Unknown configuration key '{key}'. Known keys: {string.Join(", ", Keys.Select(candidate => candidate.Key))}, " +
-			$"and merge.component.<component>.<{string.Join("|", MergeSettings)}> for one component.");
+			$"and {string.Join(" and ", ComponentSettings.Select(entry => $"{entry.Group}.component.<component>.<{string.Join("|", entry.Settings)}>"))} for one component.");
 	}
 
-	public static ConfigKey ComponentKey(string component, string setting)
+	/// <summary>A merge setting for one component: <c>merge.component.&lt;component&gt;.&lt;setting&gt;</c>.</summary>
+	public static ConfigKey ComponentKey(string component, string setting) => ComponentKey("merge", component, setting);
+
+	/// <summary>A merge or lock setting for one component: <c>&lt;group&gt;.component.&lt;component&gt;.&lt;setting&gt;</c>.</summary>
+	public static ConfigKey ComponentKey(string group, string component, string setting)
 	{
-		var global = Keys.First(key => key.Key == $"merge.{setting}");
+		var global = Keys.First(key => key.Key == $"{group}.{setting}");
 		return global with
 		{
-			Key = $"merge.component.{component}.{setting}",
-			Section = ["merge", "component", component],
+			Key = $"{group}.component.{component}.{setting}",
+			Section = [group, "component", component],
 			Component = component,
 			PerComponent = false,
 			Description = $"{global.Description} For component '{component}' only; falls back to {global.Key}."
 		};
 	}
+
+	public static bool IsPositiveInteger(string value) =>
+		int.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) && number > 0;
 
 	/// <summary>The value set in one layer, or null when that layer does not set it.</summary>
 	public static string? Get(string root, ConfigKey key, ConfigLayer layer = ConfigLayer.Monorepo) => ConfigSnapshot.Load(root).Raw(layer, key);
@@ -253,6 +293,11 @@ internal static class ConfigFile
 		{
 			return choices.FirstOrDefault(choice => string.Equals(choice, value.Trim(), StringComparison.OrdinalIgnoreCase))
 				?? throw new MonorepoException($"'{value}' is not a valid value for {key.Key}; use {key.Allowed}.");
+		}
+
+		if (key.IsInteger)
+		{
+			return IsPositiveInteger(value) ? value.Trim() : throw new MonorepoException($"'{value}' is not a valid value for {key.Key}; use a positive whole number.");
 		}
 
 		return value;
