@@ -17,7 +17,7 @@ internal sealed record CommandCheck(CommandSpec? Spec, IReadOnlyList<string> Arg
 internal static class CommandCatalog
 {
 	/// <summary>Commands the prompt layer never runs: itself (no recursion) and the dashboard (it never returns).</summary>
-	public static readonly IReadOnlySet<string> Excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "prompt", "web" };
+	public static readonly IReadOnlySet<string> Excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "prompt", "web", "tutorial" };
 
 	/// <summary>
 	/// Commands that only read: they run without confirmation. Anything else - including every command added later -

@@ -172,7 +172,10 @@ dotnet build
 dotnet run --project Bassia -- help
 ```
 
-Then:
+Then type `bassia` in an empty folder. At a terminal it offers a guided setup: it asks which repositories to add,
+which needs which and where the monorepo goes, then runs the `bassia` commands that do it and shows you each one.
+Inside a monorepo, `bassia` shows where you are and offers the next steps. `bassia tutorial` starts the same guide
+at any time. By hand, the setup is:
 
 ```powershell
 bassia init -path R:\acme

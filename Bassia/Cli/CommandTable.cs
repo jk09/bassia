@@ -81,6 +81,16 @@ internal static class CommandTable
 			["bassia config unset -key merge.semantic", "bassia config unset merge.advance -user"],
 			MonorepoCommands.ConfigUnsetAsync, Positional: "key", Details: ConfigDetails),
 
+		new("tutorial", null, "Guide a person through Bassia: set up a new monorepo step by step, or pick the next step in the monorepo you are in. Reads its answers from stdin.",
+			[],
+			["bassia tutorial", "bassia -C R:\\monorepo tutorial"],
+			TutorialCommand.RunAsync,
+			Details: "Outside a monorepo it asks for the repositories that become components, which component needs which, and the root folder, " +
+				"shows the plan as the bassia commands it will run (init, component add) and runs them once confirmed. Inside one it shows the " +
+				"status and a menu: add components, set dependencies, show the status, start a run, ask in plain English, open the dashboard. " +
+				"At any question, ? explains the step and ? <question> asks the LLM of 'bassia prompt' (llm.backend, llm.command). A bare " +
+				"'bassia' at a terminal starts it after a short help."),
+
 		new("version", null, "Show the bassia version.",
 			[],
 			["bassia version"],

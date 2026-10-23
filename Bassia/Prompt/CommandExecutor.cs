@@ -67,9 +67,10 @@ internal interface ICommandExecutor
 /// Runs a command by starting this same <c>bassia</c> again with an argument list - no shell, so no quoting rules to
 /// get wrong and nothing outside the command table can run. Its output is shown as it comes and captured for the LLM.
 /// A child process rather than an in-process call: commands change the current directory (<c>-C</c>), stream
-/// agents' output and may run for a long time, none of which should leak into the prompt's own process.
+/// agents' output and may run for a long time, none of which should leak into the prompt's own process. Without
+/// <paramref name="relay"/> the output is only captured, for a caller that shows the result in its own words.
 /// </summary>
-internal sealed class SelfExecutor(string workingDirectory) : ICommandExecutor
+internal sealed class SelfExecutor(string workingDirectory, bool relay = true) : ICommandExecutor
 {
 	public async Task<CommandOutcome> ExecuteAsync(IReadOnlyList<string> args, CancellationToken cancellation)
 	{
@@ -122,7 +123,7 @@ internal sealed class SelfExecutor(string workingDirectory) : ICommandExecutor
 		return new CommandOutcome(process.ExitCode, output.ToString(), error.ToString());
 	}
 
-	private static void Relay(string? line, StringBuilder capture, TextWriter console)
+	private void Relay(string? line, StringBuilder capture, TextWriter console)
 	{
 		if (line is null)
 		{
@@ -134,7 +135,10 @@ internal sealed class SelfExecutor(string workingDirectory) : ICommandExecutor
 			capture.Append(line).Append('\n');
 		}
 
-		console.WriteLine(line);
+		if (relay)
+		{
+			console.WriteLine(line);
+		}
 	}
 
 	/// <summary>
