@@ -8,6 +8,18 @@ internal static class Help
 {
 	public const string GlobalUsage = "bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...";
 
+	/// <summary>What a bare <c>bassia</c> prints for a person at a terminal, before the guide; 'bassia help' has everything.</summary>
+	public const string ShortText =
+		"bassia - a monorepo of git repositories (components), built for AI agents working in parallel.\n" +
+		"\n" +
+		"Usage: " + GlobalUsage + "\n" +
+		"\n" +
+		"  bassia help [<command>]     every command, or one command's switches and examples\n" +
+		"  bassia tutorial             guided setup of a monorepo, or options for the one you are in\n" +
+		"  bassia prompt <ask>         say what you want in plain English\n" +
+		"\n" +
+		"Every command prints its result as TOML; add -human to read it as text.";
+
 	public static Task<int> RunAsync(Invocation invocation) =>
 		Task.FromResult(Show((invocation.Get("command") ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries)));
 

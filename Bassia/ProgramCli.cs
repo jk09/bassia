@@ -9,6 +9,12 @@ using Bassia.Integration;
 internal static class ProgramCli
 {
 	/// <summary>
+	/// Whether a person is at a terminal: stdin, stdout and stderr none redirected. Only then does a bare <c>bassia</c>
+	/// add the guide (<see cref="TutorialCommand.WelcomeAsync"/>); agents and scripts get the plain help.
+	/// </summary>
+	internal static Func<bool> Interactive { get; set; } = () => !Console.IsInputRedirected && !Console.IsOutputRedirected && !Console.IsErrorRedirected;
+
+	/// <summary>
 	/// Runs one command line: <c>bassia [-C &lt;path&gt;] &lt;command&gt; [&lt;subcommand&gt;] [-switch [value]]...</c>. The command
 	/// and its subcommand are looked up in <see cref="CommandTable"/>, the rest is parsed against that command's
 	/// switches, and the handler prints a TOML result. Exit codes: 0 success, 1 failure, 2 a command line that does
@@ -24,6 +30,11 @@ internal static class ProgramCli
 		}
 
 		args = ExtractHuman(remainingArgs);
+		if (args.Length == 0 && !HumanOutput.Enabled && Interactive())
+		{
+			return await TutorialCommand.WelcomeAsync();
+		}
+
 		if (args.Length == 0 || IsHelp(args[0]))
 		{
 			return Help.Show(args.Skip(1).ToList());

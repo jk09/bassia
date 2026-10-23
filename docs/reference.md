@@ -68,6 +68,33 @@ bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
   (`brave-otter-3f2a91`, the short id every listing shows), or any prefix of the key of at least four characters
   (`brave-ot`).
 
+### A bare `bassia`: short help and the guide
+
+`bassia` with no arguments prints the full help as TOML, as `bassia help` does. The exception is a person at a
+terminal, when stdin, stdout and stderr are all terminals. Then it prints a short help, followed by the guide on
+stderr. `bassia tutorial` runs the same guide on purpose, with `-C`, and reads its answers from stdin, so it can be
+scripted. It ends with a TOML result whose `commands` lists every command it ran.
+
+- **Outside a monorepo**, the guide explains what Bassia is and offers to set one up (`[y/N]`). The setup asks three
+  things, each explained first:
+  1. The repositories that become components: URLs or local folders, each checked with `git ls-remote` and named.
+  2. Which component needs which, by number or name. Cycles are refused.
+  3. The root folder, which must be empty or new and outside another monorepo.
+
+  It then shows the plan as the `bassia` commands it will run (`init`, then `component add ... -references ...` in
+  dependency order) and runs them once confirmed, showing each with its result. Nothing changes before that. If a
+  command fails, it says what was done and which commands remain.
+- **Inside a monorepo**, it prints the root, the status and the dependency tree, then a menu: add components, set a
+  component's dependencies, show the status, start a detached run, ask in plain English (hands over to
+  `bassia prompt`), and open the dashboard (hands over to `bassia web`). Each command that changes something is shown
+  and confirmed first.
+
+At any question, `?` explains the step, and `? <question>` asks the LLM of `bassia prompt` (`llm.backend`,
+`llm.command`). Without one, the built-in explanation is shown. Closing the input (Ctrl+D, Ctrl+Z) ends the guide.
+`bassia prompt` never runs `tutorial`.
+
+### Help
+
 `bassia help` lists every command, `bassia help <command> [<subcommand>]` (or `-help` on any command) explains one:
 its usage, every switch and examples. Help is TOML too.
 
@@ -78,7 +105,7 @@ exit codes and the stdout/stderr split are the same. `-human` after a rest-of-li
 
 | Area | Commands |
 | --- | --- |
-| Monorepo | `init [-path <dir>]`, `status`, `version` |
+| Monorepo | `init [-path <dir>]`, `status`, `version`, `tutorial` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
@@ -497,9 +524,9 @@ Read-only commands (`status`, `config list|get`, `component list|show|survey`, `
 `-out`, `log`, `run list|show|logs|wait|diff`, `integration plan|list|show|logs|wait`, `skill list|show`, `help`,
 `version`) run at once. Any other command is confirmed first (`y`es, `n`o, `a`ll); when stdin is not a terminal it
 needs `-yes`. `-dry-run` changes nothing: it runs the read-only commands and stops with the plan at the first command
-that would change something. `prompt` and `web` are never run from a prompt. The result lists every proposed command
-as a `[[step]]` with its `command_line`, `status` (`ok`, `failed`, `rejected`, `declined`, `planned`, `skipped`) and
-the command's own `message`.
+that would change something. `prompt`, `web` and `tutorial` are never run from a prompt. The result lists every
+proposed command as a `[[step]]` with its `command_line`, `status` (`ok`, `failed`, `rejected`, `declined`, `planned`,
+`skipped`) and the command's own `message`.
 
 **Backends.** The LLM is only asked for text, so any model fits. `llm.backend` (or `-backend`) picks one:
 

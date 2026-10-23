@@ -43,7 +43,13 @@ internal sealed class TempDirectory : IDisposable
 
 internal static class TestEnvironment
 {
-	static TestEnvironment() => EnsureGitIdentity();
+	static TestEnvironment()
+	{
+		EnsureGitIdentity();
+
+		// A test runner may hand bassia a terminal; a bare 'bassia' must still print the plain help, not start the guide.
+		ProgramCli.Interactive = () => false;
+	}
 
 	/// <summary>
 	/// Commits and annotated tags need an identity even on machines without a global git config. Tests that drive

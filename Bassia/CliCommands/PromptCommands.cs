@@ -64,7 +64,7 @@ internal static class PromptCommands
 		});
 	}
 
-	private static string Setting(string? root, ConfigKey key) =>
+	internal static string Setting(string? root, ConfigKey key) =>
 		root is null ? key.Default : ConfigSnapshot.Load(root).Resolve(key).Value;
 
 	private static Confirmation AskOnConsole(string commandLine, string? why)
