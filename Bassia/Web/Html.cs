@@ -18,6 +18,7 @@ internal static class Html
 		("/components", "Components"),
 		("/tags", "Tags"),
 		("/runs", "Runs"),
+		("/locks", "Locks"),
 		("/queue", "Merge queue"),
 		("/integrations", "Integrations"),
 		("/timeline", "Timeline"),
@@ -209,6 +210,7 @@ internal static class Html
 		.badge circle { stroke:#fff; stroke-width:1.5; } .badge text { fill:#fff; font-size:10px; font-weight:700; text-anchor:middle; }
 		.b-live circle, i.b-live { fill:var(--live); background:var(--live); } .b-live circle { animation:pulse 1.4s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
 		.b-queued circle, i.b-queued { fill:var(--warn); background:var(--warn); }
+		.b-lock circle, i.b-lock { fill:var(--violet); background:var(--violet); }
 		.b-attention circle, i.b-attention { fill:var(--bad); background:var(--bad); }
 		i.arrowhead { background:#8792a6; }
 		@keyframes march { to { stroke-dashoffset:-20; } }
@@ -226,6 +228,16 @@ internal static class Html
 		svg.flow .k-baseline rect { stroke:var(--teal); fill:#e8f6f6; } svg.flow .k-run rect { stroke:var(--live); fill:#e9f3ff; }
 		svg.flow .k-result rect { stroke:var(--live); fill:#fff; stroke-dasharray:4 3; } svg.flow .k-integration rect { stroke:var(--violet); fill:#f3ecff; }
 		svg.flow .k-integrated rect { stroke:var(--ok); fill:#eaf6ee; }
+		svg.flow .k-waiter rect { stroke:var(--warn); fill:#fff6e6; stroke-dasharray:4 3; } svg.flow .k-holder rect { stroke:var(--live); fill:#e9f3ff; }
+		svg.flow .k-lockpath rect { stroke:var(--violet); fill:#f5f0ff; } svg.flow .k-lockpath.released rect { stroke:var(--warn); fill:#fffaf0; }
+		svg.flow .k-lockpath.expired rect { stroke:var(--grey); fill:#f3f4f7; stroke-dasharray:2 3; }
+		.lockchip { display:inline-block; padding:0 7px; border-radius:3px; margin:0 4px 2px 0; font:12px ui-monospace, monospace; background:#f5f0ff; border:1px solid #cdb8f0; color:var(--fg); }
+		.lockchip.released { background:#fffaf0; border-color:#f0d29a; } .lockchip.expired { background:#f3f4f7; border-color:var(--line); color:var(--muted); text-decoration:line-through; }
+		.lockchip.live::before { content:"\1F512 "; } .lockchip.waiting { background:#fff6e6; border-style:dashed; border-color:var(--warn); }
+		.lockchip.waiting::before { content:"\23F3 "; }
+		.ls { font-weight:600; } .ls.live { color:var(--violet); } .ls.released { color:var(--warn); } .ls.expired { color:var(--muted); }
+		svg.lanes .qitem.locked circle { stroke:var(--violet); stroke-width:3.5; stroke-dasharray:3 2; }
+		i.locked { background:#fff; border:2px dashed var(--violet); box-sizing:border-box; }
 		svg.flow .current rect { stroke-width:3; filter:drop-shadow(0 0 3px rgba(47,111,208,.5)); }
 		svg.flow a:hover rect { fill:#dce8fb; }
 

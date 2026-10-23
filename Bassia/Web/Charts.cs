@@ -6,7 +6,7 @@ using Bassia.Graph;
 using static Bassia.Web.Html;
 
 /// <summary>What the component map shows on a component's node besides its name.</summary>
-internal sealed record ComponentActivity(string Name, int Live = 0, int Queued = 0, int Attention = 0, string? LatestTag = null, int Runs = 0);
+internal sealed record ComponentActivity(string Name, int Live = 0, int Queued = 0, int Attention = 0, string? LatestTag = null, int Runs = 0, int Locked = 0);
 
 /// <summary>A node of a left-to-right flow (a tag's lineage, a run's or an integration's path): its column decides where it is drawn.</summary>
 internal sealed record FlowNode(string Id, int Column, string Label, string? Sub, string? Href, string Kind);
@@ -104,16 +104,16 @@ internal static class Charts
 			var info = activity.GetValueOrDefault(component.Name) ?? new ComponentActivity(component.Name);
 			var classes = "node" + (focus == component.Name ? " focus" : "") + (info.Attention > 0 ? " attention" : "") + (info.Live > 0 ? " busy" : "");
 			svg.Append($"<a href=\"/components/{Url(component.Name)}\" class=\"{classes}\" data-node=\"{E(component.Name)}\" data-related=\"{E(string.Join(' ', related[component.Name]))}\">");
-			svg.Append($"<title>{E(component.Name)}: {info.Live} live run(s), {info.Queued} result(s) in the merge queue, {info.Attention} needing attention, {info.Runs} run(s) in all</title>");
+			svg.Append($"<title>{E(component.Name)}: {info.Live} live run(s), {info.Queued} result(s) in the merge queue, {info.Attention} needing attention, {info.Locked} path(s) held by live runs, {info.Runs} run(s) in all</title>");
 			svg.Append($"<rect x=\"{N(nx)}\" y=\"{N(ny)}\" width=\"{width}\" height=\"{height}\" rx=\"9\"/>");
 			svg.Append($"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 24)}\" class=\"name\">{E(Clip(component.Name, 18))}</text>");
 			svg.Append(info.LatestTag is null
 				? $"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{info.Runs} run(s)</text>"
 				: $"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{TagLabel(info.LatestTag)}<title>latest tag: {E(info.LatestTag)}</title></text>");
 
-			// Badges, right to left: attention (red), queued results (amber), live runs (blue, pulsing).
+			// Badges, right to left: attention (red), queued results (amber), live runs (blue, pulsing), held paths (violet).
 			var bx = nx + width - 14;
-			foreach (var (count, kind, label) in new[] { (info.Attention, "b-attention", "!"), (info.Queued, "b-queued", ""), (info.Live, "b-live", "") })
+			foreach (var (count, kind, label) in new[] { (info.Attention, "b-attention", "!"), (info.Queued, "b-queued", ""), (info.Live, "b-live", ""), (info.Locked, "b-lock", "") })
 			{
 				if (count <= 0)
 				{
@@ -129,7 +129,7 @@ internal static class Charts
 
 		svg.Append("</svg>");
 		return $"<div class=\"chart-box\">{svg}</div>" + Legend(
-			("b-live", "live runs"), ("b-queued", "results in the merge queue"), ("b-attention", "merges needing attention"), ("arrowhead", "needs (references)"));
+			("b-live", "live runs"), ("b-lock", "paths held by live runs"), ("b-queued", "results in the merge queue"), ("b-attention", "merges needing attention"), ("arrowhead", "needs (references)"));
 	}
 
 	/// <summary>

@@ -100,6 +100,12 @@ internal sealed class IntegrationStep
 	/// <summary>Other runs of the same integration whose results conflict with this one on their own.</summary>
 	public List<string> ConflictsWith { get; } = [];
 
+	/// <summary>
+	/// The run's lock conflicts in this component, described: paths it changed while another run held them, or without
+	/// another run's result that changed them. <c>lock.conflict</c> decides what that means for the step.
+	/// </summary>
+	public List<string> LockConflicts { get; } = [];
+
 	public StepOutcome Outcome { get; set; } = StepOutcome.Pending;
 
 	/// <summary>The integration head after this step: the merge commit, or the head it left unchanged.</summary>
@@ -233,6 +239,11 @@ internal sealed class IntegrationRecord
 					["conflicts_with"] = Array(step.ConflictsWith),
 					["outcome"] = Snake(step.Outcome)
 				};
+				if (step.LockConflicts.Count > 0)
+				{
+					stepTable["lock_conflicts"] = Array(step.LockConflicts);
+				}
+
 				if (step.Structural is { } structural)
 				{
 					stepTable["structural"] = Snake(structural);
@@ -309,6 +320,7 @@ internal sealed class IntegrationRecord
 						};
 						step.Conflicts.AddRange(Strings(stepTable, "conflicts"));
 						step.ConflictsWith.AddRange(Strings(stepTable, "conflicts_with"));
+						step.LockConflicts.AddRange(Strings(stepTable, "lock_conflicts"));
 						step.StructuralConflicts.AddRange(Strings(stepTable, "structural_conflicts"));
 						step.StructuralWarnings.AddRange(Strings(stepTable, "structural_warnings"));
 						component.Steps.Add(step);

@@ -13,6 +13,8 @@ structural merge, and an LLM that knows *why* each side changed. A local web das
   checkout of everything. It's git all the way down.
 - **[Agentic runs are built in](#agentic-runs-are-built-in)**: many agents, in parallel, each in its own isolated
   checkout, with every result committed, tagged and recorded.
+- **[Locks keep agents apart](#locks-keep-agents-apart)**: a run holds the files and folders its agent changes;
+  others see it, wait for it and continue from its result instead of rewriting the same file in parallel.
 - **[Merges that understand intent](#merges-that-understand-intent)**: git first, then
   [weave](https://github.com/Ataraxy-Labs/weave)'s entity-level merge, then an LLM resolver briefed with both
   sides' prompts. You decide what always needs a human.
@@ -72,6 +74,22 @@ live-visible, can be followed, waited for or stopped from any shell, and keeps i
 
 ![Agentic runs: live runs with their phase, a ticking clock and their latest output, and every run over time](docs/images/runs.png)
 
+## Locks keep agents apart
+
+Agents rewrite whole files, and two rewrites of one file rarely merge well, even when git says they do. So Bassia
+lets parallel runs see each other. You say which paths are exclusive - files one by one, or whole folders - for the
+monorepo, a component or a single run. While an agent works, its run **holds** every such path it changes, and every
+other run sees that. An agent checks a path before it rewrites it, or **waits** until the holder is done and then
+continues from the holder's result, which Bassia brings into its checkout. A crashed or suspended run's holds expire,
+and a run that changed a held path anyway is marked, so the integration hands its result to the resolver (or a human)
+instead of trusting a clean-looking merge.
+
+```powershell
+bassia config set lock.folders -value "src/*"          # each folder under src is one lock
+bassia lock list                                        # who holds what, and who waits for whom
+bassia lock wait -path app/src/parser/Lexer.cs          # from inside a run: wait, then catch up
+```
+
 ## Merges that understand intent
 
 Agents that work in parallel collide. `bassia integration` brings their results back together in three tiers, and
@@ -107,6 +125,7 @@ bassia config set merge.component.storage.semantic -value manual
 - **Components**: the map of components and what they need.
 - **Tags**: each tag's lineage, from baseline to runs to results to integrations.
 - **Runs**: every run on a timeline, with live ones animated.
+- **Locks**: which run holds which files and folders, and who waits for whom.
 - **Merge queue**: the triage of the next integration and the merges that need a human.
 - **Timeline**: commits laid out in one lane per component.
 - **Configuration**: every setting, layer by layer.

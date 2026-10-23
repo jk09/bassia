@@ -329,6 +329,42 @@ public class DashboardTests
 	}
 
 	[Fact]
+	public async Task Locks_ShowWhoHoldsWhatWhoWaitsAndTheFilter()
+	{
+		await using var fixture = await ThreeComponentsAsync();
+		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "lock.folders", "-value", "src/*")).ExitCode);
+		const string holder = "agent-run-brave-otter-3f2a91", waiter = "agent-run-quiet-fern-91ab22";
+		var start = JobRegistry.CurrentProcessStart();
+		await new Bassia.Locks.LockTable(Monorepo.Load(fixture.Root)).UpdateAsync(session =>
+		{
+			var holding = Bassia.Locks.RunLocks.NewEntry(holder, RunMetadata.Timestamp(), Environment.ProcessId, start, RunMetadata.Timestamp());
+			holding.Holds.Add(new Bassia.Locks.LockHold(new Bassia.Locks.LockKey("app", "src/api", Bassia.Locks.LockKind.Folder), Bassia.Locks.LockHold.Changed, RunMetadata.Timestamp()));
+			var waiting = Bassia.Locks.RunLocks.NewEntry(waiter, RunMetadata.Timestamp(), Environment.ProcessId, start, RunMetadata.Timestamp());
+			waiting.Waits.Add(new Bassia.Locks.LockWait(new Bassia.Locks.LockKey("app", "src/api/x.cs", Bassia.Locks.LockKind.File), RunMetadata.Timestamp(), Environment.ProcessId, start));
+			session.Save(holding);
+			session.Save(waiting);
+		});
+		await using var host = await Host.StartAsync(fixture);
+
+		var locks = await host.GetAsync("/locks");
+		Assert.Contains("app/src/api/", locks);
+		Assert.Contains("brave-otter-3f2a91", locks);
+		Assert.Contains("quiet-fern-91ab22", locks);
+		Assert.Contains("runs waiting", locks);
+		Assert.Contains("<code>src/*</code>", locks);
+		Assert.Contains("the resolver", locks);
+
+		var fragment = await host.Client.GetAsync("/fragment/locks");
+		Assert.Equal("1", fragment.Headers.GetValues("X-Live").Single());
+		Assert.Contains("app/src/api/", await fragment.Content.ReadAsStringAsync());
+
+		Assert.Contains("Lock filter", await host.GetAsync("/components/app"));
+		Assert.Contains("Held now", await host.GetAsync("/components/app"));
+		Assert.Contains("Lock filter per component", await host.GetAsync("/config"));
+		Assert.Contains("paths held by live runs", await host.GetAsync("/"));
+	}
+
+	[Fact]
 	public async Task Config_ShowsEveryLayerAndThePolicyPerComponent()
 	{
 		await using var fixture = await ThreeComponentsAsync();

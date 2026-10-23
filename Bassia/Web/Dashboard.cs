@@ -91,6 +91,8 @@ internal sealed partial class Dashboard
 		app.MapGet("/", OverviewAsync);
 		app.MapGet("/fragment/live", LiveFragmentAsync);
 		app.MapGet("/fragment/run/{id}", RunFragmentAsync);
+		app.MapGet("/fragment/locks", LocksFragmentAsync);
+		app.MapGet("/locks", LocksAsync);
 		app.MapGet("/components", ComponentsAsync);
 		app.MapGet("/components/{name}", ComponentAsync);
 		app.MapGet("/tags", TagsAsync);
@@ -118,7 +120,7 @@ internal sealed partial class Dashboard
 	private static string ComponentHref(string name) => $"/components/{Url(name)}";
 
 	/// <summary>Everything most pages draw from, read once per request.</summary>
-	private sealed record State(Monorepo Monorepo, IReadOnlyList<RunMetadata> Runs, IReadOnlyList<IntegrationRecord> Integrations, IReadOnlyList<LiveRun> Live, MergeQueue Queue)
+	private sealed record State(Monorepo Monorepo, IReadOnlyList<RunMetadata> Runs, IReadOnlyList<IntegrationRecord> Integrations, IReadOnlyList<LiveRun> Live, MergeQueue Queue, LockBoard Locks)
 	{
 		public RunMetadataStore Store => new(new GitClient(Monorepo.Root), Monorepo.RunsRepoDir);
 	}
@@ -129,7 +131,7 @@ internal sealed partial class Dashboard
 		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
 		var runs = await store.ListLatestAsync();
 		var integrations = await new IntegrationStore(store).ListLatestAsync();
-		return new State(monorepo, runs, integrations, LiveRuns.Read(monorepo, runs), await MergeQueue.ReadAsync(monorepo, runs, integrations));
+		return new State(monorepo, runs, integrations, LiveRuns.Read(monorepo, runs), await MergeQueue.ReadAsync(monorepo, runs, integrations), LockBoard.Read(monorepo));
 	}
 
 	/// <summary>What the component map shows on each node.</summary>
@@ -147,7 +149,8 @@ internal sealed partial class Dashboard
 			state.Queue.Pending.Count(item => item.Component == component.Name && item.State != QueueState.NeedsAttention),
 			state.Queue.Attention.Count(item => item.Component == component.Name),
 			latest[component.Name],
-			state.Runs.Count(run => run.Components.Any(entry => entry.Name == component.Name))), StringComparer.Ordinal);
+			state.Runs.Count(run => run.Components.Any(entry => entry.Name == component.Name)),
+			state.Locks.Live.Count(row => row.Hold.Key.Component == component.Name)), StringComparer.Ordinal);
 	}
 
 	// ----- overview -----
@@ -167,6 +170,7 @@ internal sealed partial class Dashboard
 		body.Append("<div class=\"cards\">")
 			.Append(Card("components", state.Monorepo.Components.Count, "/components"))
 			.Append(Card("live runs", state.Live.Count, "/runs", state.Live.Count > 0 ? "live" : null))
+			.Append(Card("paths held by live runs", state.Locks.Live.Count(), "/locks", state.Locks.Waits.Count > 0 ? "live" : null))
 			.Append(Card("runs", state.Runs.Count, "/runs"))
 			.Append(Card("results on their way to main", waiting, "/queue"))
 			.Append(Card("merges need attention", attention.Count, "/queue#attention", attention.Count > 0 ? "alert" : null))
@@ -281,6 +285,9 @@ internal sealed partial class Dashboard
 			<tr><td>Needs</td><td>{References(component.References.Select(reference => reference.Name))}</td></tr>
 			<tr><td>Used by</td><td>{References(graph.ReferrersOf(name).Select(reference => reference.Name))}</td></tr>
 			<tr><td>Merge policy</td><td>{PolicyText(policy)} <a href="/config">configuration</a></td></tr>
+			<tr><td>Lock filter</td><td>{LockFilterText(state.Monorepo, name)} <a href="/locks">locks</a></td></tr>
+			{HeldRow("Held now", state.Locks.InComponent(name).Where(row => row.State == Locks.LockState.Live))}
+			{HeldRow("Released, results not landed", state.Locks.InComponent(name).Where(row => row.State == Locks.LockState.Released))}
 			</table>
 			<p><a href="/timeline?c={Url(name)}">Timeline of {E(name)} and what it needs</a> · <a href="/tags?c={Url(name)}">its tags</a></p>
 			<p>{Cmd($"bassia run start -select {name} -prompt \"...\"")}</p>
@@ -364,6 +371,24 @@ internal sealed partial class Dashboard
 	internal static string PolicyText(MergePolicy policy) =>
 		$"conflicts → <b>{(policy.ManualSemantic ? "a human" : "the resolver")}</b>, weave warnings → <b>{E(IntegrationRecord.Snake(policy.Warnings))}</b>, " +
 		$"advance <b>{(policy.AutoAdvance ? "auto" : "manual")}</b>{(policy.ManualPaths.IsEmpty ? "" : $", manual paths <code>{E(string.Join(", ", policy.ManualPaths.Texts))}</code>")}";
+
+	/// <summary>A facts row of holds, each path once with the runs holding it; nothing when there are none.</summary>
+	private static string HeldRow(string label, IEnumerable<LockBoard.Row> rows)
+	{
+		var paths = rows.GroupBy(row => row.Hold.Key.Display).ToList();
+		return paths.Count == 0 ? "" : $"<tr><td>{E(label)}</td><td>" + string.Join(" ", paths.Select(group =>
+			$"<span class=\"lockchip {LockCommands.StateName(group.First().State)}\">{E(group.Key)}</span>{string.Join(" ", group.Select(row => RunLink(row.Entry.RunId)))}")) + "</td></tr>";
+	}
+
+	/// <summary>A component's lock filter in a line: its file and folder patterns and what a lock conflict leads to.</summary>
+	internal static string LockFilterText(Monorepo monorepo, string component)
+	{
+		var (files, folders) = Locks.LockFilter.For(monorepo, component).Texts;
+		return files.Count == 0 && folders.Count == 0
+			? "<span class=\"muted\">nothing is locked</span>"
+			: $"{(files.Count == 0 ? "" : $"files <code>{E(string.Join(", ", files))}</code> ")}{(folders.Count == 0 ? "" : $"folders <code>{E(string.Join(", ", folders))}</code> ")}" +
+				$"· a lock conflict goes to {LockPolicyText(Locks.LockFilter.ConflictPolicy(monorepo.Config, component))}";
+	}
 
 	internal static string QueueStateText(QueueState state) => state switch
 	{

@@ -6,6 +6,7 @@ using System.Text;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Locks;
 
 /// <summary>
 /// <c>bassia run ...</c>: starting agentic runs (in the foreground or detached), watching and stopping them,
@@ -31,9 +32,11 @@ internal static class RunCommands
 			var monorepo = AgentCommand.LoadMonorepo();
 			var select = string.Join(",", invocation.List("select"));
 			var command = ComposeCommand(invocation, monorepo);
+			var lockFiles = invocation.List("lock-files") is { Count: > 0 } files ? string.Join(",", files) : null;
+			var lockFolders = invocation.List("lock-folders") is { Count: > 0 } folders ? string.Join(",", folders) : null;
 			if (invocation.Has("detach") && log is null)
 			{
-				return await DetachAsync(invocation, monorepo, select, command);
+				return await DetachAsync(invocation, monorepo, select, command, lockFiles, lockFolders);
 			}
 
 			var runId = invocation.Get("id") is { } id ? RunMetadata.NormalizeRunId(id) : RunMetadata.NewRunId();
@@ -65,7 +68,7 @@ internal static class RunCommands
 				AgentRunOutcome outcome;
 				try
 				{
-					outcome = await AgentCommand.StartRunAsync(new GitClient(monorepo.Root), monorepo, select, command, context, runId);
+					outcome = await AgentCommand.StartRunAsync(new GitClient(monorepo.Root), monorepo, select, command, context, runId, lockFiles, lockFolders);
 				}
 				catch (OperationCanceledException)
 				{
@@ -143,16 +146,28 @@ internal static class RunCommands
 	/// <c>-detach</c>: checks the selection here, so a mistake is reported straight away, then hands the run to a
 	/// background bassia process under a pre-generated id and returns as soon as that process has registered.
 	/// </summary>
-	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, string select, string command)
+	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, string select, string command, string? lockFiles, string? lockFolders)
 	{
-		await AgentCommand.ResolveSelectionAsync(monorepo, select);
+		var (closure, _) = await AgentCommand.ResolveSelectionAsync(monorepo, select);
+		AgentCommand.CheckLockPatterns(monorepo, closure, lockFiles, lockFolders);
 		var runId = RunMetadata.NewRunId();
 		var jobs = new JobRegistry(monorepo);
 		Directory.CreateDirectory(jobs.Dir);
 		var log = jobs.LogPath(runId);
 		await File.WriteAllTextAsync(log, "");
 
-		using var process = DetachedProcess.Start(monorepo.Root, ["run", "start", "-id", runId, "-log", log, "-select", select, "-run", command]);
+		List<string> arguments = ["run", "start", "-id", runId, "-log", log, "-select", select];
+		if (lockFiles is not null)
+		{
+			arguments.AddRange(["-lock-files", lockFiles]);
+		}
+
+		if (lockFolders is not null)
+		{
+			arguments.AddRange(["-lock-folders", lockFolders]);
+		}
+
+		using var process = DetachedProcess.Start(monorepo.Root, [.. arguments, "-run", command]);
 		var job = await WaitForRegistrationAsync(jobs, runId, process);
 		if (job is null)
 		{
@@ -175,7 +190,9 @@ internal static class RunCommands
 				["log"] = log,
 				["result_file"] = jobs.ResultPath(runId),
 				["select"] = select,
-				["agent_command"] = command
+				["agent_command"] = command,
+				["lock_files"] = lockFiles,
+				["lock_folders"] = lockFolders
 			});
 	}
 
@@ -333,12 +350,19 @@ internal static class RunCommands
 		data["agent_command"] = run.Record?.Command;
 		data["summary"] = run.Record is null ? null : AgentCommand.SummarizeCommand(run.Record.Command);
 		data["last_output"] = run.Live && run.Job?.Log is { } log ? LastLine(log) : null;
-		data["card"] = new TomlText(Card(run));
+
+		// What the run holds and waits for right now, as the lock table advertises it.
+		var table = new LockTable(run.Monorepo);
+		var entry = table.Find(run.RunId);
+		data["lock_state"] = entry is null ? null : table.StateOf(entry).ToString().ToLowerInvariant();
+		data["holding"] = entry?.Holds.Select(hold => hold.Key.Display).ToList() ?? [];
+		data["waiting_for"] = entry?.Waits.Where(wait => table.IsWaiting(entry, wait)).Select(wait => wait.Key.Display).ToList() ?? [];
+		data["card"] = new TomlText(Card(run, entry, table));
 		return data;
 	}
 
 	/// <summary>The run as a card like the run board draws it, with a line per component result.</summary>
-	private static string Card(FoundRun run)
+	private static string Card(FoundRun run, LockEntry? entry, LockTable table)
 	{
 		const int width = 64;
 		var lines = new List<string>
@@ -354,6 +378,21 @@ internal static class RunCommands
 		if (run.Live && run.Job?.Log is { } log && LastLine(log) is { } last)
 		{
 			lines.Add("> " + last);
+		}
+
+		if (entry is { Holds.Count: > 0 })
+		{
+			lines.Add($"{(table.StateOf(entry) == LockState.Released ? "held" : "holds")} {string.Join(", ", entry.Holds.Select(hold => hold.Key.Display))}");
+		}
+
+		if (entry?.Waits.Where(wait => table.IsWaiting(entry, wait)).ToList() is { Count: > 0 } waits)
+		{
+			lines.Add($"waits for {string.Join(", ", waits.Select(wait => wait.Key.Display))}");
+		}
+
+		foreach (var conflict in run.Record?.Components.SelectMany(component => component.LockConflicts) ?? [])
+		{
+			lines.Add("lock conflict: " + conflict.Describe());
 		}
 
 		var results = run.Record?.Components.Select(entry =>
@@ -449,9 +488,10 @@ internal static class RunCommands
 			}
 
 			await AgentCommand.RecordCancelledAsync(run.Store, run.Record!);
+			await RunLocks.ForgetAsync(run.Monorepo, run.RunId);
 			run = await ReloadAsync(run);
 			return ProgramCli.WriteResult(true, invocation.Command,
-				$"Agentic run '{run.RunId}' was no longer running (its process is gone); it is now recorded as cancelled.", Details(run));
+				$"Agentic run '{run.RunId}' was no longer running (its process is gone); it is now recorded as cancelled and holds nothing any more.", Details(run));
 		}
 
 		run.Jobs.RequestStop(run.RunId);
@@ -481,6 +521,12 @@ internal static class RunCommands
 		{
 			await AgentCommand.RecordCancelledAsync(run.Store, run.Record);
 			run = await ReloadAsync(run);
+		}
+
+		// A killed process cannot release what it held.
+		if (killed)
+		{
+			await RunLocks.ForgetAsync(run.Monorepo, run.RunId);
 		}
 
 		run.Jobs.ClearStop(run.RunId);
@@ -518,6 +564,9 @@ internal static class RunCommands
 		}
 
 		var outcome = await AgentCommand.AbandonAsync(run.Store, record);
+
+		// Its results will never be integrated, so nobody needs to catch up with them.
+		await RunLocks.ForgetAsync(run.Monorepo, run.RunId);
 		return ProgramCli.WriteResult(outcome.Ok, invocation.Command, outcome.Message, AgentCommand.ResultData(outcome.Metadata, outcome.Store, outcome.MetadataTags));
 	}
 
@@ -557,17 +606,26 @@ internal static class RunCommands
 				continue;
 			}
 
+			// A run that brought other runs' results in (lock wait) committed its own change on top of them: the result
+			// commit's first parent is where its own work starts.
+			var from = entry.CaughtUp.Count > 0 ? await GitClient.In(repo).RunOrThrowAsync(["rev-parse", $"{entry.ResultCommit}^1"]) : entry.Commit;
+			if (entry.CaughtUp.Count > 0)
+			{
+				data["diff_from"] = from;
+				data["caught_up"] = entry.CaughtUp.Select(catchUp => catchUp.Tag).ToList();
+			}
+
 			var git = GitClient.In(repo);
-			var numstat = await git.RunOrThrowAsync(["diff", "--numstat", entry.Commit, entry.ResultCommit]);
+			var numstat = await git.RunOrThrowAsync(["diff", "--numstat", from, entry.ResultCommit]);
 			var files = numstat.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.Split('\t')).Where(fields => fields.Length >= 3).ToList();
 			data["files_changed"] = files.Count;
 			data["insertions"] = files.Sum(fields => int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var added) ? added : 0);
 			data["deletions"] = files.Sum(fields => int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var removed) ? removed : 0);
 			data["files"] = files.Select(fields => fields[2]).ToList();
-			data["stat"] = new TomlText(await git.RunOrThrowAsync(["diff", "--stat", entry.Commit, entry.ResultCommit]));
+			data["stat"] = new TomlText(await git.RunOrThrowAsync(["diff", "--stat", from, entry.ResultCommit]));
 			if (invocation.Has("patch"))
 			{
-				data["patch"] = new TomlText(await git.RunOrThrowAsync(["diff", entry.Commit, entry.ResultCommit]));
+				data["patch"] = new TomlText(await git.RunOrThrowAsync(["diff", from, entry.ResultCommit]));
 			}
 
 			totalFiles += files.Count;

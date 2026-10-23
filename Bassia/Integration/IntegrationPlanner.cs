@@ -2,6 +2,7 @@ namespace Bassia.Integration;
 
 using Bassia.CliCommands.Agent;
 using Bassia.Git;
+using Bassia.Locks;
 
 /// <summary>What the user decided on top of the triage: a base per component and a strategy per step.</summary>
 internal sealed record IntegrationChoices
@@ -20,6 +21,9 @@ internal sealed record IntegrationChoices
 
 	/// <summary>One merge policy for every component instead of each component's configured one (tests, previews).</summary>
 	public MergePolicy? Policy { get; init; }
+
+	/// <summary>One lock policy for every component instead of each component's <c>lock.conflict</c> (tests, previews).</summary>
+	public LockConflictPolicy? LockPolicy { get; init; }
 
 	public MergeStrategy? StrategyFor(string component, string runId) =>
 		Strategies.TryGetValue((component, runId), out var strategy) ? strategy
@@ -91,6 +95,7 @@ internal static class IntegrationPlanner
 
 		var component = new ComponentIntegration { Name = name, BaseRef = baseRef, BaseCommit = baseCommit };
 		var candidates = new List<IntegrationStep>();
+		var caughtUp = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
 		foreach (var run in runs)
 		{
 			if (run.Components.FirstOrDefault(entry => entry.Name == name) is not { } result || !IsResult(result))
@@ -105,17 +110,23 @@ internal static class IntegrationPlanner
 				throw new IntegrationException($"The result tag '{result.ResultTag}' in component '{name}' points at {sourceCommit[..7]}, not at the recorded result {result.ResultCommit![..7]}.");
 			}
 
-			candidates.Add(new IntegrationStep
+			var step = new IntegrationStep
 			{
 				RunId = run.RunId,
 				Rationale = AgentCommand.SummarizeCommand(run.Command),
 				SourceTag = result.ResultTag!,
 				SourceCommit = sourceCommit
-			});
+			};
+			step.LockConflicts.AddRange(result.LockConflicts.Select(conflict => conflict.Describe()));
+			caughtUp[run.RunId] = result.CaughtUp.Select(catchUp => catchUp.Run).ToHashSet(StringComparer.Ordinal);
+			candidates.Add(step);
 		}
+
+		candidates = AfterWhatTheyContain(candidates, caughtUp);
 
 		// Chain every result git (or the structural merge) can merge on its own onto a simulated head, oldest first.
 		var policy = choices.Policy ?? monorepo.MergePolicyFor(name);
+		var lockPolicy = choices.LockPolicy ?? LockFilter.ConflictPolicy(monorepo.Config, name);
 		var acceptWarnings = policy.Warnings == WarningsPolicy.Accept;
 		var head = baseCommit;
 		List<IntegrationStep> deterministic = [], semantic = [], manual = [], skipped = [];
@@ -125,6 +136,12 @@ internal static class IntegrationPlanner
 			var probe = await ClassifyAsync(git, head, step, choices.Structural, acceptWarnings);
 			var unmerged = step.Triage == Triage.Conflict && step.Structural != StructuralTriage.Clean
 				&& !(acceptWarnings && step.Structural == StructuralTriage.Warnings);
+
+			// A result that brought others in (lock wait) carries their commits: merging it merges them too, so it can be
+			// no less careful than they are.
+			var builtOn = candidates.TakeWhile(other => other != step).Where(other => caughtUp[step.RunId].Contains(other.RunId)).ToList();
+			var heldBack = builtOn.FirstOrDefault(other => other.Strategy is MergeStrategy.Manual or MergeStrategy.Skip);
+			var reviewed = builtOn.FirstOrDefault(other => other.Strategy == MergeStrategy.Semantic);
 
 			if (chosen == MergeStrategy.Skip)
 			{
@@ -142,6 +159,18 @@ internal static class IntegrationPlanner
 				step.Strategy = MergeStrategy.Manual;
 				step.Overridden = true;
 				step.Note = "left for a human by -manual";
+				manual.Add(step);
+			}
+			else if (chosen is null && heldBack is not null)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = $"it builds on the result of run {RunMetadata.Key(heldBack.RunId)}, which is {(heldBack.Strategy == MergeStrategy.Skip ? "left out" : "left for a human")}";
+				manual.Add(step);
+			}
+			else if (chosen is null && step.LockConflicts.Count > 0 && lockPolicy == LockConflictPolicy.Manual)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = $"{LockNote(step)}; lock.conflict = manual leaves that for a human";
 				manual.Add(step);
 			}
 			else if (chosen != MergeStrategy.Semantic && step.Triage == Triage.Conflict && policy.ManualPathReason(step.Conflicts) is { } reason)
@@ -162,10 +191,21 @@ internal static class IntegrationPlanner
 				step.Note = "neither git nor weave can merge it, and merge.semantic = manual leaves that for a human";
 				manual.Add(step);
 			}
-			else if (chosen == MergeStrategy.Semantic || unmerged)
+			else if (chosen == MergeStrategy.Semantic || unmerged || (chosen is null && (reviewed is not null || (step.LockConflicts.Count > 0 && lockPolicy == LockConflictPolicy.Resolver))))
 			{
+				// A result that rewrote what another run held goes to the resolver even when git merges it: a clean
+				// textual merge of two rewrites can still drop what one of them meant.
 				step.Strategy = MergeStrategy.Semantic;
-				step.Overridden = !unmerged;
+				step.Overridden = chosen == MergeStrategy.Semantic && !unmerged;
+				if (chosen is null && step.LockConflicts.Count > 0 && lockPolicy == LockConflictPolicy.Resolver)
+				{
+					step.Note = $"{LockNote(step)}; lock.conflict = resolver has the resolver review it";
+				}
+				else if (chosen is null && !unmerged && reviewed is not null)
+				{
+					step.Note = $"it builds on the result of run {RunMetadata.Key(reviewed.RunId)}, which goes to the resolver";
+				}
+
 				semantic.Add(step);
 			}
 			else
@@ -207,6 +247,28 @@ internal static class IntegrationPlanner
 
 		component.Steps.AddRange([.. deterministic, .. semantic, .. manual, .. skipped]);
 		return component;
+	}
+
+	private static string LockNote(IntegrationStep step) =>
+		step.LockConflicts[0] + (step.LockConflicts.Count > 1 ? $" (and {step.LockConflicts.Count - 1} more lock conflict(s))" : "");
+
+	/// <summary>
+	/// The steps in run order, except that a result which brought other runs' results in (<c>bassia lock wait</c>) comes
+	/// after them: it builds on them, so merging them first leaves it only its own change to add.
+	/// </summary>
+	private static List<IntegrationStep> AfterWhatTheyContain(List<IntegrationStep> steps, IReadOnlyDictionary<string, IReadOnlySet<string>> caughtUp)
+	{
+		var remaining = steps.ToList();
+		var ordered = new List<IntegrationStep>();
+		while (remaining.Count > 0)
+		{
+			var next = remaining.FirstOrDefault(step => !remaining.Any(other => other != step && caughtUp.GetValueOrDefault(step.RunId)?.Contains(other.RunId) == true))
+				?? remaining[0];
+			ordered.Add(next);
+			remaining.Remove(next);
+		}
+
+		return ordered;
 	}
 
 	/// <summary>

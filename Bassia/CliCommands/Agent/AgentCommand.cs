@@ -1,7 +1,9 @@
 namespace Bassia.CliCommands.Agent;
 
+using System.Text;
 using Bassia;
 using Bassia.Git;
+using Bassia.Locks;
 
 /// <summary>
 /// <c>bassia run start</c>: materializes a selected monorepo state in an isolated workspace area, runs an agent
@@ -23,11 +25,15 @@ internal static class AgentCommand
 	/// <paramref name="context"/> is how a caller watches and interrupts the run; without one the sequence reports on
 	/// stderr and lets the agent inherit the console (see <see cref="AgentRunContext"/>). <paramref name="runId"/>
 	/// is given when the id had to be known before the run starts - a detached run reports it straight away.
+	/// <paramref name="lockFiles"/> and <paramref name="lockFolders"/> are the run's own lock patterns (<c>-lock-files</c>,
+	/// <c>-lock-folders</c>), added to the configured ones.
 	/// </summary>
-	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null, string? runId = null)
+	internal static async Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null, string? runId = null,
+		string? lockFiles = null, string? lockFolders = null)
 	{
 		var cancellation = context?.Cancellation ?? CancellationToken.None;
 		var (closure, resolved) = await ResolveSelectionAsync(monorepo, select);
+		CheckLockPatterns(monorepo, closure, lockFiles, lockFolders);
 
 		// Up to here nothing outside git's object database has been touched, so a cancellation simply unwinds.
 		cancellation.ThrowIfCancellationRequested();
@@ -46,7 +52,9 @@ internal static class AgentCommand
 			Created = RunMetadata.Timestamp(),
 			Select = select,
 			Command = command,
-			WorkspacePath = runDir
+			WorkspacePath = runDir,
+			LockFiles = string.IsNullOrWhiteSpace(lockFiles) ? null : lockFiles,
+			LockFolders = string.IsNullOrWhiteSpace(lockFolders) ? null : lockFolders
 		};
 
 		foreach (var (component, commitIsh, commit) in resolved)
@@ -73,9 +81,21 @@ internal static class AgentCommand
 
 		var startTag = await store.CommitAsync(metadata);
 		Report(context, runId, AgentRunPhase.Preparing, $"{runId}: metadata committed as {startTag} in '{store.RepoDir}'.");
+		WriteLockGuide(metadata, RunLocks.Filters(monorepo, metadata));
 		Report(context, runId, AgentRunPhase.Agent, $"{runId}: running agent command in '{runDir}'.");
 
-		var exitCode = await RunAgentProcessAsync(monorepo, metadata, context);
+		// While the agent works, what it changes is held for the run and checked against what other runs hold.
+		await using var locks = RunLocks.Start(monorepo, metadata, message => Report(context, runId, AgentRunPhase.Agent, message));
+		int? exitCode;
+		try
+		{
+			exitCode = await RunAgentProcessAsync(monorepo, metadata, context);
+		}
+		finally
+		{
+			await locks.StopAsync();
+		}
+
 		metadata.Finished = RunMetadata.Timestamp();
 
 		// A null exit code means the agent process was killed on request; the record says so and keeps the run
@@ -83,6 +103,7 @@ internal static class AgentCommand
 		if (exitCode is null)
 		{
 			metadata.Status = "cancelled";
+			await locks.FinishAsync();
 			var cancelledTag = await store.CommitAsync(metadata);
 			Report(context, runId, AgentRunPhase.Cancelled, $"{runId}: cancelled; the agent process tree was stopped.");
 			return new AgentRunOutcome(false,
@@ -95,18 +116,22 @@ internal static class AgentCommand
 		if (metadata.AgentExitCode != 0)
 		{
 			metadata.Status = "failed";
+			await locks.FinishAsync();
 			var failedTag = await store.CommitAsync(metadata);
 			return new AgentRunOutcome(false,
 				$"Agent command exited with code {metadata.AgentExitCode}; nothing was committed. The workspace '{runDir}' is kept for inspection.",
 				metadata, store, [startTag, failedTag]);
 		}
 
+		await locks.CheckStaleAsync();
 		Report(context, runId, AgentRunPhase.Finalizing, $"{runId}: committing, tagging and pushing the component results.");
 		foreach (var component in metadata.Components)
 		{
 			await FinalizeComponentAsync(monorepo, metadata, component, context);
 		}
 
+		// Released once the results are pushed, so a run waiting for these paths can bring them in at once.
+		await locks.FinishAsync();
 		metadata.Status = OverallStatus(metadata);
 		var finalTag = await store.CommitAsync(metadata);
 		var ok = metadata.Status == "completed";
@@ -157,13 +182,73 @@ internal static class AgentCommand
 	{
 		if (metadata.Components.Any(component => component.ResultStatus == ResultStatus.Pushed))
 		{
-			return $"Agentic run '{metadata.RunId}' completed.";
+			var conflicts = metadata.Components.SelectMany(component => component.LockConflicts).ToList();
+			return conflicts.Count == 0
+				? $"Agentic run '{metadata.RunId}' completed."
+				: $"Agentic run '{metadata.RunId}' completed with {conflicts.Count} lock conflict(s): {string.Join("; ", conflicts.Take(3).Select(conflict => conflict.Describe()))}" +
+					$"{(conflicts.Count > 3 ? "; ..." : "")}. The integration treats its result by lock.conflict.";
 		}
 
 		// A clean run with nothing to commit usually means the agent answered inline instead of editing files
 		// (e.g. it lacked permission to write) or wrote outside every component checkout.
 		return $"Agentic run '{metadata.RunId}' completed, but the agent command changed no component; nothing was committed. " +
 			$"Check that the command may edit files and that it writes inside a component folder of '{metadata.WorkspacePath}'.";
+	}
+
+	/// <summary>Checks the run's own lock patterns, and the configured ones, before anything is materialized.</summary>
+	internal static void CheckLockPatterns(Monorepo monorepo, IReadOnlyList<ComponentDefinition> closure, string? lockFiles, string? lockFolders)
+	{
+		var names = closure.Select(component => component.Name).ToList();
+		var own = RunLockPatterns.Parse(lockFiles, lockFolders, names);
+		foreach (var name in names)
+		{
+			LockFilter.For(monorepo, name, own);
+		}
+	}
+
+	/// <summary>
+	/// Tells the agent how locking works in this run when its filter locks anything: <c>AGENTS.md</c> and
+	/// <c>CLAUDE.md</c> at the root of the run folder (its working directory), outside every component checkout, so
+	/// they are read by agents that look for them and never committed.
+	/// </summary>
+	internal static void WriteLockGuide(RunMetadata metadata, IReadOnlyDictionary<string, LockFilter> filters)
+	{
+		var locked = filters.Where(pair => !pair.Value.IsEmpty).ToList();
+		if (locked.Count == 0)
+		{
+			return;
+		}
+
+		var text = new StringBuilder()
+			.Append("# Locked paths in this agentic run\n\n")
+			.Append("Other agentic runs work on this monorepo at the same time, each in its own folder. Some paths are locked: while a run\n")
+			.Append("changes one, it holds it, and no other run should change it until that run is done. Bassia sees which files you\n")
+			.Append("change and holds them for this run by itself. Locked here (patterns relative to each component's folder):\n\n");
+		foreach (var (component, filter) in locked)
+		{
+			var (files, folders) = filter.Texts;
+			text.Append($"- `{component}/`: ")
+				.Append(string.Join("; ", new[]
+				{
+					files.Count == 0 ? null : $"files {string.Join(", ", files.Select(pattern => $"`{pattern}`"))} one by one",
+					folders.Count == 0 ? null : $"folders {string.Join(", ", folders.Select(pattern => $"`{pattern}`"))} as a whole"
+				}.OfType<string>()))
+				.Append('\n');
+		}
+
+		text.Append("\nBefore you rewrite a file or a folder:\n\n")
+			.Append("1. `bassia lock check -path <path>` tells whether another run holds it, and whether a finished run changed it after\n")
+			.Append("   your checkout was made.\n")
+			.Append("2. If it is held, or you are behind on it, `bassia lock wait -path <path>` waits until the holder is done, then holds\n")
+			.Append("   the path for you and brings that run's change into your checkout. Re-read every file it lists under `changed`\n")
+			.Append("   before you edit it: your view of it is out of date.\n")
+			.Append("3. `bassia lock claim -path <path>` holds a path before you start on it, so that others wait for you;\n")
+			.Append("   `bassia lock release -path <path>` gives it up early.\n\n")
+			.Append("Paths are relative to your working directory (`<component>/<path>` from this folder; a folder ends with `/`).\n")
+			.Append("`bassia lock list` shows who holds what. Changing a path another run holds is recorded as a lock conflict, and\n")
+			.Append("your result is then reviewed before it is merged. Every command answers in TOML.\n");
+		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "AGENTS.md"), text.ToString());
+		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "CLAUDE.md"), text.ToString());
 	}
 
 	/// <summary>
@@ -571,9 +656,31 @@ internal static class AgentCommand
 			["result_status"] = component.ResultStatus.ToString().ToLowerInvariant(),
 			["result_commit"] = component.ResultCommit,
 			["result_tag"] = component.ResultTag,
-			["result_error"] = component.ResultError
-		}).ToList()
+			["result_error"] = component.ResultError,
+			["held"] = component.Held.Select(key => key.Display).ToList(),
+			["lock_conflict"] = LockConflictData(component.LockConflicts),
+			["caught_up"] = component.CaughtUp.Select(catchUp => new Dictionary<string, object?>
+			{
+				["run_id"] = catchUp.Run,
+				["tag"] = catchUp.Tag,
+				["commit"] = catchUp.Commit,
+				["files"] = catchUp.Files
+			}).ToList()
+		}).ToList(),
+		["lock_conflicts"] = metadata.Components.Sum(component => component.LockConflicts.Count)
 	};
+
+	/// <summary>Lock conflicts as result entries, named as in the run record.</summary>
+	internal static List<Dictionary<string, object?>> LockConflictData(IEnumerable<LockConflict> conflicts) => conflicts.Select(conflict => new Dictionary<string, object?>
+	{
+		["component"] = conflict.Component,
+		["path"] = conflict.Path,
+		["kind"] = conflict.Kind,
+		["with"] = conflict.With,
+		["with_path"] = conflict.WithPath,
+		["at"] = conflict.At,
+		["description"] = conflict.Describe()
+	}).ToList();
 
 	/// <summary>
 	/// One progress step. Without a context - the scriptable CLI - it is the <c>bassia: ...</c> stderr line the

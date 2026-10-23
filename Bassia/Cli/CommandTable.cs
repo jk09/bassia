@@ -26,13 +26,28 @@ internal static class CommandTable
 	private static readonly SwitchSpec Manual = new("manual", "run-id,...", "Leave these runs' results for a human (needs_attention) instead of merging them.");
 	private static readonly SwitchSpec Weave = new("weave", "command|off", "The structural merge driver instead of integration.weave (default weave-driver, used when installed); off disables it.");
 	private static readonly SwitchSpec Log = new("log", "path", "The log of a detached job (set by -detach).", Hidden: true);
+	private static readonly SwitchSpec LockPaths = new("path", "path,...", "Files or folders (a folder ends with /): relative to the working directory inside the run folder, as the agent sees them, or as <component>/<path>.", Required: true);
+	private static readonly SwitchSpec LockRun = new("run", "run-id", "The run (default: BASSIA_RUN_ID, which every agent command has): its full id, its key, or a prefix of at least 4 characters of the key.");
+	private static readonly SwitchSpec LockComponent = new("component", "component", "Read the paths relative to this component's root.");
+
+	private const string LockDetails = "While a run's agent works, Bassia looks at what it changed every few seconds and holds every changed path the run's lock " +
+		"filter covers: lock.files (files one by one) and lock.folders (a whole folder: src/* is each folder directly under src, ** the folder of every " +
+		"file), per component as lock.component.<component>.files|folders, plus the run's own -lock-files/-lock-folders. Every run sees the holds in " +
+		"<root>/.locks. A hold is live while its run renews it within lock.ttl seconds (and, on the same machine, its process lives); a crashed or " +
+		"suspended run's holds expire, and a suspended run that comes back loses what others took meanwhile. When a run ends its holds are released " +
+		"and remembered with its results until they land on the default branch: a run that changes such a path without that result is behind, and " +
+		"'lock wait' brings the result in. A run that changes a path another live run holds, or a released path it is behind on, records a lock " +
+		"conflict; the integration treats its result by lock.conflict (resolver, manual or merge).";
 
 	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
 		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
 		"merge.component.<component>.<setting>, which falls back to merge.<setting>. merge.semantic (resolver|manual): a result git and weave cannot " +
 		"merge goes to the resolver or is left for a human; merge.warnings (resolver|manual|accept): a result weave merged with warnings; " +
 		"merge.manual_paths (patterns): conflicts in these paths always need a human; merge.advance (manual|auto): a completed integration " +
-		"fast-forwards the base branches itself. 'integration plan|start -semantic/-skip/-manual' override the policy for one integration.";
+		"fast-forwards the base branches itself. 'integration plan|start -semantic/-skip/-manual' override the policy for one integration. " +
+		"lock.files / lock.folders (patterns): what a run holds while its agent changes it, file by file or folder by folder; lock.conflict " +
+		"(resolver|manual|merge): a result that changed a path another run held; both per component as lock.component.<component>.<setting>; " +
+		"lock.ttl (seconds): how long a hold lasts without its run renewing it.";
 
 	public static readonly IReadOnlyList<CommandSpec> Commands =
 	[
@@ -55,13 +70,13 @@ internal static class CommandTable
 			Details: ConfigDetails),
 
 		new("config", "get", "Show one setting: its effective value, where it comes from, and its value in each layer.",
-			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, llm.backend or llm.command.", Required: true)],
+			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl, lock.component.<component>.<files|folders|conflict>, llm.backend or llm.command.", Required: true)],
 			["bassia config get -key integration.resolver", "bassia config get merge.component.app.semantic"],
 			MonorepoCommands.ConfigGetAsync, Positional: "key", Details: ConfigDetails),
 
 		new("config", "set", "Change one setting: in .bassia/config.toml (comments are kept, committed to the meta-repo), or with -user in your own .bassia/config.user.toml (never committed).",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, llm.backend or llm.command.", Required: true),
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl, lock.component.<component>.<files|folders|conflict>, llm.backend or llm.command.", Required: true),
 				new("value", "value", "The new value; a choice setting accepts only its choices, a list setting takes comma-separated values.", Required: true),
 				new("user", null, "Write the user layer (.bassia/config.user.toml) instead of the monorepo's.")
 			],
@@ -75,7 +90,7 @@ internal static class CommandTable
 
 		new("config", "unset", "Remove one setting from a layer, so the next layer down (or the default) applies again.",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, llm.backend or llm.command.", Required: true),
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl, lock.component.<component>.<files|folders|conflict>, llm.backend or llm.command.", Required: true),
 				new("user", null, "Remove it from the user layer instead of the monorepo's.")
 			],
 			["bassia config unset -key merge.semantic", "bassia config unset merge.advance -user"],
@@ -277,6 +292,8 @@ internal static class CommandTable
 				new("model", "model", "With -prompt: passed to the agent as --model."),
 				new("effort", "level", "With -prompt: passed to the agent as --effort."),
 				new("context", "text", "With -prompt: appended to the prompt as context."),
+				new("lock-files", "[component:]pattern,...", "Also hold these files one by one while the agent changes them, on top of lock.files; a component: prefix limits a pattern to that component."),
+				new("lock-folders", "[component:]pattern,...", "Also hold these folders as a whole while the agent changes a file in them, on top of lock.folders."),
 				new("id", "run-id", "The run's id (set by -detach).", Hidden: true),
 				Log,
 				new("run", "command", "The agent command, verbatim: the rest of the command line (put it last).", Rest: true)
@@ -286,13 +303,15 @@ internal static class CommandTable
 				"bassia run start -select app@v1,lib@v1 -detach -prompt \"fix the failing tests\"",
 				"bassia run start -select lib@v1 -run claude -p \"refactor the parser\" --permission-mode acceptEdits",
 				"bassia run start -select app@3f9c2e1,lib@v1 -prompt \"bisect the regression\"",
-				"bassia run start -select app,lib -prompt \"update the docs\""
+				"bassia run start -select app,lib -prompt \"update the docs\"",
+				"bassia run start -select app,lib -lock-folders \"app:src/*\" -prompt \"rewrite the parser\""
 			],
 			RunCommands.StartAsync,
-			Usage: "bassia run start -select <component[@tag|hash],...> [-detach] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
+			Usage: "bassia run start -select <component[@tag|hash],...> [-detach] [-lock-files <[component:]pattern,...>] [-lock-folders <[component:]pattern,...>] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
 			Details: "Without -detach the agent's output streams to the terminal and the result follows when the run ends; Ctrl-C stops the run and records it as cancelled. " +
 				"With -detach the selection is checked first, then the run continues in a background bassia process and the result (run_id, pid, log) is printed at once. " +
-				"The agent runs in the run folder with BASSIA_ROOT, BASSIA_RUN_ID and BASSIA_RUN_DIR set."),
+				"The agent runs in the run folder with BASSIA_ROOT, BASSIA_RUN_ID and BASSIA_RUN_DIR set. What it changes is held for the run as the lock " +
+				"filter says (see 'bassia help lock list'); when the filter locks anything, the run folder gets an AGENTS.md and a CLAUDE.md explaining it."),
 
 		new("run", "list", "List runs newest first - recorded ones and those still preparing - as a table and as [[run]] entries.",
 			[
@@ -337,6 +356,43 @@ internal static class CommandTable
 			[Id, new("component", "component", "Only this component."), new("patch", null, "Include the full patch.")],
 			["bassia run diff brave-otter-3f2a91", "bassia run diff -id brave-otter-3f2a91 -component app -patch"],
 			RunCommands.DiffAsync, Positional: "id"),
+
+		// ----- locks -----
+
+		new("lock", "list", "List what runs hold - files and folders, live, released (results not landed yet) or expired - and which runs wait for what, as a table and as [[hold]] and [[wait]] entries.",
+			[new("component", "component", "Only holds in this component."), new("run", "run-id", "Only this run's holds and waits.")],
+			["bassia lock list", "bassia lock list -component app", "bassia lock list -run brave-otter-3f2a91"],
+			LockCommands.ListAsync, Details: LockDetails),
+
+		new("lock", "check", "Tell whether paths are free to change: which live runs hold them, and which finished runs' results changed them that the run's checkout lacks (behind).",
+			[LockPaths, LockComponent, LockRun],
+			["bassia lock check -path app/src/parser.cs", "bassia lock check app/src/,lib/README.md", "bassia lock check -path src/parser.cs -component app"],
+			LockCommands.CheckAsync, Positional: "path", Details: LockDetails),
+
+		new("lock", "claim", "Hold paths for a run before its agent changes them, so other runs wait for it; all or none, failing with the runs that hold them.",
+			[LockPaths, LockComponent, LockRun],
+			["bassia lock claim -path app/src/parser.cs", "bassia lock claim app/src/parser/"],
+			LockCommands.ClaimAsync, Positional: "path", Details: LockDetails),
+
+		new("lock", "wait", "Wait until no other run holds the paths, then hold them for the run and bring the results of the runs that changed them into its checkout; re-read the files it lists under changed.",
+			[
+				LockPaths, LockComponent, LockRun,
+				new("timeout", "seconds", "Give up after this long with timed_out = true (default: 0, wait as long as it takes)."),
+				new("no-refresh", null, "Only report what changed; do not bring the other runs' results in.")
+			],
+			["bassia lock wait -path app/src/parser.cs", "bassia lock wait app/src/parser.cs -timeout 600"],
+			LockCommands.WaitAsync, Positional: "path",
+			Details: "A wait that would deadlock (the holder waits, directly or through others, for something this run holds) fails at once. " + LockDetails),
+
+		new("lock", "release", "Let go of a run's holds before it ends; -force breaks the holds of another live run (a stuck one).",
+			[
+				LockPaths with { Required = false },
+				new("all", null, "Everything the run holds (and, for a finished run, the results it is remembered for)."),
+				LockComponent, LockRun,
+				new("force", null, "Break the holds of another run although it is live.")
+			],
+			["bassia lock release -path app/src/parser.cs", "bassia lock release -all", "bassia lock release -run brave-otter-3f2a91 -all -force"],
+			LockCommands.ReleaseAsync, Details: LockDetails),
 
 		// ----- integration -----
 

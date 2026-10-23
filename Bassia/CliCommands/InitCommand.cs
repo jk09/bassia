@@ -39,6 +39,20 @@ internal static class InitCommand
 		"# advance: manual (wait for 'bassia integration advance') | auto (a completed integration fast-forwards the base branches).\n" +
 		"advance = \"manual\"\n" +
 		"\n" +
+		"[lock]\n" +
+		"# Paths parallel agentic runs must not change at the same time. While a run's agent changes a file, the run holds it\n" +
+		"# (or its folder) and every other run sees that ('bassia lock list|check|wait'). Override one component in a\n" +
+		"# [lock.component.<name>] table; 'bassia run start -lock-files/-lock-folders' adds to them for one run.\n" +
+		"# files: patterns of files held one by one, e.g. [\"**/*.cs\"]. folders: patterns of folders held as a whole, e.g.\n" +
+		"# [\"src/*\"] (each folder directly under src) or [\"**\"] (the folder of every changed file). Empty: nothing is held.\n" +
+		"files = []\n" +
+		"folders = []\n" +
+		"# conflict: a result that changed a path another run held - resolver (reviewed by it even if git merges it) | manual\n" +
+		"# (left for a human) | merge (merged like any other).\n" +
+		"conflict = \"resolver\"\n" +
+		"# ttl: seconds a hold lasts without its run renewing it, so a crashed or suspended run's holds expire.\n" +
+		"ttl = 120\n" +
+		"\n" +
 		"[llm]\n" +
 		"# LLM behind 'bassia prompt <ask>': 'claude' (Claude Code, run as the command below with its tools off) or 'command' (the\n" +
 		"# command below as it is, reading the prompt on stdin, with {model} replaced by -model). Skills live in skills/<name>/SKILL.md.\n" +

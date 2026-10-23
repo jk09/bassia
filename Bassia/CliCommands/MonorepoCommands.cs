@@ -6,6 +6,7 @@ using Bassia.CliCommands.Agent;
 using Bassia.Git;
 using Bassia.Graph;
 using Bassia.Integration;
+using Bassia.Locks;
 
 /// <summary><c>bassia status</c>, <c>bassia config ...</c> and <c>bassia version</c>: the monorepo as a whole.</summary>
 internal static class MonorepoCommands
@@ -28,8 +29,13 @@ internal static class MonorepoCommands
 		var head = await GitClient.In(monorepo.MetaRepoDir).RunAsync(["log", "-1", "--format=%h %s"]);
 
 		var graph = new ComponentGraph(monorepo.Components);
+		var locks = new LockTable(monorepo);
+		var entries = locks.ReadAll();
+		var held = entries.Where(entry => locks.StateOf(entry) == LockState.Live).Sum(entry => entry.Holds.Count);
+		var waiting = entries.Count(entry => entry.Waits.Any(wait => locks.IsWaiting(entry, wait)));
 		return ProgramCli.WriteResult(true, invocation.Command,
-			$"{monorepo.Components.Count} component(s), {runs.Count} recorded run(s) ({liveRuns.Count} live), {integrations.Count} integration(s).",
+			$"{monorepo.Components.Count} component(s), {runs.Count} recorded run(s) ({liveRuns.Count} live), {integrations.Count} integration(s)" +
+			(held + waiting > 0 ? $", {held} path(s) held by live runs, {waiting} run(s) waiting." : "."),
 			new Dictionary<string, object?>
 			{
 				["root"] = monorepo.Root,
@@ -45,7 +51,15 @@ internal static class MonorepoCommands
 				["live_integrations"] = liveIntegrations,
 				["graph"] = new TomlText(graph.RenderText(ascii: true)),
 				["runs"] = CountByStatus(runs.Select(run => run.Status), runs.Count),
-				["integrations"] = CountByStatus(integrations.Select(record => record.Status), integrations.Count)
+				["integrations"] = CountByStatus(integrations.Select(record => record.Status), integrations.Count),
+				["locks"] = new Dictionary<string, object?>
+				{
+					["live"] = held,
+					["released"] = entries.Where(entry => locks.StateOf(entry) == LockState.Released).Sum(entry => entry.Holds.Count),
+					["expired"] = entries.Where(entry => locks.StateOf(entry) == LockState.Expired).Sum(entry => entry.Holds.Count),
+					["waiting"] = waiting,
+					["conflicts"] = runs.Sum(run => run.Components.Sum(component => component.LockConflicts.Count))
+				}
 			});
 	}
 

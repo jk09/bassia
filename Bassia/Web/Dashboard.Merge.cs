@@ -44,8 +44,10 @@ internal sealed partial class Dashboard
 			var keys = string.Join(",", runs.Select(run => RunMetadata.Key(run.RunId)));
 			body.Append($"<p>{E(Summary(plan))}. Structural merge: <code>{E(structuralStatus)}</code>. In merge order, each dot coloured by who merges it:</p>");
 			body.Append(Charts.Lanes(plan.Select(component => (component.Name, component.BaseRef,
-				(IReadOnlyList<Charts.LaneItem>)component.Steps.Select(step => new Charts.LaneItem(step.RunId, RunMetadata.Key(step.RunId), StrategyClass(step),
-					$"{RunMetadata.Key(step.RunId)}: {StrategyText(step)} - {step.Rationale}", $"/runs/{Url(step.RunId)}")).ToList())).ToList()));
+				(IReadOnlyList<Charts.LaneItem>)component.Steps.Select(step => new Charts.LaneItem(step.RunId, RunMetadata.Key(step.RunId),
+					StrategyClass(step) + (step.LockConflicts.Count > 0 ? " locked" : ""),
+					$"{RunMetadata.Key(step.RunId)}: {StrategyText(step)} - {step.Rationale}{(step.LockConflicts.Count > 0 ? $" (lock conflict: {step.LockConflicts[0]})" : "")}",
+					$"/runs/{Url(step.RunId)}")).ToList())).ToList()));
 			body.Append(StrategyLegend());
 			body.Append("<div class=\"split\"><section class=\"wide\"><h3>Who merges what</h3><table class=\"list\">");
 			foreach (var component in plan)
@@ -140,7 +142,7 @@ internal sealed partial class Dashboard
 					+ (step.StructuralWarnings.Count > 0 ? $"; {step.StructuralWarnings.Count} warning(s)" : "");
 				body.Append($"""
 					<tr><td>{E(component.Name)}</td><td>{RunLink(step.RunId)}</td>
-					<td>{E(step.Rationale)}<div class="muted">{E(run?.Select ?? "")}</div></td>
+					<td>{E(step.Rationale)}<div class="muted">{E(run?.Select ?? "")}</div>{string.Concat(step.LockConflicts.Select(conflict => $"<div><span class=\"lockchip\">lock conflict</span> {E(conflict)}</div>"))}</td>
 					<td>{E(git)}</td><td>{E(weave)}</td>
 					<td><span class="pill {StrategyClass(step)}">{E(StrategyText(step))}</span>{(step.Note is null ? "" : $"<div class=\"muted\">{E(step.Note)}</div>")}</td></tr>
 					""");
@@ -234,7 +236,7 @@ internal sealed partial class Dashboard
 	}
 
 	private static string StrategyLegend() => Charts.Legend(("st-syntactic", "git"), ("st-structural", "weave"), ("st-semantic", "resolver"),
-		("st-manual", "a human"), ("st-uptodate", "up to date"), ("st-skip", "skipped"), ("st-failed", "failed"));
+		("st-manual", "a human"), ("st-uptodate", "up to date"), ("st-skip", "skipped"), ("st-failed", "failed"), ("locked", "lock conflict (lock.conflict decides)"));
 
 	/// <summary>One line: how many steps go which way.</summary>
 	internal static string Summary(IReadOnlyList<ComponentIntegration> plan)

@@ -112,7 +112,8 @@ exit codes and the stdout/stderr split are the same. `-human` after a rest-of-li
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-branch <b>] [-run <id>,...\|all] [-limit <n>] [-page <n>]` |
-| Agentic runs | `run start -select <c[@tag\|hash]>,... [-detach] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
+| Agentic runs | `run start -select <c[@tag\|hash]>,... [-detach] [-lock-files <[c:]pattern,...>] [-lock-folders <[c:]pattern,...>] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
+| Locks | `lock list [-component <c>] [-run <id>]`, `lock check -path <p>,...`, `lock claim -path <p>,...`, `lock wait -path <p>,... [-timeout <s>] [-no-refresh]`, `lock release -path <p>,...\|-all [-run <id>] [-force]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-manual] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
 | Natural language and skills | `prompt [-backend <name>] [-llm <command>] [-model <m>] [-skill <s>,...] [-yes] [-dry-run] [-max-rounds <n>] <ask...>`, `skill list`, `skill show -name <s>` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
@@ -256,6 +257,10 @@ value's layer, and it reads and changes settings through the same commands.
 | `merge.warnings` | `resolver` | A result weave merged with warnings: reviewed by the resolver, left for a human (`manual`), or weave's merge stands (`accept`) |
 | `merge.manual_paths` | (none) | Path patterns, as in split plans (`**/*.csproj,db/migrations`), whose conflicts always need a human |
 | `merge.advance` | `manual` | `auto`: a completed integration fast-forwards the base branches itself, as `integration advance` would |
+| `lock.files` | (none) | Path patterns of files a run holds one by one while its agent changes them (see [Locking files and folders](#locking-files-and-folders)) |
+| `lock.folders` | (none) | Path patterns of folders a run holds as a whole while its agent changes a file in them: `src/*` is each folder directly under `src`, `**` the folder of every file |
+| `lock.conflict` | `resolver` | A result that changed a path another run held: reviewed by the `resolver` even when git merges it, left for a human (`manual`), or merged like any other (`merge`) |
+| `lock.ttl` | `120` | Seconds a hold lasts without its run renewing it, so the holds of a crashed or suspended run expire |
 | `llm.backend` | `claude` | LLM backend of `bassia prompt`: `claude` (Claude Code) or `command` |
 | `llm.command` | `claude -p` | Command that backend runs; the prompt goes to its stdin |
 
@@ -268,6 +273,9 @@ bassia config set merge.manual_paths -value "**/*.csproj"           # everyone: 
 bassia config set merge.advance -value auto -user                   # just me: land completed integrations at once
 bassia config unset merge.advance -user
 ```
+
+`lock.files`, `lock.folders` and `lock.conflict` can be set for one component the same way, as
+`lock.component.<component>.<setting>`.
 
 `component add|set|remove` edit `.bassia/components.toml` the same way and reject a change that would leave a cycle
 or a reference to an unregistered component.
@@ -471,6 +479,65 @@ path = 'D:\bassia-workspace'
 
 `Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
 
+### Locking files and folders
+
+Agents tend to rewrite large parts of a file, and two rewrites of the same file rarely merge faithfully, even when
+git reports a clean merge. Locking keeps parallel runs from changing the same files - or files of the same folder - at
+the same time, and tells a run when another one changed what it is about to change. Every run works in its own
+folder, but they all share one view of who holds what.
+
+```powershell
+bassia config set lock.folders -value "src/*"                         # every folder directly under src is one lock
+bassia config set lock.component.docs.files -value "**/*.md"           # in docs, each Markdown file on its own
+bassia run start -select app,lib -lock-files "app:**/*.csproj" -prompt "upgrade the SDK"   # more locks for one run
+bassia lock list                                                       # who holds what, and who waits
+```
+
+- **The filter.** `lock.files` holds each changed file that matches on its own; `lock.folders` holds the whole folder
+  a pattern names when a file in it changes: `src/*` names every folder directly under `src`, `**` the folder of every
+  file, `docs` the `docs` folder. A file is held as the nearest folder above it that a folder pattern names, else as
+  itself (when a file pattern matches it, or a folder pattern covers it without naming one of its folders); other
+  files are not held. Patterns are those of split plans. Both are set for every component or for one
+  (`lock.component.<c>.files|folders`), and `run start -lock-files` / `-lock-folders` add to them for one run - a
+  `<component>:` prefix limits a pattern to one component. Unset, nothing is held and runs behave as before.
+- **Holds are implicit.** While a run's agent works, the bassia process executing the run looks at the run's component
+  checkouts every two seconds (`git status`) and holds every changed path its filter covers; a change the agent
+  reverts is let go. Holds live in `<root>/.locks/<run-id>.toml`, at the monorepo root rather than in the workspace, so
+  every `bassia` process of the monorepo sees them, whichever workspace it uses. Decisions that depend on what others
+  hold are made under an exclusive OS file lock on `.locks/.mutex`, which the OS releases when a process dies.
+- **What another run holds binds everyone.** A run that changes a path overlapping a live hold of another run - the
+  same file, or a file in a held folder, or a folder containing a held file - whatever its own filter says, records a
+  `held` **lock conflict**.
+- **Asking first.** An agent (every agent command has `BASSIA_RUN_ID`) uses `bassia lock check -path <p>` before it
+  rewrites a file: is it free, who holds it, and has a finished run changed it since the run's checkout was made?
+  `bassia lock claim -path <p>` holds paths up front (all or none). `bassia lock wait -path <p> [-timeout <s>]` waits
+  until no other live run holds them, then holds them and **brings the results of the runs that changed them into the
+  run's checkout** (`git merge` of their result tags, a fast-forward while the run's branch is at its base); it lists
+  the files that changed meanwhile under `changed`, since the agent's view of them is out of date. `-no-refresh` only
+  reports. A wait that would close a cycle (the holder waits, directly or through others, for something the run holds)
+  fails at once, as a deadlock. Paths are given as the agent sees them - relative to its working directory inside the
+  run folder, through junctions into nested components - or as `<component>/<path>`; a folder ends with `/`.
+- **Telling the agent.** When a run's filter locks anything, the run folder gets an `AGENTS.md` and a `CLAUDE.md`
+  (outside every component checkout, so never committed) that explain the protocol, so Claude Code and agents that
+  read `AGENTS.md` check and wait before they rewrite a locked file.
+- **Failed and suspended runs.** A hold is live while its run's bassia process renews it at least every `lock.ttl`
+  seconds and, on the same machine, that process lives. A crashed run's holds therefore stop blocking at once, a
+  suspended one's (or one on another machine sharing the root) after `lock.ttl`. When a suspended run comes back,
+  whatever another run took meanwhile is that run's: the returning run loses it and records a conflict. `run stop` of a
+  run whose process is gone, `run stop` that had to kill a run, and `run abandon` remove its holds; `lock release -run
+  <id> -all` breaks those of a run that is not live, `-force` those of one that is (a stuck agent).
+- **After a run.** When a run ends, it releases its holds. If it pushed results, its holds are remembered as
+  *released* until those results land on their component's default branch: a later run that changes such a path
+  without the result in its checkout records a `stale` lock conflict, and `lock wait` (or `lock check`, which reports
+  it as `behind`) brings the result in at once instead of blocking.
+- **The record.** A run's `run.toml` keeps, per component, what it `held`, its `lock_conflict`s (path, kind, the other
+  run) and what it `caught_up` with; `run start`, `run show` and the run's card report them. `run diff` of a run that
+  caught up shows only its own change, from its result's first parent.
+
+Locks are advisory while the agent works - Bassia cannot stop an agent from writing a file - so a collision is
+recorded and the integration enforces `lock.conflict` (see below). The integration also merges a result after the
+results it brought in, and treats it no less carefully than them.
+
 ### Integration: syntactic first, then structural, then semantic
 
 Every successful run leaves its changes in each component it touched as a result tag `agent-run/<key>/<n>` - the same name in every component. `integration start` consolidates the results of several runs, component by component, into one integration:
@@ -483,7 +550,7 @@ bassia integration plan -runs all -weave off                     # the triage wi
 bassia integration advance <id>                                  # fast-forward the base branches to the result
 ```
 
-1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it), `manual` (left for a human) or `skip`. The **merge policy** (the `merge.*` settings, see [Configuration](#configuration)) decides between the resolver and a human: with `merge.semantic = manual`, with `merge.warnings = manual`, or for conflicts in `merge.manual_paths`, a step is `manual`; with `merge.warnings = accept` weave's merge with warnings stands. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review, and wins over the policy; `-manual` leaves a result for a human; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
+1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it), `manual` (left for a human) or `skip`. The **merge policy** (the `merge.*` settings, see [Configuration](#configuration)) decides between the resolver and a human: with `merge.semantic = manual`, with `merge.warnings = manual`, or for conflicts in `merge.manual_paths`, a step is `manual`; with `merge.warnings = accept` weave's merge with warnings stands. A result with a **lock conflict** (it changed a path another run held, see [Locking files and folders](#locking-files-and-folders)) goes by `lock.conflict`: to the resolver even when git or weave merge it cleanly (`resolver`, the default; its brief lists the conflicts), to a human (`manual`), or like any other result (`merge`). Results are taken oldest run first, except that a result which brought other runs' results in (`lock wait`) comes after them, and is `manual` or `semantic` when one of them is. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review, and wins over the policy; `-manual` leaves a result for a human; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
 2. **Syntactic and structural steps first.** Each component is merged in its own checkout under `.workspace/integration-<key>/<component>`, on the branch `integration/<key>` started at the base. Every syntactic step is a `git merge --no-ff` of the run's result tag, every structural one the same with weave as the merge driver, in run order. If one conflicts after all (or the structural merge warns), it moves to the back of the semantic queue.
 3. **Semantic steps next.** For each remaining step Bassia starts the merge - with weave as the merge driver when the structural merge is enabled, so only what weave could not merge is left conflicted, in entity-labelled conflicts - with `diff3` conflict markers for what git's own merge leaves, so the common ancestor is visible, and writes a **semantic brief**: the incoming run's prompt, baseline, command and commit records; which runs are already integrated and why; the history and diff of both sides since their common ancestor; the conflicted files (and, with the structural merge, which files git alone conflicted on, which of them weave merged, and weave's warnings); and instructions. The resolver command (by default `claude -p --permission-mode acceptEdits`, configurable as `[integration] resolver` in `config.toml`) runs in the component's working tree with the brief on stdin and these environment variables: `BASSIA_MERGE_BRIEF` (the brief's path), `BASSIA_COMPONENT`, `BASSIA_RUN_ID`, `BASSIA_INTEGRATION_ID` and `BASSIA_ROOT`. When it exits with code 0 and no conflict marker (nor weave's `weave explain` pointer) is left, Bassia commits the merge. A non-zero exit or leftover markers abort that step, which is recorded as `failed`; the other steps still go ahead.
 4. **Result.** Each merge commit's message is a subject and an `[integration]` TOML record (run, source tag, strategy, rationale, conflicts, structural driver and conflicts, resolver). The result is tagged `integration/<key>/<n>` - one identically named annotated tag across the components - and branch and tag are pushed to the component's source-of-truth repo. That tag is a baseline like any other: `run start -select app@integration/<key>/0,...` starts the next run from it. Nothing else moves: `integration advance <id>` fast-forwards each component's base branch to the result, and refuses if the branch moved since the integration was built on it, or if the base was a tag.
@@ -521,8 +588,8 @@ has the same shape and answers in TOML, there is no per-command glue:
    LLM is done (at most `-max-rounds`, default 8). The LLM's `answer` becomes the result's `message`.
 
 Read-only commands (`status`, `config list|get`, `component list|show|survey`, `tag list|show`, `graph` without
-`-out`, `log`, `run list|show|logs|wait|diff`, `integration plan|list|show|logs|wait`, `skill list|show`, `help`,
-`version`) run at once. Any other command is confirmed first (`y`es, `n`o, `a`ll); when stdin is not a terminal it
+`-out`, `log`, `run list|show|logs|wait|diff`, `lock list|check`, `integration plan|list|show|logs|wait`,
+`skill list|show`, `help`, `version`) run at once. Any other command is confirmed first (`y`es, `n`o, `a`ll); when stdin is not a terminal it
 needs `-yes`. `-dry-run` changes nothing: it runs the read-only commands and stops with the plan at the first command
 that would change something. `prompt`, `web` and `tutorial` are never run from a prompt. The result lists every
 proposed command as a `[[step]]` with its `command_line`, `status` (`ok`, `failed`, `rejected`, `declined`, `planned`,
@@ -582,16 +649,22 @@ without JavaScript; the script animates and refreshes the live parts.
   hand), the runs started from it and the integrations that took it in. Its lineage is drawn as a flow: started
   from → agentic runs → results → integrations → integrated as.
 - **Runs**: the live runs as animated cards. Each card shows its phase as steps (preparing, agent working,
-  finalizing, done) with the current step pulsing, a ticking clock, its components and the latest line of its
-  output. They come from the job registry, so a run started from any terminal appears by itself. Below them, every
+  finalizing, done) with the current step pulsing, a ticking clock, its components, the paths it holds and waits
+  for, and the latest line of its output. They come from the job registry, so a run started from any terminal appears by itself. Below them, every
   run over time (live bars reach to now) and runs by status. A run's page streams its output while it is live and
   draws its path from its baselines to its results and the integrations that took them.
+- **Locks**: who holds what, live: a flow from the runs waiting, through the paths they wait for and every held path,
+  to the runs holding them, and a table of each hold (file or folder, live, released with its result tag, or expired,
+  when it was last renewed and who waits for it). Then the lock filter of each component with what a lock conflict
+  leads to, and every recorded lock conflict with where its result stands. A run's page adds what it held, its
+  conflicts and what it caught up with; a component's page its filter and its holds; the component map a badge for
+  held paths.
 - **Merge queue**: every result not yet on its component's default branch: `waiting`, `integrated` (its base not
   advanced) or `needs attention`. For what waits, the triage of the next integration is drawn as one lane per
   component, in merge order, with each result coloured by who merges it: git, weave, the resolver, or a human. A
   bar per component shows the split, and a ring joins the runs whose results collide. A table gives each merge's
-  meaning: why the run changed things (its prompt), what git found, how weave saw it, and why it goes where it
-  goes. Then come the integrations waiting for `integration advance`, and every merge that **needs attention**
+  meaning: why the run changed things (its prompt), its lock conflicts, what git found, how weave saw it, and why
+  it goes where it goes; a result with a lock conflict is ringed in the lanes. Then come the integrations waiting for `integration advance`, and every merge that **needs attention**
   (left for a human by the merge policy, or failed), each with its semantic brief when one was written and the
   commands that deal with it: hand it to the resolver, merge it by hand, or leave it out.
 - **Integrations**: every integration with a bar of how its steps were merged. An integration's page draws its
@@ -630,6 +703,9 @@ and integration commands, including detached runs and stopping them, which start
 background process. `ComponentSplitTests` splits a component with a branchy history (moves into and between
 parts, a merge, tags, a dropped folder, a path reused after its file moved away) and checks every part's files,
 `git log --follow`, tags, record commit and registration, plus plan errors, dry runs, rollback and the survey.
+`LockTests` covers the lock filter and keys, the lock table's expiry, dead processes, deadlocks and a suspended run
+losing its holds, and - with a detached run holding while a second run starts - implicit holds, conflicts and what
+`lock.conflict` makes of them, `lock claim` and a timed-out `lock wait`, and `lock wait` bringing the holder's result in.
 `ParallelAgentRunEndToEndTests`
 (`Category=EndToEnd`) is the whole-pipeline proof and works differently: it builds a monorepo in the temp folder,
 clones [jk09/example](https://github.com/jk09/example) twice as two components, tags each component's HEAD, and

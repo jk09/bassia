@@ -3,12 +3,15 @@ namespace Bassia.Web;
 using System.Globalization;
 using Bassia.Git;
 using Bassia.Integration;
+using Bassia.Locks;
 
 /// <summary>
 /// A run some <c>bassia</c> process is executing right now (<c>bassia run start</c>, detached or in a terminal), as the
-/// job registry and the run store show it: its phase, how long it has been going, and the latest line of its output.
+/// job registry and the run store show it: its phase, how long it has been going, the latest line of its output, and
+/// what it holds and waits for in the lock table.
 /// </summary>
-internal sealed record LiveRun(string RunId, string Phase, DateTimeOffset Started, RunMetadata? Record, IReadOnlyList<string> Tail, bool Detached)
+internal sealed record LiveRun(string RunId, string Phase, DateTimeOffset Started, RunMetadata? Record, IReadOnlyList<string> Tail, bool Detached,
+	IReadOnlyList<string>? Holds = null, IReadOnlyList<string>? Waits = null)
 {
 	public string? LastLine => Tail.Count == 0 ? null : Tail[^1];
 }
@@ -21,6 +24,8 @@ internal static class LiveRuns
 	public static IReadOnlyList<LiveRun> Read(Monorepo monorepo, IReadOnlyList<RunMetadata> recorded)
 	{
 		var live = new List<LiveRun>();
+		var table = new LockTable(monorepo);
+		var locks = table.ReadAll().ToDictionary(entry => entry.RunId, StringComparer.Ordinal);
 		foreach (var job in new JobRegistry(monorepo).List(RunCommands.JobKind).Where(JobRegistry.IsAlive))
 		{
 			var record = recorded.FirstOrDefault(run => run.RunId == job.Id);
@@ -31,7 +36,10 @@ internal static class LiveRuns
 
 			var tail = job.Log is null ? [] : Tail(job.Log, TailLines);
 			var started = Parse(record?.Created ?? job.Started) ?? DateTimeOffset.UtcNow;
-			live.Add(new LiveRun(job.Id, record is null ? "preparing" : PhaseOf(tail), started, record, tail, job.Detached));
+			var entry = locks.GetValueOrDefault(job.Id);
+			live.Add(new LiveRun(job.Id, record is null ? "preparing" : PhaseOf(tail), started, record, tail, job.Detached,
+				entry?.Holds.Select(hold => hold.Key.Display).ToList(),
+				entry?.Waits.Where(wait => table.IsWaiting(entry, wait)).Select(wait => wait.Key.Display).ToList()));
 		}
 
 		return live.OrderBy(run => run.Started).ToList();
@@ -73,6 +81,41 @@ internal static class LiveRuns
 
 	public static DateTimeOffset? Parse(string? timestamp) =>
 		DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : null;
+}
+
+/// <summary>
+/// The lock table as the dashboard shows it: every hold with where it stands and who waits for it, and every wait with
+/// the runs it waits for.
+/// </summary>
+internal sealed record LockBoard(IReadOnlyList<LockBoard.Row> Holds, IReadOnlyList<LockBoard.Waiting> Waits, TimeSpan Ttl)
+{
+	internal sealed record Row(LockEntry Entry, LockHold Hold, LockState State, IReadOnlyList<string> Waiters);
+
+	internal sealed record Waiting(LockEntry Entry, LockWait Wait, IReadOnlyList<string> HeldBy);
+
+	public static LockBoard Empty { get; } = new([], [], TimeSpan.Zero);
+
+	public static LockBoard Read(Monorepo monorepo)
+	{
+		var table = new LockTable(monorepo);
+		var entries = table.ReadAll();
+		var states = entries.ToDictionary(entry => entry.RunId, entry => table.StateOf(entry), StringComparer.Ordinal);
+		var waits = entries.SelectMany(entry => entry.Waits.Where(wait => table.IsWaiting(entry, wait)).Select(wait => new Waiting(entry, wait,
+				entries.Where(other => other.RunId != entry.RunId && states[other.RunId] == LockState.Live && other.Holds.Any(hold => hold.Key.Overlaps(wait.Key)))
+					.Select(other => other.RunId).ToList())))
+			.ToList();
+		var holds = entries.SelectMany(entry => entry.Holds.Select(hold => new Row(entry, hold, states[entry.RunId],
+				waits.Where(wait => wait.Entry.RunId != entry.RunId && wait.Wait.Key.Overlaps(hold.Key)).Select(wait => wait.Entry.RunId).Distinct().ToList())))
+			.OrderBy(row => row.Hold.Key.Component, StringComparer.Ordinal).ThenBy(row => row.Hold.Key.Path, StringComparer.Ordinal)
+			.ToList();
+		return new LockBoard(holds, waits, table.Ttl);
+	}
+
+	public IEnumerable<Row> Live => Holds.Where(row => row.State == LockState.Live);
+
+	public IEnumerable<Row> InComponent(string component) => Holds.Where(row => row.Hold.Key.Component == component);
+
+	public IEnumerable<Row> OfRun(string runId) => Holds.Where(row => row.Entry.RunId == runId);
 }
 
 /// <summary>Where a run's result in one component stands on its way to the component's default branch.</summary>
