@@ -1,5 +1,0 @@
-/tmp/bassia-package-a6c41dc2/bassia-claude-friendly-fermat-79e5cy-e57e949-linux-x64/bassia/Bassia
-/tmp/bassia-package-a6c41dc2/bassia-claude-friendly-fermat-79e5cy-e57e949-linux-x64/bassia/Bassia.dll
-/tmp/bassia-package-a6c41dc2/bassia-claude-friendly-fermat-79e5cy-e57e949-linux-x64/bassia/Bassia.deps.json
-/tmp/bassia-package-a6c41dc2/bassia-claude-friendly-fermat-79e5cy-e57e949-linux-x64/bassia/Bassia.runtimeconfig.json
-/tmp/bassia-package-a6c41dc2/bassia-claude-friendly-fermat-79e5cy-e57e949-linux-x64/bassia/Tomlyn.Signed.dll
