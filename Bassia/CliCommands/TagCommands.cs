@@ -2,6 +2,7 @@ namespace Bassia;
 
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 
 /// <summary><c>bassia tag ...</c>: tags across components - how many components each tag spans, and creating one in several.</summary>

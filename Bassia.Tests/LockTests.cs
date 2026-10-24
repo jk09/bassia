@@ -75,7 +75,7 @@ public class LockTests
 
 	private static async Task WaitForAsync(MonorepoFixture monorepo, string runId)
 	{
-		var (exitCode, _, error) = await monorepo.BassiaAsync("run", "wait", runId, "-timeout", "120");
+		var (exitCode, _, error) = await monorepo.BassiaAsync("agent", "wait", runId, "-timeout", "120");
 		Assert.True(exitCode == 0, error);
 	}
 
@@ -336,7 +336,7 @@ public class LockTests
 		Assert.Contains("bassia lock wait", await File.ReadAllTextAsync(Path.Combine(monorepo.RunDir(runId), "AGENTS.md")));
 		Assert.True(File.Exists(Path.Combine(monorepo.RunDir(runId), "CLAUDE.md")));
 		Assert.Equal(1L, ((TomlTable)(await OkAsync(monorepo, "status"))["locks"])["live"]);
-		Assert.Contains("holds example/a.txt", (string)(await OkAsync(monorepo, "run", "show", runId))["card"]);
+		Assert.Contains("holds example/a.txt", (string)(await OkAsync(monorepo, "agent", "show", runId))["card"]);
 
 		await WaitForAsync(monorepo, runId);
 		var released = Assert.Single(Tables(await OkAsync(monorepo, "lock", "list"), "hold"));
@@ -400,7 +400,7 @@ public class LockTests
 		Assert.Contains("lock conflict(s): 1", (string)plan["steps"]);
 
 		// An abandoned run's results never land: nobody has to catch up with them.
-		await OkAsync(monorepo, "run", "abandon", holder);
+		await OkAsync(monorepo, "agent", "abandon", holder);
 		Assert.DoesNotContain(Tables(await OkAsync(monorepo, "lock", "list"), "hold"), hold => (string)hold["run_id"] == holder);
 	}
 
@@ -435,7 +435,7 @@ public class LockTests
 		Assert.Contains("from-b", content);
 
 		// Its own change is what it added on top of the holder's.
-		var diff = Tables(await OkAsync(monorepo, "run", "diff", waiter), "component").Single();
+		var diff = Tables(await OkAsync(monorepo, "agent", "diff", waiter), "component").Single();
 		Assert.Equal(["src/x.txt"], ((TomlArray)diff["files"]).Cast<string>());
 		Assert.Equal(1L, diff["insertions"]);
 

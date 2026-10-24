@@ -253,7 +253,7 @@ internal static class Charts
 	{
 		if (bars.Count == 0)
 		{
-			return Notice("No agentic run yet. Start one with 'bassia run start -select <component[@tag],...> -prompt <text>'.");
+			return Notice("No agentic run yet. Start one with 'bassia agent start -select <component[@tag],...> -prompt <text>'.");
 		}
 
 		const int labelWidth = 190, plotWidth = 760, rowHeight = 24, top = 26, margin = 8;

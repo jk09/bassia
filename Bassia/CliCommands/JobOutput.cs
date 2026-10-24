@@ -2,7 +2,7 @@ namespace Bassia;
 
 /// <summary>
 /// The output of a detached job: while it is attached, everything this process would print goes to the job's log
-/// (which <c>run logs</c> / <c>integration logs</c> read while it grows), and the final result goes to the job's
+/// (which <c>agent logs</c> / <c>integration logs</c> read while it grows), and the final result goes to the job's
 /// result file, so a log never embeds a <c># bassia result</c> document of its own.
 /// </summary>
 internal sealed class JobOutput : IDisposable

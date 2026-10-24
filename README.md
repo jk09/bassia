@@ -40,7 +40,9 @@ bassia -C R:\acme graph -format tree
 The dependencies are what keep it scalable. Whatever you work on, you check out only the components you choose plus
 what they need, never the whole monorepo. A component is the unit of scale, of ownership and of access. Because
 every component is a real git repository with real history, nothing locks you in: you can push it, review it and
-build it the way you do today.
+build it the way you do today. Git is the storage of today, not a premise: the graph of components is a layer of its
+own over a small storage contract, so components could one day live elsewhere - say, as blobs in cloud storage held
+together by a commit DAG in a database - without changing how the monorepo works.
 
 ![The component map: each component with what it needs, its live runs, queued results and merges needing attention](docs/images/components.png)
 
@@ -49,7 +51,7 @@ together: a release, a baseline for agents, the result of an integration. These 
 
 ```powershell
 bassia tag create v1.1 -select sortlib,parser,storage,api,web,cli -message "Release 1.1"
-bassia run start -select sortlib@v1.1,api@v1.1 -prompt "version the REST routes under /v2"
+bassia agent start -select sortlib@v1.1,api@v1.1 -prompt "version the REST routes under /v2"
 ```
 
 ![Tags across components: one column per tag, one row per component, joined where a tag spans several](docs/images/tags.png)
@@ -63,10 +65,10 @@ component, tags the result `agent-run/<run>/<n>` and pushes it. Nothing touches 
 monorepo's run store, so you can always tell which prompt produced which commit.
 
 ```powershell
-bassia run start -select api@v1.1,parser@v1.1,storage@v1.1,sortlib@v1.1 -detach -prompt "paginate the list endpoint"
-bassia run start -select storage@v1.1,sortlib@v1.1 -detach -prompt "add a write-ahead log" -model opus
-bassia run list -status live
-bassia run logs <run>          # follow one; also run wait, run stop, run diff -patch
+bassia agent start -select api@v1.1,parser@v1.1,storage@v1.1,sortlib@v1.1 -detach -prompt "paginate the list endpoint"
+bassia agent start -select storage@v1.1,sortlib@v1.1 -detach -prompt "add a write-ahead log" -model opus
+bassia agent list -status live
+bassia agent logs <run>          # follow one; also agent wait, agent stop, agent diff -patch
 ```
 
 Runs are independent processes, so any number can run side by side, started by you or by other agents. Each one is

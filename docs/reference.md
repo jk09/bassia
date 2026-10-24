@@ -59,8 +59,8 @@ bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
 
 - Switches are case-insensitive and may be written `-name` or `--name`. Lists are comma-separated
   (`-select app@v1,lib@v1`) or given by repeating the switch.
-- A command's main argument may be given without its switch: `bassia run show brave-otter-3f2a91` is
-  `bassia run show -id brave-otter-3f2a91`.
+- A command's main argument may be given without its switch: `bassia agent show brave-otter-3f2a91` is
+  `bassia agent show -id brave-otter-3f2a91`.
 - A rest-of-line switch (`-run`, `-resolve`) takes everything after it verbatim, so it comes last.
 - `-C <path>`, before the command, runs `bassia` as if it had been started in `<path>`, same as `git -C <path>`. It
   can be repeated, each occurrence relative to the previous one.
@@ -120,20 +120,20 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version`, `tutorial` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
-| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...]` |
+| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
 | Dependencies and history | `graph [-name <c>] [-format board\|tree\|mermaid\|svg] [-out <file>]`, `log [-component <c>,...] [-only] [-branch <b>] [-run <id>,...\|all] [-limit <n>] [-page <n>]` |
-| Agentic runs | `run start -select <c[@tag\|hash]>,... [-detach] [-lock-files <[c:]pattern,...>] [-lock-folders <[c:]pattern,...>] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `run list [-status <s>] [-component <c>]`, `run show`, `run logs [-tail <n>]`, `run wait [-timeout <s>]`, `run stop`, `run retry`, `run abandon`, `run diff [-component <c>] [-patch]` |
+| Agentic runs | `agent start -select <c[@tag\|hash]>,... [-detach] [-lock-files <[c:]pattern,...>] [-lock-folders <[c:]pattern,...>] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `agent list [-status <s>] [-component <c>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent retry`, `agent abandon`, `agent diff [-component <c>] [-patch]` |
 | Locks | `lock list [-component <c>] [-run <id>]`, `lock check -path <p>,...`, `lock claim -path <p>,...`, `lock wait -path <p>,... [-timeout <s>] [-no-refresh]`, `lock release -path <p>,...\|-all [-run <id>] [-force]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-manual] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
 | Natural language and skills | `prompt [-backend <name>] [-llm <command>] [-model <m>] [-skill <s>,...] [-yes] [-dry-run] [-max-rounds <n>] <ask...>`, `skill list`, `skill show -name <s>` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
 | Feedback and crash reports | `feedback send [-kind bug\|idea\|question] [-yes] <message...>`, `feedback reports [-mode off\|ask\|auto]`, `feedback pending [-send]` |
 
-The commands this replaced - `agent`, `add-component`, `integrate`, `commit`, `branch` and `ui` - fail with exit code
-2 and name their successor.
+The commands this replaced - `run` (now `agent`), `add-component`, `integrate`, `commit`, `branch` and `ui` - fail
+with exit code 2 and name their successor.
 
 A typical agent session over a fresh monorepo:
 
@@ -143,10 +143,10 @@ bassia -C R:\ component add -url https://github.com/myrepo/lib.git
 bassia -C R:\ component add -url https://github.com/myrepo/app.git -references lib
 bassia -C R:\ component tag -name lib -tag v1
 bassia -C R:\ component tag -name app -tag v1
-bassia -C R:\ run start -select app@v1,lib@v1 -detach -prompt "add a changelog"     # returns run_id at once
-bassia -C R:\ run show brave-otter-3f2a91                                           # live? last output line
-bassia -C R:\ run wait brave-otter-3f2a91 -timeout 1800                             # ok when completed
-bassia -C R:\ run diff brave-otter-3f2a91 -patch                                    # what it changed
+bassia -C R:\ agent start -select app@v1,lib@v1 -detach -prompt "add a changelog"     # returns run_id at once
+bassia -C R:\ agent show brave-otter-3f2a91                                           # live? last output line
+bassia -C R:\ agent wait brave-otter-3f2a91 -timeout 1800                             # ok when completed
+bassia -C R:\ agent diff brave-otter-3f2a91 -patch                                    # what it changed
 bassia -C R:\ integration plan -runs all
 bassia -C R:\ integration start -runs all
 bassia -C R:\ integration advance steady-heron-5e11aa                               # fast-forward main
@@ -160,17 +160,17 @@ a missing value). An agent or a script reads it without scraping prose. TOML is 
 in (`config.toml`, `components.toml`, the `run.toml` records), so a caller uses one parser and one vocabulary of
 `snake_case` keys throughout.
 
-A result always opens with the comment line `# bassia result`, then `ok`, the `command` (e.g. `run start`), and either
+A result always opens with the comment line `# bassia result`, then `ok`, the `command` (e.g. `agent start`), and either
 `message` (success) or `error` (failure); commands that have more to report add their own keys after those, and lists
 come as arrays of tables (`[[component]]`, `[[run]]`, ...), named as in the stored records. The marker exists because
-`bassia run start` without `-detach` lets the agent command inherit stdout: a caller takes the last marker line as the
+`bassia agent start` without `-detach` lets the agent command inherit stdout: a caller takes the last marker line as the
 start of the result and treats anything before it as agent output. Values TOML cannot express are simply absent keys —
 there is no `null`.
 
 Pictures are part of the result, as multi-line literal strings in plain ASCII, so the output stays one valid TOML
 document: `graph` for the dependency graph (`bassia graph`, `status`, `component show`) and for history (`log`), `table`
 for listings, `card` for a run, `steps` for an integration, `output` for a detached job's log, and `stat`/`patch` for
-`run diff`.
+`agent diff`.
 
 ```toml
 # bassia result
@@ -224,7 +224,7 @@ lib app
 
 ### Live runs: detached, watched, stopped
 
-`run start` without `-detach` behaves like a classic command: the agent's output streams to the terminal and the
+`agent start` without `-detach` behaves like a classic command: the agent's output streams to the terminal and the
 result follows when the run ends; Ctrl-C stops the run and records it as `cancelled`. With `-detach` the selection is
 checked first (a mistake is reported at once), then the run continues in a background `bassia` process with none of
 the caller's standard handles, and the result — `run_id`, `pid`, `log` — is printed immediately. `integration start
@@ -233,14 +233,14 @@ the caller's standard handles, and the result — `run_id`, `pid`, `log` — is 
 Whoever executes a run or integration - a foreground `bassia` or a detached one - registers
 it as a job in `<workspace>/.jobs/`. That is what lets another process, usually another agent:
 
-- see that it is **live** (`run list -status live`, `run show`: `live`, `pid`, `last_output`, and an ASCII `card`),
-- read a detached job's **output** as it grows (`run logs`; the result goes to a separate `result_file`),
-- **wait** for it (`run wait`, `integration wait`, with an optional `-timeout`),
-- **stop** it (`run stop`, `integration stop`): the job is asked to stop, which kills the agent's (or resolver's)
+- see that it is **live** (`agent list -status live`, `agent show`: `live`, `pid`, `last_output`, and an ASCII `card`),
+- read a detached job's **output** as it grows (`agent logs`; the result goes to a separate `result_file`),
+- **wait** for it (`agent wait`, `integration wait`, with an optional `-timeout`),
+- **stop** it (`agent stop`, `integration stop`): the job is asked to stop, which kills the agent's (or resolver's)
   process tree and records the work as `cancelled`; a job that does not react within `-timeout` seconds has its
   process killed.
 
-A run recorded as `started` whose process is gone (killed, crashed, machine restarted) shows as `stale`; `run stop`
+A run recorded as `started` whose process is gone (killed, crashed, machine restarted) shows as `stale`; `agent stop`
 records it as `cancelled`.
 
 ### Configuration
@@ -352,7 +352,7 @@ Each part becomes a new repository `<root>/<part>/.git` with the source's branch
   tagger and message), so a baseline such as `v1` is selectable as `app-core@v1`; tags from before the part had any
   file are dropped and reported.
 - It ends with a split record commit (no change) whose message carries a TOML `[split]` record, tagged `split/<id>` -
-  a baseline for the next run (`run start -select app-core@split/<id>,...`).
+  a baseline for the next run (`agent start -select app-core@split/<id>,...`).
 
 The tip of every part is verified against the source's tip (same files, modes and content) before anything is
 registered. The history is read once (`git fast-export`), each part is written by `git fast-import` into a repository
@@ -385,18 +385,29 @@ bassia -C R:\ component unwind -name app
   nests it as a junctioned folder like any other referenced component.
 - **Commits.** Every commit with submodules gets one commit on top that removes the gitlinks and their `.gitmodules`
   sections (the file goes when nothing is left in it). On the main branch that commit becomes the new tip, so
-  `run start -select app,lib` works; history is kept, so the component stays compatible with its upstream. For a
+  `agent start -select app,lib` works; history is kept, so the component stays compatible with its upstream. For a
   commit a submodule pins, the commit stays off main.
 - **Linking tags.** Each main branch can express only one combination, while the same submodule may be pinned at
   different commits by different components (or by older commits). So every commit with submodules is linked with
   the commits its submodules pin (unwound in turn) by one annotated tag of the same name in every component involved,
-  `unwind/<component>/<n>`: `run start -select app@unwind/app/0,lib@unwind/app/0,core@unwind/app/0` starts from exactly
+  `unwind/<component>/<n>`: `agent start -select app@unwind/app/0,lib@unwind/app/0,core@unwind/app/0` starts from exactly
   the pinned combination. A component pinned twice at different commits within one tree keeps the nearest pin in the
   tag; the result lists the other as a conflict, and it stays reachable through its own parent's tag.
 - **All or nothing.** The whole tree is planned first, new components are cloned into a staging folder and pinned
   commits missing from a repository are fetched from the submodule's URL. A pinned commit that cannot be found, a
   submodule without a URL, a cycle, or a path where the parent already nests another component fails the unwind and
   nothing changes (`component add -unwind` then adds nothing either). The meta-repo is committed once.
+
+### Creating a component
+
+```
+bassia component create -name docs                          # a new, empty component with a main branch
+bassia component create -name app -references lib,ui:vendor/ui
+```
+
+`component create` makes a component that did not exist anywhere before: its history starts with one commit without
+files on its main branch (`-branch` names another), so an agentic run can select it at once (`-select docs`) and write
+its first files. `-url` records the upstream it will be published to.
 
 ### Forking instead of branching
 
@@ -435,9 +446,9 @@ commits, and the `-select` value that starts a run from it in all of them.
 ```powershell
 bassia component tag -name app -tag v0                # tag a baseline per component (or select bare names)
 bassia component tag -name lib -tag v0
-bassia run start -select app@v0,lib@v0 -run claude -p "add a hello world script" --permission-mode acceptEdits
-bassia run retry <id>                                 # re-run a failed commit/tag/push sequence
-bassia run abandon <id>                               # discard the run's folder
+bassia agent start -select app@v0,lib@v0 -run claude -p "add a hello world script" --permission-mode acceptEdits
+bassia agent retry <id>                                 # re-run a failed commit/tag/push sequence
+bassia agent abandon <id>                               # discard the run's folder
 ```
 
 For a quick hand-check against the Debug build, `scripts/` has two helpers: `New-TestMonorepo.ps1` creates a throwaway monorepo in `%TEMP%` with the [jk09/example](https://github.com/jk09/example) component added and its HEAD tagged `tag-base`, and returns the path; `Invoke-AgentRun.ps1 -Monorepo <path> -Prompt <prompt>` runs `claude -p --permission-mode acceptEdits "<prompt>"` over it (`-Select` and `-Agent` override the defaults) and prints where each result landed.
@@ -447,14 +458,14 @@ $r = ./scripts/New-TestMonorepo.ps1
 ./scripts/Invoke-AgentRun.ps1 -Monorepo $r -Prompt 'write hello world in C# as example/HelloWorld.cs'
 ```
 
-`run start -select <component[@tag|hash]>[,...] -run <command>` runs an agent on an isolated copy of the selected monorepo state:
+`agent start -select <component[@tag|hash]>[,...] -run <command>` runs an agent on an isolated copy of the selected monorepo state:
 
 1. Every `-select` entry names a component registered in `.bassia/components.toml`, alone or with an **annotated tag** or a **commit hash** in its source-of-truth repo (`R:\<component>`). A **bare name** (`-select app,lib`) starts from the tip of the component's default branch - the branch its source-of-truth repo's `HEAD` names, usually `main` - resolved when the run starts; the run records the branch name as the selector and the tip commit as its provenance, so the record stays reproducible although the branch moves on. A source repo with a detached `HEAD` or an unborn default branch fails, asking for `<component>@<tag|hash>`. Bare and pinned entries mix (`-select app,lib@v1`). Unregistered names, `<component>@<branch>`, `HEAD` and lightweight tags are rejected. A hash is 6 to 40 lowercase hex digits (64 in a SHA-256 repo), the full hash or a prefix of it, and must name a commit (`app@3f9c2e1`). The selector has to mean exactly one thing: a prefix that several objects share fails with git's own `short object ID ... is ambiguous` error and its candidate list, and a hex name that is both a ref and a hash prefix (a tag called `c0ffee`, say) is rejected rather than resolved the way git would, in favour of the ref; spell it `app@refs/tags/c0ffee` or use a longer hash. Shorter or mixed-case hex is always read as a ref name.
 2. The selection must cover the full transitive closure of the reference graph (`references = ["lib"]` or `references = [{ name = "lib", path = "libs/lib" }]` in `components.toml`; the graph must be acyclic). Selecting `app` without the `lib` it references fails before anything is materialized — a run never pulls in a component nobody named, so every version it starts from (tag, hash or default-branch tip) is an explicit choice, and every one is pinned to a commit in the run record.
 3. The run gets a random id, `agent-run-<key>` with `<key>` an adjective, a noun and a 6-character slug of lowercase letters and digits (e.g. `agent-run-magical-otter-vt9j3p`), and the folder `.workspace/agent-run-<key>/`. The id is readable, yet random enough to be unique without any coordination, so runs from different workspaces or machines never collide on the branches and tags they push to a shared component repo. Every selected component is cloned from its source-of-truth repo and checked out there, side by side, on the run branch `agent-run/<key>`. Where one component references another, the referenced component appears inside it as a junction to that sibling checkout, at the subfolder `components.toml` records; the nested path is excluded from the referring repo's index, so each repo only ever commits its own files.
 4. The `-run` command is started by the platform shell (`cmd.exe` / `sh`) in `.workspace/agent-run-<key>/`, with `BASSIA_ROOT`, `BASSIA_RUN_ID` and `BASSIA_RUN_DIR` set.
 5. Before the agent starts and after it finishes, the run record (`run.toml`: selection, resolved commits, command, timestamps, status, per-component results) is committed to the bare repo `.agentic-runs/.git`, at the monorepo root alongside `.bassia` and `.workspace`, with plumbing commands only (no checkout, no branch) and tagged `agent-run/<key>/<lineage>`. It lives outside both the meta-repo and the workspace, so the run folder can be discarded once its results are pushed while the record survives.
-6. When the agent exits successfully, each changed component is committed on its run branch, tagged `agent-run/<key>/<counter>`, and branch + tag are pushed to its source-of-truth repo. The counter is the next unused index among the component's existing `agent-run/<key>/*` tags — all of them sit on the run branch, so the checkout's own tag list is the whole sequence; a run's first result is `/0`. Nothing is merged or checked out there. The sequence is not transactional: a failed component leaves the run `partial`; `run retry` finishes the remaining steps and `run abandon` discards the run folder without touching anything already pushed.
+6. When the agent exits successfully, each changed component is committed on its run branch, tagged `agent-run/<key>/<counter>`, and branch + tag are pushed to its source-of-truth repo. The counter is the next unused index among the component's existing `agent-run/<key>/*` tags — all of them sit on the run branch, so the checkout's own tag list is the whole sequence; a run's first result is `/0`. Nothing is merged or checked out there. The sequence is not transactional: a failed component leaves the run `partial`; `agent retry` finishes the remaining steps and `agent abandon` discards the run folder without touching anything already pushed.
 
 The result commit's message is a subject line, a blank line, and a TOML record of the run and the component, so tooling can read a component's history back to the run that produced each commit:
 
@@ -503,7 +514,7 @@ folder, but they all share one view of who holds what.
 ```powershell
 bassia config set lock.folders -value "src/*"                         # every folder directly under src is one lock
 bassia config set lock.component.docs.files -value "**/*.md"           # in docs, each Markdown file on its own
-bassia run start -select app,lib -lock-files "app:**/*.csproj" -prompt "upgrade the SDK"   # more locks for one run
+bassia agent start -select app,lib -lock-files "app:**/*.csproj" -prompt "upgrade the SDK"   # more locks for one run
 bassia lock list                                                       # who holds what, and who waits
 ```
 
@@ -512,7 +523,7 @@ bassia lock list                                                       # who hol
   file, `docs` the `docs` folder. A file is held as the nearest folder above it that a folder pattern names, else as
   itself (when a file pattern matches it, or a folder pattern covers it without naming one of its folders); other
   files are not held. Patterns are those of split plans. Both are set for every component or for one
-  (`lock.component.<c>.files|folders`), and `run start -lock-files` / `-lock-folders` add to them for one run - a
+  (`lock.component.<c>.files|folders`), and `agent start -lock-files` / `-lock-folders` add to them for one run - a
   `<component>:` prefix limits a pattern to one component. Unset, nothing is held and runs behave as before.
 - **Holds are implicit.** While a run's agent works, the bassia process executing the run looks at the run's component
   checkouts every two seconds (`git status`) and holds every changed path its filter covers; a change the agent
@@ -537,15 +548,15 @@ bassia lock list                                                       # who hol
 - **Failed and suspended runs.** A hold is live while its run's bassia process renews it at least every `lock.ttl`
   seconds and, on the same machine, that process lives. A crashed run's holds therefore stop blocking at once, a
   suspended one's (or one on another machine sharing the root) after `lock.ttl`. When a suspended run comes back,
-  whatever another run took meanwhile is that run's: the returning run loses it and records a conflict. `run stop` of a
-  run whose process is gone, `run stop` that had to kill a run, and `run abandon` remove its holds; `lock release -run
+  whatever another run took meanwhile is that run's: the returning run loses it and records a conflict. `agent stop` of a
+  run whose process is gone, `agent stop` that had to kill a run, and `agent abandon` remove its holds; `lock release -run
   <id> -all` breaks those of a run that is not live, `-force` those of one that is (a stuck agent).
 - **After a run.** When a run ends, it releases its holds. If it pushed results, its holds are remembered as
   *released* until those results land on their component's default branch: a later run that changes such a path
   without the result in its checkout records a `stale` lock conflict, and `lock wait` (or `lock check`, which reports
   it as `behind`) brings the result in at once instead of blocking.
 - **The record.** A run's `run.toml` keeps, per component, what it `held`, its `lock_conflict`s (path, kind, the other
-  run) and what it `caught_up` with; `run start`, `run show` and the run's card report them. `run diff` of a run that
+  run) and what it `caught_up` with; `agent start`, `agent show` and the run's card report them. `agent diff` of a run that
   caught up shows only its own change, from its result's first parent.
 
 Locks are advisory while the agent works - Bassia cannot stop an agent from writing a file - so a collision is
@@ -567,7 +578,7 @@ bassia integration advance <id>                                  # fast-forward 
 1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it), `manual` (left for a human) or `skip`. The **merge policy** (the `merge.*` settings, see [Configuration](#configuration)) decides between the resolver and a human: with `merge.semantic = manual`, with `merge.warnings = manual`, or for conflicts in `merge.manual_paths`, a step is `manual`; with `merge.warnings = accept` weave's merge with warnings stands. A result with a **lock conflict** (it changed a path another run held, see [Locking files and folders](#locking-files-and-folders)) goes by `lock.conflict`: to the resolver even when git or weave merge it cleanly (`resolver`, the default; its brief lists the conflicts), to a human (`manual`), or like any other result (`merge`). Results are taken oldest run first, except that a result which brought other runs' results in (`lock wait`) comes after them, and is `manual` or `semantic` when one of them is. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review, and wins over the policy; `-manual` leaves a result for a human; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
 2. **Syntactic and structural steps first.** Each component is merged in its own checkout under `.workspace/integration-<key>/<component>`, on the branch `integration/<key>` started at the base. Every syntactic step is a `git merge --no-ff` of the run's result tag, every structural one the same with weave as the merge driver, in run order. If one conflicts after all (or the structural merge warns), it moves to the back of the semantic queue.
 3. **Semantic steps next.** For each remaining step Bassia starts the merge - with weave as the merge driver when the structural merge is enabled, so only what weave could not merge is left conflicted, in entity-labelled conflicts - with `diff3` conflict markers for what git's own merge leaves, so the common ancestor is visible, and writes a **semantic brief**: the incoming run's prompt, baseline, command and commit records; which runs are already integrated and why; the history and diff of both sides since their common ancestor; the conflicted files (and, with the structural merge, which files git alone conflicted on, which of them weave merged, and weave's warnings); and instructions. The resolver command (by default `claude -p --permission-mode acceptEdits`, configurable as `[integration] resolver` in `config.toml`) runs in the component's working tree with the brief on stdin and these environment variables: `BASSIA_MERGE_BRIEF` (the brief's path), `BASSIA_COMPONENT`, `BASSIA_RUN_ID`, `BASSIA_INTEGRATION_ID` and `BASSIA_ROOT`. When it exits with code 0 and no conflict marker (nor weave's `weave explain` pointer) is left, Bassia commits the merge. A non-zero exit or leftover markers abort that step, which is recorded as `failed`; the other steps still go ahead.
-4. **Result.** Each merge commit's message is a subject and an `[integration]` TOML record (run, source tag, strategy, rationale, conflicts, structural driver and conflicts, resolver). The result is tagged `integration/<key>/<n>` - one identically named annotated tag across the components - and branch and tag are pushed to the component's source-of-truth repo. That tag is a baseline like any other: `run start -select app@integration/<key>/0,...` starts the next run from it. Nothing else moves: `integration advance <id>` fast-forwards each component's base branch to the result, and refuses if the branch moved since the integration was built on it, or if the base was a tag.
+4. **Result.** Each merge commit's message is a subject and an `[integration]` TOML record (run, source tag, strategy, rationale, conflicts, structural driver and conflicts, resolver). The result is tagged `integration/<key>/<n>` - one identically named annotated tag across the components - and branch and tag are pushed to the component's source-of-truth repo. That tag is a baseline like any other: `agent start -select app@integration/<key>/0,...` starts the next run from it. Nothing else moves: `integration advance <id>` fast-forwards each component's base branch to the result, and refuses if the branch moved since the integration was built on it, or if the base was a tag.
 
 The integration's record (`integration.toml`: runs, resolver, structural driver, and per component its base, every step's triage, structural verdict, strategy, conflicts, outcome, merge commit and brief) is committed to `.agentic-runs` next to the run records and tagged `integration/<key>/<lineage>`. Status is `completed`, `needs_attention` (everything merged except the steps the policy left for a human; their outcome is `needs_attention`), `partial` (a step or component failed; what did merge is still published), or `cancelled`. With `merge.advance = auto`, a `completed` or `needs_attention` integration advances the base branches of the components whose policy says so.
 
@@ -602,7 +613,7 @@ has the same shape and answers in TOML, there is no per-command glue:
    LLM is done (at most `-max-rounds`, default 8). The LLM's `answer` becomes the result's `message`.
 
 Read-only commands (`status`, `config list|get`, `component list|show|survey`, `tag list|show`, `graph` without
-`-out`, `log`, `run list|show|logs|wait|diff`, `lock list|check`, `integration plan|list|show|logs|wait`,
+`-out`, `log`, `agent list|show|logs|wait|diff`, `lock list|check`, `integration plan|list|show|logs|wait`,
 `skill list|show`, `help`, `version`) run at once. Any other command is confirmed first (`y`es, `n`o, `a`ll); when stdin is not a terminal it
 needs `-yes`. `-dry-run` changes nothing: it runs the read-only commands and stops with the plan at the first command
 that would change something. `prompt`, `web` and `tutorial` are never run from a prompt. The result lists every
@@ -728,6 +739,30 @@ only write issues of the repository is enough. Without a token, or when GitHub c
 kept in `feedback/pending` under `BASSIA_HOME` and `bassia feedback pending -send` sends it later. A failed report never
 changes the outcome of the command. The choice is stored in `feedback.toml` in the same folder.
 
+## Architecture
+
+Bassia has three layers; each depends only on the ones below it.
+
+1. **Storage** (`Bassia/Storage`) - the contract a component backend implements: `IComponentStore` is one
+   component's history (a DAG of commits, branches, annotated tags, file listings and nested units), with working
+   copies (`IComponentWorkspace`: check out, commit, tag, publish) for agents to edit; `IComponentStorage` creates,
+   imports, opens, forks, splits and deletes stores by component name and stages imports (`IStagingArea`);
+   `IMetaStore` keeps the component registry with history, applying `RegistryChange`s (add, remove, set references)
+   as revisions; `IRunRecordStore` keeps the versions of agentic run records. `Storage/Git` implements it on bare
+   repositories next to `.bassia`, `components.toml` and `.agentic-runs`; `Storage/Memory` is the reference
+   implementation, in memory with working copies in real folders.
+2. **Component graph** (`Bassia/Core`) - `ComponentRegistry` is the immutable, validated graph of components and
+   their references (unique valid names, references to registered components at paths inside the referrer, no
+   cycles; closure and dependency order). `MetaRepo` maintains it: every change is checked against the graph, then
+   persisted as one revision. `MonorepoGraph` is the API over both: create, import, remove, reference, tag, fork,
+   split and unwrap components, and `AgentRuns` runs agentic runs on it (selection, working copies with nested
+   references, commit/tag/publish, records, retry, abandon), with the agent process and the lock session injected.
+3. **Commands** (`Bassia/CliCommands`, `Bassia/Web`, `Bassia/Integration`) - parse, call the graph for the monorepo
+   on disk (`Monorepo.Graph()`), and format results.
+
+A replacement for git implements the storage contract; nothing in the component graph changes. Integration, locks
+catch-up, `bassia log`, `agent diff`, `component survey` and the dashboard's history views still read git directly.
+
 ## Build
 
 ```powershell
@@ -754,7 +789,10 @@ dotnet test --filter Category!=EndToEnd       # skip the tests that need network
 dotnet test --filter Category=EndToEnd --logger "console;verbosity=detailed"
 ```
 
-Most tests drive the CLI in-process against components created locally. `CliSurfaceTests` covers the grammar, the
+The tests under `Bassia.Tests/Core` exercise the component graph (registry, meta-repo, create/import/remove/
+reference/tag/fork, split, unwrap and agentic runs including failures, retry and abandon) on the in-memory storage, so
+they need neither git nor a shell and run in well under a second. Most other tests drive the CLI in-process against
+components created locally. `CliSurfaceTests` covers the grammar, the
 help of every command and the monorepo, configuration, component, graph and log commands; `RunCommandTests` the run
 and integration commands, including detached runs and stopping them, which start the built `bassia` apphost as a real
 background process. `ComponentSplitTests` splits a component with a branchy history (moves into and between
@@ -776,14 +814,14 @@ Bassia and not about a model's output.
 `ThreeComponentEndToEndTests` (`Category=EndToEnd`) follows the work all the way to `main` and checks it with
 Bassia's own commands. Its monorepo holds three components cloned from jk09/example: the libraries `sortlib` and
 `greetlib`, and `apps`, which nests both. Two waves of agentic sessions run in parallel - wave 1 detached
-(`run start -detach`, `run wait`), wave 2 in the foreground - implementing an insertion sort library, a greeting
+(`agent start -detach`, `agent wait`), wave 2 in the foreground - implementing an insertion sort library, a greeting
 library together with a program in `apps` that uses it, a hello world program, a terminal program sorting its
 arguments with `sortlib`, and a descending sort. Each session's agent is a deterministic stand-in that applies a
 patch computed against its baseline. Two sessions edit the same lines of `apps/README.md`, so each wave's
 `integration start` has git merge what it can and a deterministic resolver (a git union merge) the conflict, then
 `integration advance` moves every `main`. `log -run` must report every result off `main` before the advance and
 landed through the integration after it, in exactly the components the session edited; `log -component apps
--branch main` must attribute the mainline to all five sessions; `component show`, `run list` and `integration list`
+-branch main` must attribute the mainline to all five sessions; `component show`, `agent list` and `integration list`
 must agree. A last session selects the three `main` states and builds and runs the C programs (skipped without a C
 compiler on `PATH`).
 

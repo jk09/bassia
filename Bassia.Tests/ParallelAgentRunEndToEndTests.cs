@@ -1,5 +1,6 @@
 using System.Globalization;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Tomlyn;
 using Tomlyn.Model;
 using Xunit.Abstractions;
@@ -112,7 +113,7 @@ public sealed class ParallelAgentRunEndToEndTests(ITestOutputHelper output)
 		// ----- 4. one agentic run per component, started at the same time, each pinned to its baseline tag -----
 
 		var started = plans
-			.Select(plan => BassiaAsync(root, "run", "start", "-select", $"{plan.Name}@{plan.BaseTag}", "-run", plan.AgentCommand))
+			.Select(plan => BassiaAsync(root, "agent", "start", "-select", $"{plan.Name}@{plan.BaseTag}", "-run", plan.AgentCommand))
 			.ToArray();
 		var results = await Task.WhenAll(started);
 

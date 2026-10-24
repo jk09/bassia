@@ -38,7 +38,7 @@ public class ProgramCliTests
 	[Theory]
 	[InlineData("commit", "'bassia commit' was removed")]
 	[InlineData("branch", "'bassia component show -name <component>'")]
-	[InlineData("agent", "'bassia run start -select <component@tag,...> -run <command>'")]
+	[InlineData("run", "'bassia run' was replaced by 'bassia agent'")]
 	[InlineData("add-component", "'bassia component add -url <url> [-name <name>]'")]
 	[InlineData("integrate", "'bassia integration plan|start|advance'")]
 	[InlineData("ui", "'bassia web'")]

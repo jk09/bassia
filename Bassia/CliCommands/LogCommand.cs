@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Web;
 

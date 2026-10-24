@@ -67,46 +67,46 @@ public class CliSurfaceTests
 	}
 
 	[Theory]
-	[InlineData("run", "-help")]
-	[InlineData("run", "--help")]
-	[InlineData("run")]
+	[InlineData("agent", "-help")]
+	[InlineData("agent", "--help")]
+	[InlineData("agent")]
 	public async Task Group_WithoutSubcommand_ShowsItsSubcommands(params string[] args)
 	{
 		var (exitCode, output, _) = await TestEnvironment.RunAsync(args);
 
 		Assert.Equal(0, exitCode);
 		var names = Tables(Result(output), "entry").Select(entry => (string)entry["name"]).ToList();
-		Assert.Contains("run start", names);
-		Assert.Contains("run stop", names);
+		Assert.Contains("agent start", names);
+		Assert.Contains("agent stop", names);
 	}
 
 	[Fact]
 	public async Task HelpSwitch_OnACommand_ShowsThatCommandsHelp()
 	{
-		var (exitCode, output, _) = await TestEnvironment.RunAsync("run", "start", "-help");
+		var (exitCode, output, _) = await TestEnvironment.RunAsync("agent", "start", "-help");
 
 		Assert.Equal(0, exitCode);
-		Assert.Equal("run start", Result(output)["topic"]);
+		Assert.Equal("agent start", Result(output)["topic"]);
 	}
 
 	[Fact]
 	public async Task UnknownSwitch_IsAUsageErrorNamingItAndTheHelpCommand()
 	{
-		var (exitCode, output, error) = await TestEnvironment.RunAsync("run", "list", "-colour", "red");
+		var (exitCode, output, error) = await TestEnvironment.RunAsync("agent", "list", "-colour", "red");
 
 		Assert.Equal(2, exitCode);
 		Assert.Empty(output);
 		var result = Result(error);
 		Assert.False((bool)result["ok"]);
-		Assert.Equal("run list", result["command"]);
+		Assert.Equal("agent list", result["command"]);
 		Assert.Contains("Unknown switch '-colour'", (string)result["error"]);
-		Assert.Contains("bassia help run list", (string)result["error"]);
+		Assert.Contains("bassia help agent list", (string)result["error"]);
 	}
 
 	[Fact]
 	public async Task UnknownSubcommand_IsAUsageErrorListingTheSubcommands()
 	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("run", "frobnicate");
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("agent", "frobnicate");
 
 		Assert.Equal(2, exitCode);
 		Assert.Contains("has no subcommand 'frobnicate'", error);
@@ -116,7 +116,7 @@ public class CliSurfaceTests
 	[Fact]
 	public async Task SwitchWithoutValue_IsAUsageError()
 	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("run", "list", "-limit");
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("agent", "list", "-limit");
 
 		Assert.Equal(2, exitCode);
 		Assert.Contains("-limit requires a value", error);

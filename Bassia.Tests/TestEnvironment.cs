@@ -122,7 +122,7 @@ internal static class TestEnvironment
 		return (await output).Trim();
 	}
 
-	/// <summary>Shell command (for <c>bassia run start -run</c>) that writes <paramref name="content"/> to a file relative to the run folder.</summary>
+	/// <summary>Shell command (for <c>bassia agent start -run</c>) that writes <paramref name="content"/> to a file relative to the run folder.</summary>
 	public static string WriteFileCommand(string relativePath, string content) =>
 		OperatingSystem.IsWindows()
 			? $"echo {content}> {relativePath.Replace('/', '\\')}"
@@ -229,7 +229,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 		TestEnvironment.RunInDirectoryAsync(Root, args);
 
 	public Task<(int ExitCode, string Output, string Error)> RunStartAsync(params string[] args) =>
-		TestEnvironment.RunInDirectoryAsync(Root, ["run", "start", .. args]);
+		TestEnvironment.RunInDirectoryAsync(Root, ["agent", "start", .. args]);
 
 	public Task<(int ExitCode, string Output, string Error)> IntegrationStartAsync(params string[] args) =>
 		TestEnvironment.RunInDirectoryAsync(Root, ["integration", "start", .. args]);

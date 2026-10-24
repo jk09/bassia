@@ -1,11 +1,12 @@
 using System.Diagnostics;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Tomlyn.Model;
 
 namespace Bassia.Tests;
 
 /// <summary>
-/// <c>bassia run ...</c> and <c>bassia integration ...</c>: composing, finding, listing, reviewing and stopping runs.
+/// <c>bassia agent ...</c> and <c>bassia integration ...</c>: composing, finding, listing, reviewing and stopping runs.
 /// The detached cases start the built bassia apphost as a real background process.
 /// </summary>
 public class RunCommandTests
@@ -55,21 +56,21 @@ public class RunCommandTests
 		var runId = await monorepo.RunWritingAsync("example", "a.txt", "hello");
 		var shortId = RunMetadata.Key(runId);
 
-		var (listExit, listOutput, _) = await monorepo.BassiaAsync("run", "list");
+		var (listExit, listOutput, _) = await monorepo.BassiaAsync("agent", "list");
 		Assert.Equal(0, listExit);
 		var run = Assert.Single(Tables(Result(listOutput), "run"));
 		Assert.Equal(runId, run["run_id"]);
 		Assert.Equal("completed", run["status"]);
 		Assert.Contains(shortId, (string)Result(listOutput)["table"]);
 
-		var (showExit, showOutput, _) = await monorepo.BassiaAsync("run", "show", shortId);
+		var (showExit, showOutput, _) = await monorepo.BassiaAsync("agent", "show", shortId);
 		Assert.Equal(0, showExit);
 		var show = Result(showOutput);
 		Assert.Equal(runId, show["run_id"]);
 		Assert.False((bool)show["live"]);
 		Assert.Contains("COMPLETED", (string)show["card"]);
 
-		var (diffExit, diffOutput, diffError) = await monorepo.BassiaAsync("run", "diff", "-id", shortId, "-patch");
+		var (diffExit, diffOutput, diffError) = await monorepo.BassiaAsync("agent", "diff", "-id", shortId, "-patch");
 		Assert.True(diffExit == 0, diffError);
 		var component = Assert.Single(Tables(Result(diffOutput), "component"));
 		Assert.Equal(1L, component["files_changed"]);
@@ -86,8 +87,8 @@ public class RunCommandTests
 		await monorepo.RunWritingAsync("example", "a.txt", "a");
 		await monorepo.RunStartAsync("-select", "other@v0", "-run", TestEnvironment.FailingCommand);
 
-		var (_, failed, _) = await monorepo.BassiaAsync("run", "list", "-status", "failed");
-		var (_, example, _) = await monorepo.BassiaAsync("run", "list", "-component", "example");
+		var (_, failed, _) = await monorepo.BassiaAsync("agent", "list", "-status", "failed");
+		var (_, example, _) = await monorepo.BassiaAsync("agent", "list", "-component", "example");
 
 		Assert.Equal("failed", Assert.Single(Tables(Result(failed), "run"))["status"]);
 		Assert.Equal("completed", Assert.Single(Tables(Result(example), "run"))["status"]);
@@ -100,7 +101,7 @@ public class RunCommandTests
 		await monorepo.AddComponentAsync("example");
 		await monorepo.RunWritingAsync("example", "a.txt", "a");
 
-		var (exitCode, _, error) = await monorepo.BassiaAsync("run", "show", "0000ffff");
+		var (exitCode, _, error) = await monorepo.BassiaAsync("agent", "show", "0000ffff");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("Unknown agentic run '0000ffff'", error);
@@ -113,7 +114,7 @@ public class RunCommandTests
 		await monorepo.AddComponentAsync("example");
 		var runId = await monorepo.RunWritingAsync("example", "a.txt", "a");
 
-		var (exitCode, _, error) = await monorepo.BassiaAsync("run", "logs", runId);
+		var (exitCode, _, error) = await monorepo.BassiaAsync("agent", "logs", runId);
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("was not started with -detach", error);
@@ -126,7 +127,7 @@ public class RunCommandTests
 		await monorepo.AddComponentAsync("example");
 		var runId = await monorepo.RunWritingAsync("example", "a.txt", "a");
 
-		var (finishedExit, _, finishedError) = await monorepo.BassiaAsync("run", "stop", runId);
+		var (finishedExit, _, finishedError) = await monorepo.BassiaAsync("agent", "stop", runId);
 		Assert.Equal(1, finishedExit);
 		Assert.Contains("is not live", finishedError);
 
@@ -135,10 +136,10 @@ public class RunCommandTests
 		var record = (await store.LoadLatestAsync(runId))!;
 		record.Status = "started";
 		await store.CommitAsync(record);
-		var (_, showOutput, _) = await monorepo.BassiaAsync("run", "show", runId);
+		var (_, showOutput, _) = await monorepo.BassiaAsync("agent", "show", runId);
 		Assert.True((bool)Result(showOutput)["stale"]);
 
-		var (exitCode, output, error) = await monorepo.BassiaAsync("run", "stop", runId);
+		var (exitCode, output, error) = await monorepo.BassiaAsync("agent", "stop", runId);
 
 		Assert.True(exitCode == 0, error);
 		Assert.Equal("cancelled", Result(output)["status"]);
@@ -153,11 +154,11 @@ public class RunCommandTests
 		var runId = await monorepo.RunWritingAsync("example", "a.txt", "a");
 
 		// Retrying a completed run finds nothing left to do.
-		var (retryExit, retryOutput, retryError) = await monorepo.BassiaAsync("run", "retry", runId);
+		var (retryExit, retryOutput, retryError) = await monorepo.BassiaAsync("agent", "retry", runId);
 		Assert.True(retryExit == 0, retryError);
 		Assert.Equal("completed", Result(retryOutput)["status"]);
 
-		var (exitCode, output, error) = await monorepo.BassiaAsync("run", "abandon", "-id", RunMetadata.Key(runId));
+		var (exitCode, output, error) = await monorepo.BassiaAsync("agent", "abandon", "-id", RunMetadata.Key(runId));
 
 		Assert.True(exitCode == 0, error);
 		Assert.Equal("abandoned", Result(output)["status"]);
@@ -181,11 +182,11 @@ public class RunCommandTests
 		Assert.True((bool)started["detached"]);
 		var runId = (string)started["run_id"];
 
-		var (waitExit, waitOutput, waitError) = await monorepo.BassiaAsync("run", "wait", runId, "-timeout", "120");
+		var (waitExit, waitOutput, waitError) = await monorepo.BassiaAsync("agent", "wait", runId, "-timeout", "120");
 		Assert.True(waitExit == 0, waitError + waitOutput);
 		Assert.Equal("completed", Result(waitOutput)["status"]);
 
-		var (logsExit, logsOutput, _) = await monorepo.BassiaAsync("run", "logs", runId, "-tail", "0");
+		var (logsExit, logsOutput, _) = await monorepo.BassiaAsync("agent", "logs", runId, "-tail", "0");
 		Assert.Equal(0, logsExit);
 		var log = (string)Result(logsOutput)["output"];
 		Assert.Contains("agent-finished", log);
@@ -207,11 +208,11 @@ public class RunCommandTests
 		var runId = (string)Result(output)["run_id"];
 		await WaitForLiveRunAsync(monorepo);
 
-		var (stopExit, stopOutput, stopError) = await monorepo.BassiaAsync("run", "stop", runId);
+		var (stopExit, stopOutput, stopError) = await monorepo.BassiaAsync("agent", "stop", runId);
 
 		Assert.True(stopExit == 0, stopError);
 		Assert.Equal("cancelled", Result(stopOutput)["status"]);
-		var (_, showOutput, _) = await monorepo.BassiaAsync("run", "show", runId);
+		var (_, showOutput, _) = await monorepo.BassiaAsync("agent", "show", runId);
 		Assert.False((bool)Result(showOutput)["live"]);
 		Assert.True(Directory.Exists(monorepo.RunDir(runId)), "a stopped run keeps its folder");
 	}
@@ -251,7 +252,7 @@ public class RunCommandTests
 		var clock = Stopwatch.StartNew();
 		while (clock.Elapsed < TimeSpan.FromSeconds(60))
 		{
-			var (_, output, _) = await monorepo.BassiaAsync("run", "list", "-status", "live");
+			var (_, output, _) = await monorepo.BassiaAsync("agent", "list", "-status", "live");
 			if (Tables(Result(output), "run").FirstOrDefault(run => (string)run["status"] == "started") is { } run)
 			{
 				return (string)run["run_id"];

@@ -1,4 +1,4 @@
-namespace Bassia.CliCommands.Agent;
+namespace Bassia.Core;
 
 using Tomlyn;
 using Tomlyn.Model;

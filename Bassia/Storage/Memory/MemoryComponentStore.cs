@@ -1,0 +1,378 @@
+namespace Bassia.Storage.Memory;
+
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+
+/// <summary>A file of an in-memory commit.</summary>
+internal sealed record MemoryFile(string Mode, byte[] Content)
+{
+	public string Object { get; } = Convert.ToHexStringLower(SHA1.HashData(Content));
+
+	public static MemoryFile Text(string text) => new("100644", Encoding.UTF8.GetBytes(text));
+}
+
+/// <summary>An in-memory commit: its DAG node, its complete content and the units nested in it.</summary>
+internal sealed record MemoryCommit(
+	StoredCommit Node,
+	IReadOnlyDictionary<string, MemoryFile> Files,
+	IReadOnlyDictionary<string, NestedUnit> Nested);
+
+/// <summary>
+/// The reference implementation of <see cref="IComponentStore"/>: a component history kept in memory. It implements the
+/// contract as literally as possible and is what the component graph's unit tests run on; a new backend can be checked
+/// against it.
+/// </summary>
+internal sealed class MemoryComponentStore(string name, string location) : IComponentStore
+{
+	private static long sequence;
+
+	private readonly object gate = new();
+	private readonly Dictionary<string, MemoryCommit> commits = new(StringComparer.Ordinal);
+	private readonly SortedDictionary<string, string> branches = new(StringComparer.Ordinal);
+	private readonly SortedDictionary<string, (StoredTag Tag, string Message)> tags = new(StringComparer.Ordinal);
+
+	public string Name { get; } = name;
+
+	public string Location { get; set; } = location;
+
+	/// <summary>The default branch (git's <c>HEAD</c>); null for a detached head.</summary>
+	public string? DefaultBranch { get; set; } = "main";
+
+	public string? Upstream { get; set; }
+
+	// ----- seeding (tests, imports) -----
+
+	/// <summary>
+	/// Commits on <paramref name="branch"/> (creating it, or a root commit when it has no tip): the branch tip's content with
+	/// <paramref name="changes"/> applied (null content deletes a file) and the units nested in <paramref name="nested"/>
+	/// added or (with a null commit) removed. Returns the new commit's id.
+	/// </summary>
+	public string Commit(string branch, string message, IReadOnlyDictionary<string, string?>? changes = null, IReadOnlyList<NestedUnit>? nested = null)
+	{
+		lock (gate)
+		{
+			var tip = branches.GetValueOrDefault(branch);
+			var files = tip is null ? new SortedDictionary<string, MemoryFile>(StringComparer.Ordinal) : new SortedDictionary<string, MemoryFile>(commits[tip].Files.ToDictionary(), StringComparer.Ordinal);
+			var units = tip is null ? new SortedDictionary<string, NestedUnit>(StringComparer.Ordinal) : new SortedDictionary<string, NestedUnit>(commits[tip].Nested.ToDictionary(), StringComparer.Ordinal);
+			foreach (var (path, content) in changes ?? new Dictionary<string, string?>())
+			{
+				if (content is null)
+				{
+					files.Remove(path);
+				}
+				else
+				{
+					files[path] = MemoryFile.Text(content);
+				}
+			}
+
+			foreach (var unit in nested ?? [])
+			{
+				units[unit.Path] = unit;
+			}
+
+			var id = Add(tip is null ? [] : [tip], message, files, units);
+			branches[branch] = id;
+			return id;
+		}
+	}
+
+	/// <summary>Adds a commit with exactly this content and these parents (which must exist); returns its id.</summary>
+	public string Add(IReadOnlyList<string> parents, string message, IReadOnlyDictionary<string, MemoryFile> files, IReadOnlyDictionary<string, NestedUnit>? nested = null)
+	{
+		lock (gate)
+		{
+			foreach (var parent in parents.Where(parent => !commits.ContainsKey(parent)))
+			{
+				throw new StorageException($"Commit {parent} is not in component '{Name}'.");
+			}
+
+			var number = Interlocked.Increment(ref sequence);
+			var id = Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(
+				$"{number}\n{string.Join(' ', parents)}\n{message}\n{string.Join('\n', files.Select(file => $"{file.Key} {file.Value.Object}"))}")));
+			commits[id] = new MemoryCommit(new StoredCommit(id, parents.ToList(), message),
+				new SortedDictionary<string, MemoryFile>(files.ToDictionary(), StringComparer.Ordinal),
+				new SortedDictionary<string, NestedUnit>((nested ?? new Dictionary<string, NestedUnit>()).ToDictionary(), StringComparer.Ordinal));
+			return id;
+		}
+	}
+
+	/// <summary>Takes over a commit of another store (its ancestors must be here already).</summary>
+	internal void Adopt(MemoryCommit commit)
+	{
+		lock (gate)
+		{
+			commits.TryAdd(commit.Node.Id, commit);
+		}
+	}
+
+	internal MemoryCommit? Find(string id)
+	{
+		lock (gate)
+		{
+			return commits.GetValueOrDefault(id);
+		}
+	}
+
+	internal MemoryCommit Get(string id) => Find(id) ?? throw new StorageException($"Commit {id} is not in component '{Name}'.");
+
+	/// <summary><paramref name="tip"/> and its ancestors, every commit before its parents.</summary>
+	internal IReadOnlyList<MemoryCommit> Ancestry(string tip)
+	{
+		lock (gate)
+		{
+			var ordered = new List<MemoryCommit>();
+			var seen = new HashSet<string>(StringComparer.Ordinal);
+			void Visit(string id)
+			{
+				if (!seen.Add(id))
+				{
+					return;
+				}
+
+				var commit = Get(id);
+				foreach (var parent in commit.Node.Parents)
+				{
+					Visit(parent);
+				}
+
+				ordered.Add(commit);
+			}
+
+			Visit(tip);
+			ordered.Reverse();
+			return ordered;
+		}
+	}
+
+	/// <summary>An independent copy of this store (every commit, branch and tag) for another component name.</summary>
+	internal MemoryComponentStore Copy(string newName, string newLocation)
+	{
+		lock (gate)
+		{
+			var copy = new MemoryComponentStore(newName, newLocation) { DefaultBranch = DefaultBranch, Upstream = Upstream };
+			foreach (var commit in commits.Values)
+			{
+				copy.commits[commit.Node.Id] = commit;
+			}
+
+			foreach (var (branch, commit) in branches)
+			{
+				copy.branches[branch] = commit;
+			}
+
+			foreach (var (tag, entry) in tags)
+			{
+				copy.tags[tag] = entry;
+			}
+
+			return copy;
+		}
+	}
+
+	internal void SetTag(StoredTag tag, string message)
+	{
+		lock (gate)
+		{
+			tags[tag.Name] = (tag, message);
+		}
+	}
+
+	internal string? TagMessage(string tag)
+	{
+		lock (gate)
+		{
+			return tags.TryGetValue(tag, out var entry) ? entry.Message : null;
+		}
+	}
+
+	internal static string Now() => DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:sszzz", CultureInfo.InvariantCulture);
+
+	// ----- IComponentStore -----
+
+	public Task<string?> DefaultBranchAsync() => Task.FromResult(DefaultBranch);
+
+	public Task<IReadOnlyList<StoredBranch>> ListBranchesAsync()
+	{
+		lock (gate)
+		{
+			return Task.FromResult<IReadOnlyList<StoredBranch>>(branches.Select(branch => new StoredBranch(branch.Key, branch.Value, commits[branch.Value].Node.Subject)).ToList());
+		}
+	}
+
+	public Task<string?> BranchTipAsync(string branch)
+	{
+		lock (gate)
+		{
+			return Task.FromResult(branches.GetValueOrDefault(branch));
+		}
+	}
+
+	public Task SetBranchAsync(string branch, string commit, string? expected = null)
+	{
+		lock (gate)
+		{
+			Get(commit);
+			if (expected is not null && branches.GetValueOrDefault(branch) != expected)
+			{
+				throw new StorageException($"Branch '{branch}' of component '{Name}' moved: it no longer points at {expected}.");
+			}
+
+			branches[branch] = commit;
+			return Task.CompletedTask;
+		}
+	}
+
+	public Task<IReadOnlyList<StoredTag>> ListTagsAsync(string? prefix = null)
+	{
+		lock (gate)
+		{
+			return Task.FromResult<IReadOnlyList<StoredTag>>(tags.Values.Select(entry => entry.Tag)
+				.Where(tag => prefix is null || tag.Name.StartsWith(prefix, StringComparison.Ordinal)).ToList());
+		}
+	}
+
+	public Task<StoredTag?> GetTagAsync(string name)
+	{
+		lock (gate)
+		{
+			return Task.FromResult(tags.TryGetValue(name, out var entry) ? entry.Tag : null);
+		}
+	}
+
+	public Task CreateTagAsync(string name, string commit, string message)
+	{
+		lock (gate)
+		{
+			Get(commit);
+			if (tags.ContainsKey(name))
+			{
+				throw new StorageException($"Tag '{name}' already exists in component '{Name}'.");
+			}
+
+			tags[name] = (new StoredTag(name, commit, true, message.Split('\n')[0].Trim(), Now()), message);
+			return Task.CompletedTask;
+		}
+	}
+
+	public Task DeleteTagAsync(string name)
+	{
+		lock (gate)
+		{
+			tags.Remove(name);
+			return Task.CompletedTask;
+		}
+	}
+
+	public Task<StoredCommit?> GetCommitAsync(string id) => Task.FromResult(Find(id)?.Node);
+
+	public Task<IReadOnlyList<StoredObject>> FindObjectsAsync(string prefix)
+	{
+		lock (gate)
+		{
+			return Task.FromResult<IReadOnlyList<StoredObject>>(commits.Keys.Where(id => id.StartsWith(prefix, StringComparison.Ordinal))
+				.Order(StringComparer.Ordinal).Select(id => new StoredObject(id, "commit")).ToList());
+		}
+	}
+
+	public Task<ResolvedRef?> ResolveRefAsync(string name)
+	{
+		lock (gate)
+		{
+			// As git: HEAD is the default branch, a full ref name is taken as it is, else a tag wins over a branch of the same name.
+			if (name == "HEAD")
+			{
+				name = DefaultBranch is null ? name : $"refs/heads/{DefaultBranch}";
+			}
+
+			var tag = name.StartsWith("refs/tags/", StringComparison.Ordinal) ? name["refs/tags/".Length..] : name.StartsWith("refs/", StringComparison.Ordinal) ? null : name;
+			if (tag is not null && tags.TryGetValue(tag, out var entry))
+			{
+				return Task.FromResult<ResolvedRef?>(new ResolvedRef($"refs/tags/{tag}", entry.Tag.Annotated ? RefKind.AnnotatedTag : RefKind.LightweightTag, entry.Tag.Commit));
+			}
+
+			var branch = name.StartsWith("refs/heads/", StringComparison.Ordinal) ? name["refs/heads/".Length..] : name.StartsWith("refs/", StringComparison.Ordinal) ? null : name;
+			return Task.FromResult(branch is not null && branches.TryGetValue(branch, out var commit)
+				? new ResolvedRef($"refs/heads/{branch}", RefKind.Branch, commit)
+				: null);
+		}
+	}
+
+	public Task<bool> IsAncestorAsync(string ancestor, string descendant) =>
+		Task.FromResult(Find(descendant) is not null && Ancestry(descendant).Any(commit => commit.Node.Id == ancestor));
+
+	public Task<IReadOnlyList<StoredCommit>> HistoryAsync(string tip) =>
+		Task.FromResult<IReadOnlyList<StoredCommit>>(Ancestry(tip).Select(commit => commit.Node).ToList());
+
+	public Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit) =>
+		Task.FromResult<IReadOnlyList<StoredFile>>(Get(commit).Files.Select(file => new StoredFile(file.Key, file.Value.Mode, file.Value.Object, file.Value.Content.LongLength)).ToList());
+
+	public Task<IReadOnlyList<NestedUnit>> ListNestedAsync(string commit) =>
+		Task.FromResult<IReadOnlyList<NestedUnit>>(Get(commit).Nested.Values.ToList());
+
+	public Task<string> CommitWithoutNestedAsync(string commit, IReadOnlyList<string> paths, string message)
+	{
+		var source = Get(commit);
+		var nested = source.Nested.Where(unit => !paths.Contains(unit.Key)).ToDictionary();
+		return Task.FromResult(Add([commit], message, source.Files, nested));
+	}
+
+	/// <summary>The upstreams <see cref="EnsureCommitAsync"/> fetches from; set by the storage that made the store.</summary>
+	internal MemoryUpstreams? Upstreams { get; set; }
+
+	public Task<bool> EnsureCommitAsync(string commit, string url)
+	{
+		if (Find(commit) is not null)
+		{
+			return Task.FromResult(true);
+		}
+
+		if (Upstreams?.Find(url) is not { } remote || remote.Find(commit) is null)
+		{
+			return Task.FromResult(false);
+		}
+
+		foreach (var ancestor in remote.Ancestry(commit).Reverse())
+		{
+			Adopt(ancestor);
+		}
+
+		return Task.FromResult(true);
+	}
+
+	public Task<string?> UpstreamAsync() => Task.FromResult(Upstream);
+
+	/// <summary>The storage holding this store, which remembers its working copies; null for an upstream.</summary>
+	internal MemoryComponentStorage? Storage { get; set; }
+
+	public Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch)
+	{
+		var workspace = MemoryWorkspace.Create(this, commit, directory, branch);
+		Storage?.Track(workspace);
+		return Task.FromResult<IComponentWorkspace>(workspace);
+	}
+}
+
+/// <summary>Repositories outside the monorepo, by URL: what a memory storage imports from and fetches pinned commits from.</summary>
+internal sealed class MemoryUpstreams
+{
+	private readonly Dictionary<string, MemoryComponentStore> byUrl = new(StringComparer.Ordinal);
+
+	/// <summary>An upstream repository at <paramref name="url"/>, created empty on first use; seed it with <see cref="MemoryComponentStore.Commit"/>.</summary>
+	public MemoryComponentStore At(string url)
+	{
+		lock (byUrl)
+		{
+			return byUrl.TryGetValue(url, out var store) ? store : byUrl[url] = new MemoryComponentStore(url, url);
+		}
+	}
+
+	public MemoryComponentStore? Find(string url)
+	{
+		lock (byUrl)
+		{
+			return byUrl.GetValueOrDefault(url);
+		}
+	}
+}

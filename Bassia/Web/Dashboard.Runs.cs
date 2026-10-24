@@ -18,7 +18,7 @@ internal sealed partial class Dashboard
 			<div data-live-src="/fragment/live">{LiveCards(state.Live)}</div>
 			<div class="split"><section class="wide"><h2>Runs over time</h2>{Charts.RunTimeline(Bars(state, 40), DateTimeOffset.UtcNow)}</section>
 			<section><h2>By status</h2>{Charts.Donut(StatusSegments(state.Runs), "agentic runs")}</section></div>
-			<p>{Cmd("bassia run start -select <component[@tag],...> -detach -prompt \"...\"")} {Cmd("bassia run list -status live")}</p>
+			<p>{Cmd("bassia agent start -select <component[@tag],...> -detach -prompt \"...\"")} {Cmd("bassia agent list -status live")}</p>
 			<h2>Recorded runs</h2>
 			{RunsTable(state.Runs)}
 			""";
@@ -150,10 +150,10 @@ internal sealed partial class Dashboard
 				<tr><td>Record tag</td><td><code>{E(RunMetadata.TagName(metadata.RunId, metadata.Lineage))}</code></td></tr>
 				</table></section><section>
 				<h3>Commands</h3>
-				<p>{Cmd($"bassia run show {key}")}</p><p>{Cmd($"bassia run diff {key} -patch")}</p><p>{Cmd($"bassia log -run {key}")}</p>
-				{(live is not null ? $"<p>{Cmd($"bassia run stop {key}")}</p>" : "")}
+				<p>{Cmd($"bassia agent show {key}")}</p><p>{Cmd($"bassia agent diff {key} -patch")}</p><p>{Cmd($"bassia log -run {key}")}</p>
+				{(live is not null ? $"<p>{Cmd($"bassia agent stop {key}")}</p>" : "")}
 				{(IntegrationPlanner.HasResults(metadata) ? $"<p>{Cmd($"bassia integration plan -runs {key}")}</p><p><a href=\"/integrations/plan?run={Url(metadata.RunId)}\">Preview the triage of integrating this run</a></p>" : "")}
-				{(metadata.Status == "partial" ? $"<p>{Cmd($"bassia run retry {key}")}</p>" : "")}
+				{(metadata.Status == "partial" ? $"<p>{Cmd($"bassia agent retry {key}")}</p>" : "")}
 				</section></div>
 				<table class="list"><tr><th>Component</th><th>Base</th><th>Base commit</th><th>Result</th><th>Result commit</th><th>Result tag</th><th>Merge queue</th></tr>
 				""");

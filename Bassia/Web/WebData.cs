@@ -6,7 +6,7 @@ using Bassia.Integration;
 using Bassia.Locks;
 
 /// <summary>
-/// A run some <c>bassia</c> process is executing right now (<c>bassia run start</c>, detached or in a terminal), as the
+/// A run some <c>bassia</c> process is executing right now (<c>bassia agent start</c>, detached or in a terminal), as the
 /// job registry and the run store show it: its phase, how long it has been going, the latest line of its output, and
 /// what it holds and waits for in the lock table.
 /// </summary>

@@ -1,4 +1,4 @@
-namespace Bassia.CliCommands.Agent;
+namespace Bassia.Core;
 
 /// <summary>
 /// One <c>component@commit-ish</c> pair from <c>-select</c>, or a bare <c>component</c> (a null

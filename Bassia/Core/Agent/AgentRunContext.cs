@@ -1,4 +1,4 @@
-namespace Bassia.CliCommands.Agent;
+namespace Bassia.Core;
 
 /// <summary>
 /// Where a run stands. The first four are the phases a run passes through while it executes; the rest mirror the
@@ -50,7 +50,7 @@ internal sealed class AgentRunContext
 
 	/// <summary>
 	/// Receives the agent process's stdout and stderr line by line. Setting it redirects both pipes; without it
-	/// the agent inherits the console, which is what lets <c>bassia run start</c> stream an agent's output to a caller.
+	/// the agent inherits the console, which is what lets <c>bassia agent start</c> stream an agent's output to a caller.
 	/// </summary>
 	public Action<string>? OnOutput { get; init; }
 

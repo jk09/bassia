@@ -1,7 +1,8 @@
 namespace Bassia.Unwind;
 
 using System.Text;
-using Bassia.Git;
+using Bassia.Core;
+using Bassia.Storage;
 
 /// <summary>A component taking part in an unwind: the one unwound, a submodule's component added for it, or one reused.</summary>
 internal sealed class UnwindComponent
@@ -9,8 +10,10 @@ internal sealed class UnwindComponent
 	public required string Name { get; init; }
 	public required string Url { get; init; }
 
-	/// <summary>Where the repository is while the unwind is planned: its source repo, or a staging clone for a new component.</summary>
-	public required string RepoDir { get; set; }
+	/// <summary>Its store while the unwind is planned: the component's own, or a staged import for a new component.</summary>
+	public required IComponentStore Store { get; set; }
+
+	public string RepoDir => Store.Location;
 
 	/// <summary>Whether components.toml does not register it yet: a component this unwind adds.</summary>
 	public required bool IsNew { get; init; }
@@ -23,8 +26,6 @@ internal sealed class UnwindComponent
 
 	public string? MainBranch { get; set; }
 	public UnwindContext? Main { get; set; }
-
-	public GitClient Git => GitClient.In(RepoDir);
 }
 
 /// <summary>
@@ -63,19 +64,19 @@ internal sealed class SubmoduleUnwinder : IDisposable
 {
 	public const string TagPrefix = "unwind/";
 
-	private readonly Monorepo monorepo;
-	private readonly string stagingDir;
+	private readonly MonorepoGraph graph;
+	private readonly IStagingArea staging;
 	private readonly List<UnwindComponent> components = [];
 	private readonly Dictionary<string, UnwindComponent> byIdentity = new(StringComparer.Ordinal);
 	private readonly Dictionary<(string Component, string Commit), UnwindContext> contexts = [];
 	private readonly List<UnwindTag> tags = [];
 	private readonly Dictionary<string, Lazy<UnwindComponent>> registered = new(StringComparer.Ordinal);
 
-	private SubmoduleUnwinder(Monorepo monorepo, UnwindComponent root)
+	private SubmoduleUnwinder(MonorepoGraph graph, UnwindComponent root)
 	{
-		this.monorepo = monorepo;
+		this.graph = graph;
 		Root = root;
-		stagingDir = Path.Combine(monorepo.Root, $".unwind-staging-{Guid.NewGuid():N}"[..23]);
+		staging = graph.Storage.BeginStaging();
 	}
 
 	public UnwindComponent Root { get; }
@@ -92,12 +93,12 @@ internal sealed class SubmoduleUnwinder : IDisposable
 	public IReadOnlyList<UnwindTag> Tags => tags;
 
 	/// <summary>
-	/// Plans unwinding <paramref name="root"/> in <paramref name="monorepo"/>: a registered component, or one being
-	/// added (<see cref="UnwindComponent.IsNew"/>, already cloned to its source repo folder).
+	/// Plans unwinding <paramref name="root"/> in <paramref name="graph"/>: a registered component, or one being
+	/// added (<see cref="UnwindComponent.IsNew"/>, already imported into its store).
 	/// </summary>
-	public static async Task<SubmoduleUnwinder> PlanAsync(Monorepo monorepo, UnwindComponent root)
+	public static async Task<SubmoduleUnwinder> PlanAsync(MonorepoGraph graph, UnwindComponent root)
 	{
-		var unwinder = new SubmoduleUnwinder(monorepo, root);
+		var unwinder = new SubmoduleUnwinder(graph, root);
 		try
 		{
 			await unwinder.PlanAsync();
@@ -113,23 +114,23 @@ internal sealed class SubmoduleUnwinder : IDisposable
 	private async Task PlanAsync()
 	{
 		components.Add(Root);
-		foreach (var identity in await IdentitiesAsync(Root.RepoDir, Root.Url))
+		foreach (var identity in await IdentitiesAsync(Root.Store, Root.Url))
 		{
 			byIdentity.TryAdd(identity, Root);
 		}
 
-		foreach (var definition in monorepo.Components.Where(definition => definition.Name != Root.Name))
+		foreach (var definition in graph.Registry.Components.Where(definition => definition.Name != Root.Name))
 		{
-			var sourceDir = monorepo.SourceRepoDir(definition.Name);
 			var existing = new Lazy<UnwindComponent>(() => new UnwindComponent
 			{
 				Name = definition.Name,
 				Url = definition.Url,
-				RepoDir = sourceDir,
+				Store = graph.Storage.Open(definition.Name),
 				IsNew = false,
 				References = definition.References.ToList()
 			});
-			foreach (var identity in await IdentitiesAsync(sourceDir, definition.Url))
+			var store = graph.Storage.Exists(definition.Name) ? graph.Storage.Open(definition.Name) : null;
+			foreach (var identity in await IdentitiesAsync(store, definition.Url))
 			{
 				registered.TryAdd(identity, existing);
 			}
@@ -145,10 +146,9 @@ internal sealed class SubmoduleUnwinder : IDisposable
 				continue;
 			}
 
-			var head = await component.Git.RunAsync(["symbolic-ref", "--short", "HEAD"]);
-			var branch = head.ExitCode == 0 ? head.Output.Trim() : null;
-			var tip = branch is null ? null : await component.Git.RunAsync(["rev-parse", "--verify", "--quiet", $"refs/heads/{branch}^{{commit}}"]);
-			if (branch is null || tip is not { ExitCode: 0 })
+			var branch = await component.Store.DefaultBranchAsync();
+			var tip = branch is null ? null : await component.Store.BranchTipAsync(branch);
+			if (branch is null || tip is null)
 			{
 				if (component == Root)
 				{
@@ -159,7 +159,7 @@ internal sealed class SubmoduleUnwinder : IDisposable
 			}
 
 			component.MainBranch = branch;
-			component.Main = await VisitAsync(component, tip.Output.Trim(), [], pending);
+			component.Main = await VisitAsync(component, tip, [], pending);
 			component.Main.IsMain = true;
 		}
 
@@ -182,9 +182,9 @@ internal sealed class SubmoduleUnwinder : IDisposable
 		var context = new UnwindContext { Component = component, Commit = commit };
 		contexts[(component.Name, commit)] = context;
 		var path = chain.Append(component.Name).ToList();
-		var superprojectUrl = await RemoteUrlAsync(component.RepoDir) ?? component.Url;
+		var superprojectUrl = await component.Store.UpstreamAsync() ?? component.Url;
 
-		foreach (var link in await Submodules.ReadAsync(component.Git, commit))
+		foreach (var link in (await component.Store.ListNestedAsync(commit)).Select(unit => new Gitlink(unit.Path, unit.Commit, unit.Name, unit.Url)))
 		{
 			if (string.IsNullOrWhiteSpace(link.Url))
 			{
@@ -244,16 +244,19 @@ internal sealed class SubmoduleUnwinder : IDisposable
 		}
 
 		var name = UniqueName(ComponentCommands.DeriveComponentName(url), parent.Name);
-		var repoDir = Path.Combine(stagingDir, name);
-		var clone = await new GitClient(monorepo.Root).RunAsync(["clone", "--bare", "--quiet", url, Path.Combine(repoDir, ".git")]);
-		if (clone.ExitCode != 0)
+		IComponentStore store;
+		try
 		{
-			throw new GitException($"Could not clone the submodule '{url}' of component '{parent.Name}': {clone.Error.Trim()}");
+			store = await staging.ImportAsync(name, url);
+		}
+		catch (StorageException ex)
+		{
+			throw new StorageException($"Could not clone the submodule '{url}' of component '{parent.Name}': {ex.Message}");
 		}
 
-		var added = new UnwindComponent { Name = name, Url = url, RepoDir = repoDir, IsNew = true };
+		var added = new UnwindComponent { Name = name, Url = url, Store = store, IsNew = true };
 		components.Add(added);
-		foreach (var alias in await IdentitiesAsync(repoDir, url))
+		foreach (var alias in await IdentitiesAsync(store, url))
 		{
 			byIdentity.TryAdd(alias, added);
 		}
@@ -266,8 +269,7 @@ internal sealed class SubmoduleUnwinder : IDisposable
 	private string UniqueName(string derived, string parent)
 	{
 		bool Taken(string name) =>
-			monorepo.FindComponent(name) is not null || components.Any(component => component.Name == name)
-			|| Directory.Exists(monorepo.SourceRepoDir(name)) || File.Exists(monorepo.SourceRepoDir(name));
+			graph.Registry.Contains(name) || components.Any(component => component.Name == name) || graph.Storage.Exists(name);
 
 		if (!Taken(derived))
 		{
@@ -287,13 +289,7 @@ internal sealed class SubmoduleUnwinder : IDisposable
 	/// <summary>Makes sure the pinned commit is in the component's repository, fetching it from the submodule URL if needed.</summary>
 	private static async Task EnsureCommitAsync(UnwindComponent target, Gitlink link, string url, UnwindComponent parent, string parentCommit)
 	{
-		if (await HasCommitAsync(target.Git, link.Commit))
-		{
-			return;
-		}
-
-		await target.Git.RunAsync(["fetch", "--quiet", "--no-tags", url, link.Commit]);
-		if (!await HasCommitAsync(target.Git, link.Commit))
+		if (!await target.Store.EnsureCommitAsync(link.Commit, url))
 		{
 			throw new MonorepoException(
 				$"Component '{parent.Name}' at {parentCommit[..10]} pins its submodule '{link.Path}' ({url}) at {link.Commit}, " +
@@ -301,22 +297,8 @@ internal sealed class SubmoduleUnwinder : IDisposable
 		}
 	}
 
-	private static async Task<bool> HasCommitAsync(GitClient git, string commit) =>
-		(await git.RunAsync(["cat-file", "-e", $"{commit}^{{commit}}"])).ExitCode == 0;
-
-	private static async Task<string?> RemoteUrlAsync(string repoDir)
-	{
-		if (!Directory.Exists(repoDir))
-		{
-			return null;
-		}
-
-		var result = await GitClient.In(repoDir).RunAsync(["config", "--get", "remote.origin.url"]);
-		return result.ExitCode == 0 && result.Output.Trim().Length > 0 ? result.Output.Trim() : null;
-	}
-
 	/// <summary>A component is known by the URL it was added from and by its repository's origin, which may differ (a local mirror).</summary>
-	private static async Task<IReadOnlyList<string>> IdentitiesAsync(string repoDir, string url)
+	private static async Task<IReadOnlyList<string>> IdentitiesAsync(IComponentStore? store, string url)
 	{
 		var identities = new List<string>();
 		if (url.Length > 0)
@@ -324,7 +306,7 @@ internal sealed class SubmoduleUnwinder : IDisposable
 			identities.Add(RepoIdentity.Of(url));
 		}
 
-		if (await RemoteUrlAsync(repoDir) is { } origin)
+		if (store is not null && await store.UpstreamAsync() is { } origin)
 		{
 			identities.Add(RepoIdentity.Of(origin));
 		}
@@ -336,7 +318,7 @@ internal sealed class SubmoduleUnwinder : IDisposable
 	private void CheckReferenceCycles()
 	{
 		var edges = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-		foreach (var definition in monorepo.Components)
+		foreach (var definition in graph.Registry.Components)
 		{
 			edges[definition.Name] = definition.References.Select(reference => reference.Name).ToList();
 		}
@@ -418,8 +400,8 @@ internal sealed class SubmoduleUnwinder : IDisposable
 				var highest = -1;
 				foreach (var component in components)
 				{
-					var existing = await component.Git.RunOrThrowAsync(["tag", "--list", $"{TagPrefix}{key}/*"]);
-					highest = Math.Max(highest, RunMetadata.HighestIndex(existing.Split('\n', StringSplitOptions.RemoveEmptyEntries)));
+					var existing = await component.Store.ListTagsAsync($"{TagPrefix}{key}/");
+					highest = Math.Max(highest, RunMetadata.HighestIndex(existing.Select(tag => tag.Name)));
 				}
 
 				next = highest + 1;
@@ -432,41 +414,42 @@ internal sealed class SubmoduleUnwinder : IDisposable
 	}
 
 	/// <summary>
-	/// Applies the plan: the unwind commits, the new components moved into place and registered, the references,
-	/// main branches advanced and the tags created. Returns the meta-repo commit.
+	/// Applies the plan: the unwind commits, the new components promoted from staging, main branches advanced, the tags
+	/// created, and the new components and references registered in one meta-repo revision, which is returned. The
+	/// registry changes are checked before anything is written.
 	/// </summary>
 	public async Task<string?> ApplyAsync(string metaRepoMessage, IReadOnlyList<ComponentReference>? rootReferences = null)
 	{
-		foreach (var context in Unwinding)
-		{
-			context.Unwound = await CommitWithoutGitlinksAsync(context);
-		}
-
-		foreach (var component in components.Where(component => component.IsNew && component != Root))
-		{
-			var finalDir = monorepo.SourceRepoDir(component.Name);
-			Directory.Move(component.RepoDir, finalDir);
-			component.RepoDir = finalDir;
-		}
-
-		// components.toml: referenced components first, so every edit names registered components only.
+		// Referenced components first, so every change names registered components only.
+		var changes = new List<RegistryChange>();
 		foreach (var component in DependencyOrder())
 		{
 			if (component.IsNew)
 			{
 				var references = (component == Root ? rootReferences ?? [] : []).Concat(component.AddedReferences).ToList();
-				ComponentsFile.Add(monorepo.Root, component.Name, component.Url, references);
+				changes.Add(new RegistryChange.Add(new ComponentDefinition(component.Name, component.Url, references)));
 			}
 			else if (component.AddedReferences.Count > 0)
 			{
-				ComponentsFile.SetReferences(monorepo.Root, component.Name, component.References.Concat(component.AddedReferences).ToList());
+				changes.Add(new RegistryChange.SetReferences(component.Name, component.References.Concat(component.AddedReferences).ToList()));
 			}
+		}
+
+		graph.Registry.Apply(changes);
+
+		foreach (var context in Unwinding)
+		{
+			context.Unwound = await context.Component.Store.CommitWithoutNestedAsync(context.Commit, context.Pins.Select(pin => pin.Link.Path).ToList(), CommitMessage(context));
+		}
+
+		foreach (var component in components.Where(component => component.IsNew && component != Root))
+		{
+			component.Store = await staging.PromoteAsync(component.Store);
 		}
 
 		foreach (var component in components.Where(component => component.Main is { Pins.Count: > 0 }))
 		{
-			await component.Git.RunOrThrowAsync(["update-ref", "-m", "bassia: unwind submodules",
-				$"refs/heads/{component.MainBranch}", component.Main!.Unwound!, component.Main.Commit]);
+			await component.Store.SetBranchAsync(component.MainBranch!, component.Main!.Unwound!, component.Main.Commit);
 		}
 
 		foreach (var tag in tags)
@@ -474,11 +457,11 @@ internal sealed class SubmoduleUnwinder : IDisposable
 			var message = TagMessage(tag);
 			foreach (var member in tag.Members)
 			{
-				await member.Component.Git.RunOrThrowAsync(["tag", "-a", tag.Name, "-m", message, member.Effective]);
+				await member.Component.Store.CreateTagAsync(tag.Name, member.Effective, message);
 			}
 		}
 
-		return await MonorepoCommands.CommitMetaRepoAsync(monorepo.Root, metaRepoMessage);
+		return await graph.MetaRepo.CommitAsync(changes, metaRepoMessage);
 	}
 
 	private IEnumerable<UnwindComponent> DependencyOrder()
@@ -511,58 +494,6 @@ internal sealed class SubmoduleUnwinder : IDisposable
 		return ordered;
 	}
 
-	/// <summary>
-	/// A commit on top of the context's commit with the same tree minus its gitlinks and their <c>.gitmodules</c>
-	/// sections (the file goes when nothing is left in it). Built in a scratch index, so a bare repository will do.
-	/// </summary>
-	private async Task<string> CommitWithoutGitlinksAsync(UnwindContext context)
-	{
-		Directory.CreateDirectory(stagingDir);
-		var git = context.Component.Git;
-		var index = Path.Combine(stagingDir, $"index-{Guid.NewGuid():N}");
-
-		// update-index wants a work tree even for index-only changes; a bare repository has none, so it gets an empty one.
-		var workTree = Directory.CreateDirectory(Path.Combine(stagingDir, "empty-work-tree")).FullName;
-		var gitDir = (await git.RunOrThrowAsync(["rev-parse", "--absolute-git-dir"])).Trim();
-		var environment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = index, ["GIT_DIR"] = gitDir, ["GIT_WORK_TREE"] = workTree };
-		try
-		{
-			await git.RunOrThrowAsync(["read-tree", context.Commit], environment: environment);
-			await git.RunOrThrowAsync(["update-index", "--force-remove", "--", .. context.Pins.Select(pin => pin.Link.Path)], environment: environment);
-
-			var gitmodules = await git.RunAsync(["cat-file", "-p", $"{context.Commit}:{Submodules.GitmodulesFile}"]);
-			if (gitmodules.ExitCode == 0)
-			{
-				var file = Path.Combine(stagingDir, $"gitmodules-{Guid.NewGuid():N}");
-				await File.WriteAllTextAsync(file, gitmodules.Output);
-				foreach (var name in context.Pins.Select(pin => pin.Link.Name).OfType<string>().Distinct())
-				{
-					await git.RunAsync(["config", "--file", file, "--remove-section", $"submodule.{name}"]);
-				}
-
-				var remaining = await File.ReadAllTextAsync(file);
-				if (remaining.Split('\n').Any(line => line.TrimStart().StartsWith('[')))
-				{
-					var blob = await git.RunOrThrowAsync(["hash-object", "-w", file]);
-					await git.RunOrThrowAsync(["update-index", "--add", "--cacheinfo", $"100644,{blob},{Submodules.GitmodulesFile}"], environment: environment);
-				}
-				else
-				{
-					await git.RunOrThrowAsync(["update-index", "--force-remove", "--", Submodules.GitmodulesFile], environment: environment);
-				}
-
-				File.Delete(file);
-			}
-
-			var tree = await git.RunOrThrowAsync(["write-tree"], environment: environment);
-			return await git.RunOrThrowAsync(["commit-tree", tree, "-p", context.Commit, "-F", "-"], CommitMessage(context));
-		}
-		finally
-		{
-			File.Delete(index);
-		}
-	}
-
 	private static string CommitMessage(UnwindContext context)
 	{
 		var builder = new StringBuilder($"bassia: unwind submodule(s) {string.Join(", ", context.Pins.Select(pin => pin.Link.Path))} into components\n\n");
@@ -591,18 +522,5 @@ internal sealed class SubmoduleUnwinder : IDisposable
 		return builder.ToString();
 	}
 
-	public void Dispose()
-	{
-		if (!Directory.Exists(stagingDir))
-		{
-			return;
-		}
-
-		foreach (var file in Directory.EnumerateFiles(stagingDir, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
-		{
-			File.SetAttributes(file, FileAttributes.Normal);
-		}
-
-		Directory.Delete(stagingDir, recursive: true);
-	}
+	public void Dispose() => staging.Dispose();
 }

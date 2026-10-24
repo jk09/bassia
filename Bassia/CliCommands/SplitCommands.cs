@@ -2,6 +2,7 @@ namespace Bassia;
 
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Graph;
 using Bassia.Split;
@@ -30,7 +31,7 @@ internal static class SplitCommands
 				throw new SplitPlanException(problems, [], []);
 			}
 
-			allocation = await ComponentSplitter.AllocateAsync(monorepo, plan, invocation.Get("name"), problems);
+			allocation = await monorepo.Graph().PlanSplitAsync(plan, invocation.Get("name"), problems);
 		}
 		catch (SplitPlanException ex)
 		{
@@ -80,16 +81,16 @@ internal static class SplitCommands
 			throw new MonorepoException($"{live} run(s) on '{allocation.Source.Name}' are live; wait for them or stop them before splitting it.");
 		}
 
-		var result = await ComponentSplitter.SplitAsync(monorepo, allocation);
+		var result = await monorepo.Graph().SplitAsync(allocation);
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Split '{allocation.Source.Name}' into {string.Join(", ", result.Parts.Select(part => $"{part.Name} ({part.Commits} commits)"))}; " +
-			$"'{allocation.Source.Name}' is retired and its repository kept at '{allocation.SourceDir}'.",
+			$"'{allocation.Source.Name}' is retired and its repository kept at '{allocation.SourceLocation}'.",
 			new Dictionary<string, object?>
 			{
 				["split_id"] = result.Id,
 				["tag"] = result.SourceTag,
 				["source"] = allocation.Source.Name,
-				["source_path"] = allocation.SourceDir,
+				["source_path"] = allocation.SourceLocation,
 				["branch"] = allocation.Branch,
 				["source_commit"] = allocation.TipCommit,
 				["meta_repo_commit"] = result.MetaRepoCommit,

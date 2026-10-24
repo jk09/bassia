@@ -5,21 +5,22 @@ using System.Globalization;
 using System.Text;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Locks;
 
 /// <summary>
-/// <c>bassia run ...</c>: starting agentic runs (in the foreground or detached), watching and stopping them,
+/// <c>bassia agent ...</c>: starting agentic runs (in the foreground or detached), watching and stopping them,
 /// finishing or discarding them, and reviewing what they changed.
 /// </summary>
 internal static class RunCommands
 {
 	public const string JobKind = "run";
 
-	/// <summary>How long <c>run start -detach</c> waits for the background process to register before giving up.</summary>
+	/// <summary>How long <c>agent start -detach</c> waits for the background process to register before giving up.</summary>
 	private static readonly TimeSpan RegistrationTimeout = TimeSpan.FromSeconds(30);
 
-	// ----- bassia run start -----
+	// ----- bassia agent start -----
 
 	public static async Task<int> StartAsync(Invocation invocation)
 	{
@@ -48,7 +49,7 @@ internal static class RunCommands
 				job.Cancel();
 			};
 
-			// Ctrl-C in the terminal of a foreground run stops it the way 'run stop' does, so it is recorded.
+			// Ctrl-C in the terminal of a foreground run stops it the way 'agent stop' does, so it is recorded.
 			if (output is null)
 			{
 				Console.CancelKeyPress += stop;
@@ -87,7 +88,7 @@ internal static class RunCommands
 		}
 		catch (Exception ex) when (output is not null && ProgramCli.IsReportable(ex))
 		{
-			// The detached process's own failure: into its log, where 'run start -detach' and 'run logs' look.
+			// The detached process's own failure: into its log, where 'agent start -detach' and 'agent logs' look.
 			return output.WriteResult(false, invocation.Command, ex.Message);
 		}
 		finally
@@ -156,7 +157,7 @@ internal static class RunCommands
 		var log = jobs.LogPath(runId);
 		await File.WriteAllTextAsync(log, "");
 
-		List<string> arguments = ["run", "start", "-id", runId, "-log", log, "-select", select];
+		List<string> arguments = ["agent", "start", "-id", runId, "-log", log, "-select", select];
 		if (lockFiles is not null)
 		{
 			arguments.AddRange(["-lock-files", lockFiles]);
@@ -178,8 +179,8 @@ internal static class RunCommands
 
 		var shortId = RunMetadata.Key(runId);
 		return ProgramCli.WriteResult(true, invocation.Command,
-			$"Agentic run '{runId}' started in the background. Follow it with 'bassia run show {shortId}', 'bassia run logs {shortId}' " +
-			$"or 'bassia run wait {shortId}'; stop it with 'bassia run stop {shortId}'.",
+			$"Agentic run '{runId}' started in the background. Follow it with 'bassia agent show {shortId}', 'bassia agent logs {shortId}' " +
+			$"or 'bassia agent wait {shortId}'; stop it with 'bassia agent stop {shortId}'.",
 			new Dictionary<string, object?>
 			{
 				["run_id"] = runId,
@@ -252,7 +253,7 @@ internal static class RunCommands
 		var runId = candidates.Count switch
 		{
 			1 => candidates[0],
-			0 => throw new AgentException($"Unknown agentic run '{name}'. List the runs with 'bassia run list'."),
+			0 => throw new AgentException($"Unknown agentic run '{name}'. List the runs with 'bassia agent list'."),
 			_ => throw new AgentException($"'{name}' names more than one agentic run ({string.Join(", ", candidates.Select(RunMetadata.Key))}); give more of its id.")
 		};
 
@@ -262,7 +263,7 @@ internal static class RunCommands
 	private static async Task<FoundRun> ReloadAsync(FoundRun run) =>
 		run with { Record = await run.Store.LoadLatestAsync(run.RunId), Job = run.Jobs.Find(run.RunId) };
 
-	// ----- bassia run list -----
+	// ----- bassia agent list -----
 
 	public static async Task<int> ListAsync(Invocation invocation)
 	{
@@ -316,7 +317,7 @@ internal static class RunCommands
 			.Select(entry => $"{entry.Name}@{entry.ResultTag}").ToList() ?? []
 	};
 
-	// ----- bassia run show -----
+	// ----- bassia agent show -----
 
 	public static async Task<int> ShowAsync(Invocation invocation)
 	{
@@ -325,7 +326,7 @@ internal static class RunCommands
 	}
 
 	private static string Describe(FoundRun run) =>
-		run.Stale ? $"Agentic run '{run.RunId}' is recorded as started, but no process is executing it any more; 'bassia run stop {RunMetadata.Key(run.RunId)}' records it as cancelled."
+		run.Stale ? $"Agentic run '{run.RunId}' is recorded as started, but no process is executing it any more; 'bassia agent stop {RunMetadata.Key(run.RunId)}' records it as cancelled."
 		: run.Live ? $"Agentic run '{run.RunId}' is live ({run.Status})."
 		: run.Record is null ? $"Agentic run '{run.RunId}' never got past preparing; it has no record."
 		: $"Agentic run '{run.RunId}' is {run.Status}.";
@@ -419,7 +420,7 @@ internal static class RunCommands
 		return builder.ToString();
 	}
 
-	// ----- bassia run logs -----
+	// ----- bassia agent logs -----
 
 	public static async Task<int> LogsAsync(Invocation invocation)
 	{
@@ -429,7 +430,7 @@ internal static class RunCommands
 		{
 			throw new AgentException(
 				$"Agentic run '{run.RunId}' was not started with -detach, so its output went to the terminal or frontend that started it; " +
-				$"'bassia run show {RunMetadata.Key(run.RunId)}' shows its record.");
+				$"'bassia agent show {RunMetadata.Key(run.RunId)}' shows its record.");
 		}
 
 		var lines = ReadLines(log);
@@ -447,7 +448,7 @@ internal static class RunCommands
 			});
 	}
 
-	// ----- bassia run wait -----
+	// ----- bassia agent wait -----
 
 	public static async Task<int> WaitAsync(Invocation invocation)
 	{
@@ -461,7 +462,7 @@ internal static class RunCommands
 				var data = Details(run);
 				data["timed_out"] = true;
 				return ProgramCli.WriteResult(false, invocation.Command,
-					$"Agentic run '{run.RunId}' is still running after {timeout}s; wait again, or stop it with 'bassia run stop {RunMetadata.Key(run.RunId)}'.", data);
+					$"Agentic run '{run.RunId}' is still running after {timeout}s; wait again, or stop it with 'bassia agent stop {RunMetadata.Key(run.RunId)}'.", data);
 			}
 
 			await Task.Delay(500);
@@ -474,7 +475,7 @@ internal static class RunCommands
 		return ProgramCli.WriteResult(ok, invocation.Command, Describe(run), Details(run));
 	}
 
-	// ----- bassia run stop -----
+	// ----- bassia agent stop -----
 
 	public static async Task<int> StopAsync(Invocation invocation)
 	{
@@ -539,7 +540,7 @@ internal static class RunCommands
 			data);
 	}
 
-	// ----- bassia run retry / abandon -----
+	// ----- bassia agent retry / abandon -----
 
 	public static async Task<int> RetryAsync(Invocation invocation)
 	{
@@ -560,7 +561,7 @@ internal static class RunCommands
 		var record = run.Record ?? throw new AgentException($"Agentic run '{run.RunId}' has no record yet; nothing to abandon.");
 		if (run.Live)
 		{
-			throw new AgentException($"Agentic run '{run.RunId}' is still running; stop it first with 'bassia run stop {RunMetadata.Key(run.RunId)}'.");
+			throw new AgentException($"Agentic run '{run.RunId}' is still running; stop it first with 'bassia agent stop {RunMetadata.Key(run.RunId)}'.");
 		}
 
 		var outcome = await AgentCommand.AbandonAsync(run.Store, record);
@@ -570,7 +571,7 @@ internal static class RunCommands
 		return ProgramCli.WriteResult(outcome.Ok, invocation.Command, outcome.Message, AgentCommand.ResultData(outcome.Metadata, outcome.Store, outcome.MetadataTags));
 	}
 
-	// ----- bassia run diff -----
+	// ----- bassia agent diff -----
 
 	public static async Task<int> DiffAsync(Invocation invocation)
 	{

@@ -1,4 +1,5 @@
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -9,11 +10,11 @@ public class AgentCommandTests
 	[Fact]
 	public async Task Agent_WithoutArguments_ReturnsUsage()
 	{
-		var (exitCode, _, error) = await TestEnvironment.RunAsync("run", "start");
+		var (exitCode, _, error) = await TestEnvironment.RunAsync("agent", "start");
 
 		Assert.Equal(2, exitCode);
 		Assert.Contains("-select is required", error);
-		Assert.Contains("Usage: bassia run start -select", error);
+		Assert.Contains("Usage: bassia agent start -select", error);
 	}
 
 	[Fact]
@@ -21,7 +22,7 @@ public class AgentCommandTests
 	{
 		using var directory = new TempDirectory();
 
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(directory.Path, "run", "start", "-select", "example@v0", "-run", "echo");
+		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(directory.Path, "agent", "start", "-select", "example@v0", "-run", "echo");
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("is not inside a Bassia monorepo", error);
@@ -334,7 +335,7 @@ public class AgentCommandTests
 		Assert.Contains(steps, step => step.Phase == AgentRunPhase.Preparing);
 		Assert.Contains(steps, step => step.Phase == AgentRunPhase.Cancelled);
 
-		var (retryExitCode, _, retryError) = await monorepo.BassiaAsync("run", "retry", outcome.Metadata.RunId);
+		var (retryExitCode, _, retryError) = await monorepo.BassiaAsync("agent", "retry", outcome.Metadata.RunId);
 		Assert.Equal(1, retryExitCode);
 		Assert.Contains("has status 'cancelled'", retryError);
 	}
@@ -391,7 +392,7 @@ public class AgentCommandTests
 
 		// retry accepts the bare <id> as well as the full run id.
 		File.Delete(hook);
-		var (retryExitCode, retryOutput, retryError) = await monorepo.BassiaAsync("run", "retry", RunMetadata.Key(runId));
+		var (retryExitCode, retryOutput, retryError) = await monorepo.BassiaAsync("agent", "retry", RunMetadata.Key(runId));
 
 		Assert.True(retryExitCode == 0, retryError);
 		Assert.Contains("status = \"completed\"", retryOutput);
@@ -412,7 +413,7 @@ public class AgentCommandTests
 		Assert.True(exitCode == 0, error);
 		var runId = TestEnvironment.RunIdOf(output);
 
-		var (abandonExitCode, abandonOutput, abandonError) = await monorepo.BassiaAsync("run", "abandon", runId);
+		var (abandonExitCode, abandonOutput, abandonError) = await monorepo.BassiaAsync("agent", "abandon", runId);
 
 		Assert.True(abandonExitCode == 0, abandonError);
 		Assert.Contains("abandoned", abandonOutput);
@@ -420,7 +421,7 @@ public class AgentCommandTests
 		Assert.Contains(RunMetadata.TagName(runId, 0), await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "tag", "--list"));
 		Assert.Contains("status = \"abandoned\"", await TestEnvironment.GitAsync(monorepo.RunsRepo, "show", $"{RunMetadata.TagName(runId, 2)}:run.toml"));
 
-		var (again, _, againError) = await monorepo.BassiaAsync("run", "abandon", runId);
+		var (again, _, againError) = await monorepo.BassiaAsync("agent", "abandon", runId);
 		Assert.Equal(1, again);
 		Assert.Contains("already abandoned", againError);
 	}

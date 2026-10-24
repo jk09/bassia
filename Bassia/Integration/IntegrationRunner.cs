@@ -7,7 +7,7 @@ using Tomlyn.Model;
 /// <summary>One progress step of an integration: what happened, and the record as it stands right after it.</summary>
 internal sealed record IntegrationProgress(string Message, IntegrationRecord Snapshot, string? Component, string? RunId);
 
-/// <summary>How a caller watches and interrupts an integration; without one it reports on stderr like <c>bassia run start</c>.</summary>
+/// <summary>How a caller watches and interrupts an integration; without one it reports on stderr like <c>bassia agent start</c>.</summary>
 internal sealed class IntegrationContext
 {
 	/// <summary>Stops the integration; a resolver that is working is killed with its process tree.</summary>

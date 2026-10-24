@@ -3,6 +3,7 @@ namespace Bassia.Web;
 using System.Globalization;
 using System.Net;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Integration;
 
 /// <summary>

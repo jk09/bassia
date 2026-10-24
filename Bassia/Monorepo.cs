@@ -1,8 +1,5 @@
 namespace Bassia;
 
-using Tomlyn;
-using Tomlyn.Model;
-
 /// <summary>
 /// A component registered in the meta-repo's <c>components.toml</c>. <paramref name="References"/> are the
 /// outgoing edges of the (acyclic) component reference graph: components this one nests as subfolders.
@@ -38,7 +35,7 @@ internal sealed class Monorepo
 	/// </summary>
 	public const string DefaultStructuralDriver = "weave-driver";
 
-	/// <summary>Agent command a run composed from a prompt starts with (<c>bassia run start -prompt</c>, the frontends).</summary>
+	/// <summary>Agent command a run composed from a prompt starts with (<c>bassia agent start -prompt</c>, the frontends).</summary>
 	public const string DefaultAgentCommand = "claude -p --permission-mode acceptEdits";
 
 	public string Root { get; }
@@ -71,7 +68,10 @@ internal sealed class Monorepo
 	/// </summary>
 	public string RunsRepoDir => Path.Combine(Root, RunsRepoFolderName, ".git");
 
-	public IReadOnlyList<ComponentDefinition> Components { get; }
+	/// <summary>The component graph as the meta-repo holds it.</summary>
+	public Core.ComponentRegistry Registry { get; }
+
+	public IReadOnlyList<ComponentDefinition> Components => Registry.Components;
 
 	/// <summary>The configuration layers as read when the monorepo was loaded (see <see cref="ConfigSnapshot"/>).</summary>
 	public ConfigSnapshot Config { get; }
@@ -80,7 +80,7 @@ internal sealed class Monorepo
 	public Integration.MergePolicy MergePolicyFor(string component) => Integration.MergePolicy.For(Config, component);
 
 	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand,
-		IReadOnlyList<ComponentDefinition> components, ConfigSnapshot config)
+		Core.ComponentRegistry registry, ConfigSnapshot config)
 	{
 		Config = config;
 		Root = root;
@@ -89,7 +89,7 @@ internal sealed class Monorepo
 		Resolver = resolver;
 		StructuralDriver = structuralDriver;
 		AgentCommand = agentCommand;
-		Components = components;
+		Registry = registry;
 	}
 
 	/// <summary>Finds the monorepo root by walking up from <paramref name="startDirectory"/> until a <c>.bassia</c> folder is found.</summary>
@@ -118,13 +118,12 @@ internal sealed class Monorepo
 		var workspace = config.Resolve(ConfigFile.Find("workspace.path"));
 		var workspaceDir = Path.GetFullPath(workspace.Value, root);
 
-		var components = ReadComponents(ReadToml(Path.Combine(metaRepoDir, "components.toml")));
+		var registry = Core.ComponentRegistry.FromDefinitions(Storage.Git.GitMetaStore.Read(root));
 		return new Monorepo(root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
-			config.Value("integration.weave").Trim(), config.Value("agent.command"), components, config);
+			config.Value("integration.weave").Trim(), config.Value("agent.command"), registry, config);
 	}
 
-	public ComponentDefinition? FindComponent(string name) =>
-		Components.FirstOrDefault(component => string.Equals(component.Name, name, StringComparison.Ordinal));
+	public ComponentDefinition? FindComponent(string name) => Registry.Find(name);
 
 	/// <summary>
 	/// Source-of-truth repository of a component: the folder next to the meta-repo, holding either a bare
@@ -137,140 +136,15 @@ internal sealed class Monorepo
 	/// (a component precedes every component it references). Throws when the graph reachable from the roots
 	/// contains a cycle or refers to an unregistered component.
 	/// </summary>
-	public IReadOnlyList<ComponentDefinition> Closure(IEnumerable<string> roots)
-	{
-		var ordered = new List<ComponentDefinition>();
-		var state = new Dictionary<string, VisitState>(StringComparer.Ordinal);
-		var path = new Stack<string>();
+	public IReadOnlyList<ComponentDefinition> Closure(IEnumerable<string> roots) => Registry.Closure(roots);
 
-		void Visit(string name)
-		{
-			if (state.TryGetValue(name, out var visited))
-			{
-				if (visited == VisitState.InProgress)
-				{
-					var cycle = string.Join(" -> ", path.Reverse().SkipWhile(item => item != name).Append(name));
-					throw new MonorepoException($"components.toml contains a cyclic component reference: {cycle}.");
-				}
+	/// <summary>
+	/// The component graph of this monorepo on its git storage: the meta-repo in <c>.bassia</c> and each component's
+	/// repository next to it. Commands change components and the registry through it.
+	/// </summary>
+	public Core.MonorepoGraph Graph() =>
+		new(Core.MetaRepo.Open(new Storage.Git.GitMetaStore(Root), Registry), new Storage.Git.GitComponentStorage(Root));
 
-				return;
-			}
-
-			var component = FindComponent(name)
-				?? throw new MonorepoException($"Component '{name}' is referenced but not registered in components.toml.");
-
-			state[name] = VisitState.InProgress;
-			path.Push(name);
-			foreach (var reference in component.References)
-			{
-				Visit(reference.Name);
-			}
-
-			path.Pop();
-			state[name] = VisitState.Done;
-			ordered.Add(component);
-		}
-
-		foreach (var root in roots)
-		{
-			Visit(root);
-		}
-
-		ordered.Reverse();
-		return ordered;
-	}
-
-	private enum VisitState { InProgress, Done }
-
-	private static TomlTable ReadToml(string path)
-	{
-		if (!File.Exists(path))
-		{
-			return new TomlTable();
-		}
-
-		try
-		{
-			return TomlSerializer.Deserialize<TomlTable>(File.ReadAllText(path)) ?? new TomlTable();
-		}
-		catch (TomlException ex)
-		{
-			throw new MonorepoException($"Could not parse '{path}': {ex.Message}");
-		}
-	}
-
-	private static List<ComponentDefinition> ReadComponents(TomlTable table)
-	{
-		var components = new List<ComponentDefinition>();
-		if (!table.TryGetValue("component", out var entries) || entries is not TomlTableArray componentTables)
-		{
-			return components;
-		}
-
-		foreach (var componentTable in componentTables)
-		{
-			var name = componentTable.TryGetValue("name", out var nameValue) ? nameValue as string : null;
-			if (string.IsNullOrWhiteSpace(name))
-			{
-				throw new MonorepoException("components.toml contains a [[component]] entry without a name.");
-			}
-
-			if (components.Any(component => component.Name == name))
-			{
-				throw new MonorepoException($"components.toml registers the component '{name}' more than once.");
-			}
-
-			var url = componentTable.TryGetValue("url", out var urlValue) ? urlValue as string ?? "" : "";
-			var forkOf = componentTable.TryGetValue("fork_of", out var forkOfValue) ? forkOfValue as string : null;
-			var forkCommit = componentTable.TryGetValue("fork_commit", out var forkCommitValue) ? forkCommitValue as string : null;
-			components.Add(new ComponentDefinition(name, url, ReadReferences(name, componentTable), forkOf, forkCommit));
-		}
-
-		return components;
-	}
-
-	// references = ["lib", { name = "other", path = "libs/other" }]
-	private static List<ComponentReference> ReadReferences(string owner, TomlTable componentTable)
-	{
-		var references = new List<ComponentReference>();
-		if (!componentTable.TryGetValue("references", out var value) || value is null)
-		{
-			return references;
-		}
-
-		if (value is not TomlArray array)
-		{
-			throw new MonorepoException($"Component '{owner}': 'references' must be an array.");
-		}
-
-		foreach (var item in array)
-		{
-			switch (item)
-			{
-				case string name when !string.IsNullOrWhiteSpace(name):
-					references.Add(new ComponentReference(name, name));
-					break;
-				case TomlTable table when table.TryGetValue("name", out var nameValue) && nameValue is string name && !string.IsNullOrWhiteSpace(name):
-					var path = table.TryGetValue("path", out var pathValue) && pathValue is string customPath && !string.IsNullOrWhiteSpace(customPath)
-						? customPath
-						: name;
-					if (Path.IsPathRooted(path) || path.Split(['/', '\\']).Any(segment => segment is "" or "." or ".."))
-					{
-						throw new MonorepoException($"Component '{owner}': reference path '{path}' must be a relative path inside the component.");
-					}
-
-					references.Add(new ComponentReference(name, path));
-					break;
-				default:
-					throw new MonorepoException($"Component '{owner}': each reference must be a component name or {{ name = \"...\", path = \"...\" }}.");
-			}
-
-			if (references[^1].Name == owner)
-			{
-				throw new MonorepoException($"Component '{owner}' cannot reference itself.");
-			}
-		}
-
-		return references;
-	}
+	/// <summary>The store of the agentic run records (<see cref="RunsRepoDir"/>).</summary>
+	public RunMetadataStore RunRecords() => new(new Git.GitClient(Root), RunsRepoDir);
 }

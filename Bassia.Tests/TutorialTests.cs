@@ -165,7 +165,7 @@ public class TutorialTests
 			executor.Executed);
 		Assert.True(error.Contains("> bassia init -path"), error);
 		Assert.Contains("Your monorepo is ready", error);
-		Assert.Contains("bassia run start -select app", error);
+		Assert.Contains("bassia agent start -select app", error);
 		var result = Tomlyn.TomlSerializer.Deserialize<Tomlyn.Model.TomlTable>(output);
 		Assert.Equal(true, result["ok"]);
 		Assert.Equal("tutorial", result["command"]);

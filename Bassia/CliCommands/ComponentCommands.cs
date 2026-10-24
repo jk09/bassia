@@ -2,6 +2,7 @@ namespace Bassia;
 
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Graph;
 
@@ -13,7 +14,7 @@ internal static class ComponentCommands
 	public static async Task<int> ListAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var runs = await new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir).ListLatestAsync();
+		var runs = await monorepo.RunRecords().ListLatestAsync();
 		var statuses = await ComponentStatus.ReadAllAsync(monorepo, runs);
 		var graph = new ComponentGraph(monorepo.Components);
 		var live = LiveRunsPerComponent(monorepo, runs);
@@ -51,56 +52,48 @@ internal static class ComponentCommands
 
 	public static async Task<int> AddAsync(Invocation invocation)
 	{
-		var root = Monorepo.FindRoot(Environment.CurrentDirectory)
-			?? throw new MonorepoException($"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' first.");
+		var monorepo = AgentCommand.LoadMonorepo();
 		var url = invocation.Require("url");
 		var name = invocation.Get("name") ?? DeriveComponentName(url);
 		var references = ComponentsFile.ParseReferences(invocation.List("references"));
-		var monorepo = Monorepo.Load(root);
-
-		if (monorepo.FindComponent(name) is not null)
-		{
-			throw new MonorepoException($"Component '{name}' is already registered.");
-		}
-
-		var componentDir = monorepo.SourceRepoDir(name);
-		if (Directory.Exists(componentDir) || File.Exists(componentDir))
-		{
-			throw new MonorepoException($"'{componentDir}' already exists; choose another name with -name.");
-		}
-
-		foreach (var reference in references.Where(reference => monorepo.FindComponent(reference.Name) is null))
-		{
-			throw new MonorepoException($"-references names '{reference.Name}', which is not registered. Add it first.");
-		}
-
-		var clone = await new GitClient(root).RunAsync(["clone", "--bare", url, Path.Combine(componentDir, ".git")]);
-		if (clone.ExitCode != 0)
-		{
-			if (Directory.Exists(componentDir))
-			{
-				Directory.Delete(componentDir, recursive: true);
-			}
-
-			throw new GitException($"git clone failed: {clone.Error.Trim()}");
-		}
-
 		if (invocation.Has("unwind"))
 		{
-			return await UnwindCommands.AddUnwoundAsync(invocation, monorepo, name, url, componentDir, references);
+			return await UnwindCommands.AddUnwoundAsync(invocation, monorepo, name, url, references);
 		}
 
-		ComponentsFile.Add(root, name, url, references);
-		var commit = await MonorepoCommands.CommitMetaRepoAsync(root, $"Add component '{name}' from '{url}'");
+		var added = await monorepo.Graph().ImportAsync(name, url, references);
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Added component '{name}' from '{url}'. Tag a baseline for runs with 'bassia component tag -name {name} -tag <tag>'.",
 			new Dictionary<string, object?>
 			{
 				["name"] = name,
 				["url"] = url,
-				["path"] = componentDir,
+				["path"] = added.Location,
 				["references"] = references.Select(Describe).ToList(),
-				["meta_repo_commit"] = commit
+				["meta_repo_commit"] = added.Revision
+			});
+	}
+
+	// ----- bassia component create -----
+
+	public static async Task<int> CreateAsync(Invocation invocation)
+	{
+		var monorepo = AgentCommand.LoadMonorepo();
+		var name = invocation.Require("name");
+		var references = ComponentsFile.ParseReferences(invocation.List("references"));
+		var branch = invocation.Get("branch") ?? "main";
+		var url = invocation.Get("url") ?? "";
+		var created = await monorepo.Graph().CreateAsync(name, references, branch, url);
+		return ProgramCli.WriteResult(true, invocation.Command,
+			$"Created component '{name}' with an empty first commit on '{branch}'; select it for a run with -select {name}.",
+			new Dictionary<string, object?>
+			{
+				["name"] = name,
+				["url"] = url.Length == 0 ? null : url,
+				["branch"] = branch,
+				["path"] = created.Location,
+				["references"] = references.Select(Describe).ToList(),
+				["meta_repo_commit"] = created.Revision
 			});
 	}
 
@@ -123,39 +116,36 @@ internal static class ComponentCommands
 		var monorepo = AgentCommand.LoadMonorepo();
 		var component = RequireComponent(monorepo, invocation.Require("name"));
 		var graph = new ComponentGraph(monorepo.Components);
-		var sourceDir = monorepo.SourceRepoDir(component.Name);
-		var hasRepo = Directory.Exists(sourceDir);
-		var refs = hasRepo ? await GitRef.ListAsync(GitClient.In(sourceDir)) : [];
-		var defaultBranch = hasRepo ? await GitClient.In(sourceDir).RunAsync(["symbolic-ref", "--short", "HEAD"]) : null;
-		var runs = (await new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir).ListLatestAsync())
+		var state = await monorepo.Graph().StateAsync(component.Name);
+		var runs = (await monorepo.RunRecords().ListLatestAsync())
 			.Where(run => run.Components.Any(entry => entry.Name == component.Name))
 			.ToList();
 
 		return ProgramCli.WriteResult(true, invocation.Command,
-			$"Component '{component.Name}': {refs.Count(item => item.Kind == GitRefKind.Branch)} branch(es), {refs.Count(item => item.IsTag)} tag(s), {runs.Count} run(s).",
+			$"Component '{component.Name}': {state.Branches.Count} branch(es), {state.Tags.Count} tag(s), {runs.Count} run(s).",
 			new Dictionary<string, object?>
 			{
 				["name"] = component.Name,
 				["url"] = component.Url,
 				["fork_of"] = component.ForkOf,
 				["fork_commit"] = component.ForkCommit,
-				["path"] = sourceDir,
-				["has_repo"] = hasRepo,
-				["default_branch"] = defaultBranch is { ExitCode: 0 } ? defaultBranch.Output.Trim() : null,
+				["path"] = state.Location,
+				["has_repo"] = state.HasStore,
+				["default_branch"] = state.DefaultBranch,
 				["references"] = component.References.Select(Describe).ToList(),
 				["referenced_by"] = graph.ReferrersOf(component.Name).Select(referrer => referrer.Name).ToList(),
 				["closure"] = monorepo.Closure([component.Name]).Select(item => item.Name).ToList(),
 				["graph"] = new TomlText(new ComponentGraph(monorepo.Closure([component.Name])).RenderText(ascii: true)),
-				["branch"] = refs.Where(item => item.Kind == GitRefKind.Branch).Select(item => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+				["branch"] = state.Branches.Select(item => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 				{
 					["name"] = item.Name,
 					["commit"] = item.Commit,
 					["subject"] = item.Subject
 				}).ToList(),
-				["tag"] = refs.Where(item => item.IsTag).Select(item => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+				["tag"] = state.Tags.Select(item => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 				{
 					["name"] = item.Name,
-					["annotated"] = item.Kind == GitRefKind.AnnotatedTag,
+					["annotated"] = item.Annotated,
 					["commit"] = item.Commit,
 					["subject"] = item.Subject
 				}).ToList(),
@@ -187,11 +177,11 @@ internal static class ComponentCommands
 		}
 
 		var references = invocation.Has("clear-references") ? [] : ComponentsFile.ParseReferences(invocation.List("references"));
-		ComponentsFile.SetReferences(monorepo.Root, component.Name, references);
+		var graph = monorepo.Graph();
+		var changed = await graph.SetReferencesAsync(component.Name, references);
 		var described = references.Select(Describe).ToList();
-		var commit = await MonorepoCommands.CommitMetaRepoAsync(monorepo.Root,
-			described.Count == 0 ? $"Component '{component.Name}' references nothing" : $"Component '{component.Name}' references {string.Join(", ", described)}");
-		var updated = Monorepo.Load(monorepo.Root);
+		var commit = changed.Revision;
+		var updated = graph.Registry;
 		return ProgramCli.WriteResult(true, invocation.Command,
 			described.Count == 0 ? $"Component '{component.Name}' now references nothing." : $"Component '{component.Name}' now references {string.Join(", ", described)}.",
 			new Dictionary<string, object?>
@@ -210,23 +200,8 @@ internal static class ComponentCommands
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var component = RequireComponent(monorepo, invocation.Require("name"));
-		var referrers = new ComponentGraph(monorepo.Components).ReferrersOf(component.Name);
-		if (referrers.Count > 0)
-		{
-			throw new MonorepoException(
-				$"Component '{component.Name}' is referenced by {string.Join(", ", referrers.Select(referrer => referrer.Name))}; " +
-				$"remove those references first with 'bassia component set -name <component> -references ...'.");
-		}
-
-		ComponentsFile.Remove(monorepo.Root, component.Name);
-		var commit = await MonorepoCommands.CommitMetaRepoAsync(monorepo.Root, $"Remove component '{component.Name}'");
-		var sourceDir = monorepo.SourceRepoDir(component.Name);
-		var purged = false;
-		if (invocation.Has("purge") && Directory.Exists(sourceDir))
-		{
-			DeleteDirectory(sourceDir);
-			purged = true;
-		}
+		var removed = await monorepo.Graph().RemoveAsync(component.Name, invocation.Has("purge"));
+		var (sourceDir, purged, commit) = (removed.Location, removed.Purged, removed.Revision);
 
 		return ProgramCli.WriteResult(true, invocation.Command,
 			purged
@@ -248,29 +223,18 @@ internal static class ComponentCommands
 		var monorepo = AgentCommand.LoadMonorepo();
 		var component = RequireComponent(monorepo, invocation.Require("name"));
 		var tag = invocation.Require("tag");
-		var source = GitClient.In(RequireRepo(monorepo, component.Name));
-		var target = invocation.Get("ref") ?? "HEAD";
-		var commit = await source.RunAsync(["rev-parse", "--verify", "--quiet", $"{target}^{{commit}}"]);
-		if (commit.ExitCode != 0)
-		{
-			throw new GitException($"'{target}' does not name a commit in component '{component.Name}'.");
-		}
-
-		var message = invocation.Get("message") ?? $"{tag}: baseline of '{component.Name}'";
-		var result = await source.RunAsync(["tag", "-a", tag, "-m", message, commit.Output.Trim()]);
-		if (result.ExitCode != 0)
-		{
-			throw new GitException($"git tag failed in component '{component.Name}': {result.Error.Trim()}");
-		}
+		RequireRepo(monorepo, component.Name);
+		var tagged = await monorepo.Graph().TagAsync(component.Name, tag, invocation.Get("ref"), invocation.Get("message"));
+		var (target, message, commit) = (tagged.Target, tagged.Message, tagged.Commit);
 
 		return ProgramCli.WriteResult(true, invocation.Command,
-			$"Tagged {component.Name}@{tag} at {commit.Output.Trim()[..10]}; select it for a run with -select {component.Name}@{tag}.",
+			$"Tagged {component.Name}@{tag} at {commit[..10]}; select it for a run with -select {component.Name}@{tag}.",
 			new Dictionary<string, object?>
 			{
 				["name"] = component.Name,
 				["tag"] = tag,
 				["ref"] = target,
-				["commit"] = commit.Output.Trim(),
+				["commit"] = commit,
 				["tag_message"] = message,
 				["select"] = $"{component.Name}@{tag}"
 			});
@@ -278,108 +242,17 @@ internal static class ComponentCommands
 
 	// ----- bassia component fork -----
 
-	/// <summary>Run and integration tags belong to the parent's runs; a fork starts without them.</summary>
-	private static readonly string[] ForeignTagPrefixes = ["agent-run/", "integration/"];
-
 	public static async Task<int> ForkAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var parent = RequireComponent(monorepo, invocation.Require("name"));
 		var name = invocation.Require("as");
-		if (name.StartsWith('.') || name.Any(c => char.IsWhiteSpace(c) || c is '/' or '\\' or ':'))
-		{
-			throw new MonorepoException($"'{name}' is not a valid component name: no whitespace, path separators or leading dot.");
-		}
-
-		if (monorepo.FindComponent(name) is not null)
-		{
-			throw new MonorepoException($"Component '{name}' is already registered.");
-		}
-
-		var forkDir = monorepo.SourceRepoDir(name);
-		if (Directory.Exists(forkDir) || File.Exists(forkDir))
-		{
-			throw new MonorepoException($"'{forkDir}' already exists; choose another name with -as.");
-		}
-
-		var references = invocation.Has("references") ? ComponentsFile.ParseReferences(invocation.List("references")) : parent.References;
-		foreach (var reference in references.Where(reference => monorepo.FindComponent(reference.Name) is null))
-		{
-			throw new MonorepoException($"-references names '{reference.Name}', which is not registered.");
-		}
-
+		var references = invocation.Has("references") ? ComponentsFile.ParseReferences(invocation.List("references")) : null;
 		var url = invocation.Get("url") ?? "";
-		var parentDir = RequireRepo(monorepo, parent.Name);
-		var source = GitClient.In(parentDir);
-		var head = await source.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-		if (head.ExitCode != 0 || head.Output.Trim().Length == 0)
-		{
-			throw new GitException($"Component '{parent.Name}' has no main branch to fork.");
-		}
-
-		var branch = head.Output.Trim();
-		var target = invocation.Get("ref") ?? branch;
-		var resolved = await source.RunAsync(["rev-parse", "--verify", "--quiet", $"{target}^{{commit}}"]);
-		if (resolved.ExitCode != 0)
-		{
-			throw new GitException($"'{target}' does not name a commit in component '{parent.Name}'.");
-		}
-
-		var commit = resolved.Output.Trim();
-		var onMain = await source.RunAsync(["merge-base", "--is-ancestor", commit, $"refs/heads/{branch}"]);
-		if (onMain.ExitCode != 0)
-		{
-			throw new GitException($"'{target}' ({commit[..10]}) is not on the main branch '{branch}' of component '{parent.Name}'.");
-		}
-
-		var tags = (await source.RunOrThrowAsync(["tag", "--merged", commit, "--format=%(refname:strip=2)"]))
-			.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-			.Where(tag => !ForeignTagPrefixes.Any(prefix => tag.StartsWith(prefix, StringComparison.Ordinal)))
-			.ToList();
-
-		string meta;
-		try
-		{
-			var clone = await new GitClient(monorepo.Root).RunAsync(
-				["clone", "--bare", "--single-branch", "--no-tags", "--branch", branch, parentDir, Path.Combine(forkDir, ".git")]);
-			if (clone.ExitCode != 0)
-			{
-				throw new GitException($"git clone failed: {clone.Error.Trim()}");
-			}
-
-			var fork = GitClient.In(forkDir);
-			if (tags.Count > 0)
-			{
-				await fork.RunOrThrowAsync(["fetch", "--quiet", "--no-tags", "origin", .. tags.Select(tag => $"+refs/tags/{tag}:refs/tags/{tag}")]);
-			}
-
-			await fork.RunOrThrowAsync(["remote", "remove", "origin"]);
-			if (url.Length > 0)
-			{
-				await fork.RunOrThrowAsync(["remote", "add", "origin", url]);
-			}
-
-			var tip = await fork.RunOrThrowAsync(["rev-parse", $"refs/heads/{branch}"]);
-			if (tip != commit)
-			{
-				// Fork before the head: drop the later commits, which only the clone brought along.
-				await fork.RunOrThrowAsync(["update-ref", $"refs/heads/{branch}", commit]);
-				await fork.RunOrThrowAsync(["reflog", "expire", "--expire=now", "--all"]);
-				await fork.RunOrThrowAsync(["gc", "--quiet", "--prune=now"]);
-			}
-
-			ComponentsFile.Add(monorepo.Root, name, url, references, parent.Name, commit);
-			meta = await MonorepoCommands.CommitMetaRepoAsync(monorepo.Root, $"Fork component '{parent.Name}' as '{name}' at {commit[..10]}") ?? "";
-		}
-		catch
-		{
-			if (Directory.Exists(forkDir))
-			{
-				DeleteDirectory(forkDir);
-			}
-
-			throw;
-		}
+		RequireRepo(monorepo, parent.Name);
+		var fork = await monorepo.Graph().ForkAsync(parent.Name, name, invocation.Get("ref"), references, url);
+		var (commit, branch, forkDir, tags, meta) = (fork.Commit, fork.Branch, fork.Location, fork.Tags, fork.Revision ?? "");
+		references = fork.Component.References;
 
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Forked '{parent.Name}' as '{name}' at {commit[..10]} on '{branch}'; select it for a run with -select {name}@<tag> after tagging a baseline with 'bassia component tag -name {name} -tag <tag>'.",
@@ -412,7 +285,7 @@ internal static class ComponentCommands
 		switch (format)
 		{
 			case "board":
-				var runs = await new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir).ListLatestAsync();
+				var runs = await monorepo.RunRecords().ListLatestAsync();
 				var statuses = (await ComponentStatus.ReadAllAsync(monorepo, runs)).Where(status => components.Contains(status.Definition)).ToList();
 				rendered = new ComponentBoard(statuses, graph, invocation.Int("width", 100, 30, 1000)).RenderAscii(LiveRunsPerComponent(monorepo, runs));
 				break;
@@ -464,17 +337,6 @@ internal static class ComponentCommands
 		return Directory.Exists(sourceDir) ? sourceDir : throw new MonorepoException($"Component '{name}' has no repository at '{sourceDir}'.");
 	}
 
-	/// <summary>Deletes a folder tree, including the read-only pack files git leaves behind.</summary>
-	private static void DeleteDirectory(string directory)
-	{
-		foreach (var file in Directory.EnumerateFiles(directory, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
-		{
-			File.SetAttributes(file, FileAttributes.Normal);
-		}
-
-		Directory.Delete(directory, recursive: true);
-	}
-
 	/// <summary>How many live runs work on each component: recorded runs still <c>started</c> whose process is alive.</summary>
 	internal static IReadOnlyDictionary<string, int> LiveRunsPerComponent(Monorepo monorepo, IReadOnlyList<RunMetadata> runs)
 	{
@@ -492,8 +354,7 @@ internal static class ComponentCommands
 	}
 
 	/// <summary><c>lib</c>, or <c>lib:vendor/lib</c> when it is nested at another path - the form <c>-references</c> takes.</summary>
-	internal static string Describe(ComponentReference reference) =>
-		reference.Path == reference.Name ? reference.Name : $"{reference.Name}:{reference.Path}";
+	internal static string Describe(ComponentReference reference) => MonorepoGraph.Describe(reference);
 
 	private static string Join(IEnumerable<string> values)
 	{
