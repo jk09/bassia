@@ -20,11 +20,15 @@ terminal. Every result passes through `ProgramCli.WriteResult`, so one renderer 
 - [ ] `-human` (or `--human`, case-insensitive) is accepted by every command, with or without `-help`, wherever a
       switch may appear, and is not listed as a switch of any command. Without it, output is byte-for-byte what it
       was (TOML).
-- [ ] With `-human`, a result prints no `# bassia result` marker and no TOML syntax: the message (or `error: <message>`
-      for a failure), then the data as `key: value` lines, string lists as bullets, nested tables as indented
-      sections, and lists of entries as an ASCII table of their scalar columns.
-- [ ] Multi-line text results (graphs, trees, tables) are printed as drawn, with no quoting. When a result has its own
-      `table` text, that table stands for the entry lists, which are not repeated.
+- [ ] With `-human`, a result prints no `# bassia result` marker and no TOML syntax, but Markdown: the message (or
+      `**error:** <message>` for a failure), then the plain data as `- **key:** value` bullets, and a `##` section for
+      each string list (bullets), nested table (nested bullets), list of entries (a Markdown table of their scalar
+      columns, or nested bullets when a cell is too long) and multi-line text. Text that Markdown would take for markup
+      (`<path>`, `[x]`, `*`, `|`) is backslash-escaped, so it renders as written.
+- [ ] Multi-line text results (graphs, trees, tables) are printed as drawn inside fenced code blocks. When a result has
+      its own `table` text, that table stands for the entry lists, which are not repeated.
+- [ ] `docs/reference.md` advises how to pipe `-human` output to a Markdown reader in a console (`glow`, `mdcat`,
+      `bat`, `pandoc`, PowerShell `Show-Markdown`).
 - [ ] `-human` changes only the format: exit codes and the stdout/stderr split are the same, and usage errors
       (`bassia nosuch -human`) are rendered the same way.
 - [ ] `bassia -help -human`, `bassia <command> -help -human` and `bassia <group> -help -human` print readable help:
@@ -44,8 +48,9 @@ the TOML or human rendering. Since help, errors and command results all go throu
 
 - **`-human` applies to every command**, not only help: the request pairs it with `-help` but defines it as the
   alternative to the default TOML output.
-- **Plain text, not markdown or colour**: it must read the same in a terminal, a log and a pipe.
-- **Entry lists render as ASCII tables of their scalar columns**; nested values inside an entry are summarized, and
+- **Markdown, not colour** (changed from plain text on request): it still reads as text in a terminal, a log and a
+  pipe, and renders in any Markdown reader. It applies to all `-human` output, not only help, so there is one format.
+- **Entry lists render as Markdown tables of their scalar columns**; nested values inside an entry are summarized, and
   the TOML output remains the complete form.
 - **A result's own `table` replaces its entry lists** in human mode, because the TOML result already carries both
   forms of the same data (e.g. `component list`).
@@ -56,7 +61,8 @@ the TOML or human rendering. Since help, errors and command results all go throu
 - [x] Specification.
 - [x] `HumanOutput` renderer and `-human` plumbing.
 - [x] Tests and documentation.
-- [ ] Build and test run (no .NET SDK was available when this was written; see Validation).
+- [x] Markdown output instead of plain text, with piping advice in `docs/reference.md`.
+- [ ] Build and test run (no .NET SDK was available in the session that wrote the Markdown change; CI runs `dotnet test`).
 
 ## Validation
 
