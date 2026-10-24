@@ -130,7 +130,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           cd dist
-          cat *.sha256 > SHA256SUMS
+          # One line per package, whatever line ending (or none) each .sha256 file has.
+          for f in *.sha256; do tr -d '\r\n' < "$f"; echo; done > SHA256SUMS
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Bassia $TAG" --generate-notes $prerelease \
