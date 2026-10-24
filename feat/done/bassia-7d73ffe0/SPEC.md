@@ -17,26 +17,26 @@ terminal. Every result passes through `ProgramCli.WriteResult`, so one renderer 
 
 ## Acceptance criteria
 
-- [ ] `-human` (or `--human`, case-insensitive) is accepted by every command, with or without `-help`, wherever a
+- [x] `-human` (or `--human`, case-insensitive) is accepted by every command, with or without `-help`, wherever a
       switch may appear, and is not listed as a switch of any command. Without it, output is byte-for-byte what it
       was (TOML).
-- [ ] With `-human`, a result prints no `# bassia result` marker and no TOML syntax, but Markdown: the message (or
+- [x] With `-human`, a result prints no `# bassia result` marker and no TOML syntax, but Markdown: the message (or
       `**error:** <message>` for a failure), then the plain data as `- **key:** value` bullets, and a `##` section for
       each string list (bullets), nested table (nested bullets), list of entries (a Markdown table of their scalar
       columns, or nested bullets when a cell is too long) and multi-line text. Text that Markdown would take for markup
       (`<path>`, `[x]`, `*`, `|`) is backslash-escaped, so it renders as written.
-- [ ] Multi-line text results (graphs, trees, tables) are printed as drawn inside fenced code blocks. When a result has
+- [x] Multi-line text results (graphs, trees, tables) are printed as drawn inside fenced code blocks. When a result has
       its own `table` text, that table stands for the entry lists, which are not repeated.
-- [ ] `docs/reference.md` advises how to pipe `-human` output to a Markdown reader in a console (`glow`, `mdcat`,
+- [x] `docs/reference.md` advises how to pipe `-human` output to a Markdown reader in a console (`glow`, `mdcat`,
       `bat`, `pandoc`, PowerShell `Show-Markdown`).
-- [ ] `-human` changes only the format: exit codes and the stdout/stderr split are the same, and usage errors
+- [x] `-human` changes only the format: exit codes and the stdout/stderr split are the same, and usage errors
       (`bassia nosuch -human`) are rendered the same way.
-- [ ] `bassia -help -human`, `bassia <command> -help -human` and `bassia <group> -help -human` print readable help:
+- [x] `bassia -help -human`, `bassia <command> -help -human` and `bassia <group> -help -human` print readable help:
       usage, summary, switches with their descriptions and examples.
-- [ ] `bassia <command>` with a missing required switch reports which one (and the usage) in both formats.
-- [ ] `-human` after a rest-of-line switch (`-run`, `-resolve`, the ask of `prompt`) belongs to that command line and
+- [x] `bassia <command>` with a missing required switch reports which one (and the usage) in both formats.
+- [x] `-human` after a rest-of-line switch (`-run`, `-resolve`, the ask of `prompt`) belongs to that command line and
       is not consumed.
-- [ ] Unit tests cover the renderer and the CLI surface, and `docs/reference.md` documents `-human`.
+- [x] Unit tests cover the renderer and the CLI surface, and `docs/reference.md` documents `-human`.
 
 ## Approach
 
@@ -62,7 +62,7 @@ the TOML or human rendering. Since help, errors and command results all go throu
 - [x] `HumanOutput` renderer and `-human` plumbing.
 - [x] Tests and documentation.
 - [x] Markdown output instead of plain text, with piping advice in `docs/reference.md`.
-- [ ] Build and test run (no .NET SDK was available in the session that wrote the Markdown change; CI runs `dotnet test`).
+- [x] Build and test run (CI `Test` job passed on #36).
 
 ## Validation
 
