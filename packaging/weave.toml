@@ -1,0 +1,13 @@
+# The weave release bundled into the Bassia packages (its weave-driver, the structural merge driver Bassia uses by
+# default). Get-Weave.ps1 downloads the asset of a target from weave's GitHub release and refuses it unless its SHA-256
+# matches the one pinned here. To move to another weave release, update the version and every checksum from that
+# release's checksums.txt (https://github.com/Ataraxy-Labs/weave/releases), then check that the licenses under
+# third-party/weave still match.
+version = "0.6.1"
+
+[sha256]
+x86_64-unknown-linux-gnu = "6f860c6806bd520e05d3cbfac80b10afbf12f939d6ff61abe3dfefed6c44064b"
+aarch64-unknown-linux-gnu = "e7e854cbeb87f035f93aaa3146f76cdeea0dd1ad7ae84d2234c9ce9d3b16ced4"
+x86_64-apple-darwin = "73b3640aa8fa8fd3a067f08f1c4b082c7682a09bfc3ee106ef64f6a0db870566"
+aarch64-apple-darwin = "42b791a43051864b7b592d551fea242348e19e4a0d7c75088493298bc5ef4d96"
+x86_64-pc-windows-msvc = "afe52503c9cc5600df31dd73aca0995b8c9de78b744106ae81495f6c96da3af0"

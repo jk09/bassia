@@ -179,6 +179,11 @@ Your repositories don't need to change to join a Bassia monorepo:
 Bassia needs the [.NET SDK 10](https://dotnet.microsoft.com/download) and git 2.38 or later. It is developed on
 Windows and tested on Linux.
 
+**From a release package**: download the package for your platform (`win-x64`, `linux-x64`, `linux-arm64`,
+`osx-x64`, `osx-arm64`) from the [releases](https://github.com/jk09/bassia/releases) or from a CI run's artifacts,
+unpack it and run `install.sh` (`install.cmd` on Windows). It needs only the .NET 10 runtime (with ASP.NET Core) and
+git, which it checks first, and brings weave along. See [packaging/README.md](packaging/README.md).
+
 **With Claude Code**: clone this repository and run `/bassia-install` (or `/bassia-install main` for the latest
 code). It builds the newest release tag, or the branch or commit you name, and installs it for your user, side by
 side with other versions; `/bassia-use` switches between them. No administrator rights are needed.
