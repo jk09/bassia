@@ -17,28 +17,28 @@ with checksums. The CLI targets .NET 10 and references the ASP.NET Core shared f
 
 ## Acceptance criteria
 
-- [ ] A CI workflow runs on pushes to `main`, pull requests, `v*` tags and on demand. It builds and runs the test
+- [x] A CI workflow runs on pushes to `main`, pull requests, `v*` tags and on demand. It builds and runs the test
       suite, and builds one package per platform: `win-x64` (zip), `linux-x64`, `linux-arm64`, `osx-x64`,
       `osx-arm64` (tar.gz), each with a `.sha256` file, uploaded as artifacts.
-- [ ] A package contains the CLI published framework-dependent for its platform, stamped with its version
+- [x] A package contains the CLI published framework-dependent for its platform, stamped with its version
       (`bassia version`), weave's `weave-driver` for the same platform, the installer(s), the version manager and its
       templates, a README with install instructions, Bassia's license and weave's licenses.
-- [ ] The bundled weave release is pinned (version and per-target SHA-256) in the repository; a download that does not
+- [x] The bundled weave release is pinned (version and per-target SHA-256) in the repository; a download that does not
       match is refused and fails the build.
-- [ ] The installer (`install.sh` on Linux/macOS, `install.ps1`/`install.cmd` on Windows) first verifies git, the .NET
+- [x] The installer (`install.sh` on Linux/macOS, `install.ps1`/`install.cmd` on Windows) first verifies git, the .NET
       and ASP.NET Core runtimes of the required major version, and that the package matches the machine's platform. If
       any is missing it names it, prints a per-user install hint, and installs nothing. `--check`/`-Check` only verifies.
-- [ ] The installer installs without elevation into the same side-by-side layout as `scripts/bassia-versions.ps1`
+- [x] The installer installs without elevation into the same side-by-side layout as `scripts/bassia-versions.ps1`
       (`<root>/versions/<id>`, `current`, activation scripts, PATH registration), smoke-tests `bassia version` and
       `weave-driver --version` before moving the version into place, and supports `--root`, `--no-use`,
       `--no-modify-path`, `--force`. `bassia-versions.ps1 list | use | uninstall` work on such installs, and
       `install.sh --uninstall <id>|all` removes them without PowerShell.
-- [ ] An installed Bassia uses the bundled `weave-driver` even when it is not on `PATH`; a `weave-driver` on `PATH` or
+- [x] An installed Bassia uses the bundled `weave-driver` even when it is not on `PATH`; a `weave-driver` on `PATH` or
       a configured driver still takes precedence.
-- [ ] Each package is installed and exercised on a runner of its own platform before upload: refusal without
+- [x] Each package is installed and exercised on a runner of its own platform before upload: refusal without
       runtimes, install, `bassia version`, `weave-driver --version`, a monorepo whose integration triage picks up the
       bundled weave, the version manager's list, and uninstall.
-- [ ] A `v<semver>` tag publishes the packages and a `SHA256SUMS` file as a GitHub release (a pre-release for a
+- [x] A `v<semver>` tag publishes the packages and a `SHA256SUMS` file as a GitHub release (a pre-release for a
       pre-release tag).
 
 ## Approach
@@ -76,7 +76,7 @@ CI runs. `.github/workflows/ci.yml` wires it together.
 - [x] Packaging, installers, weave pinning, bundled-driver fallback and CI workflow.
 - [x] Local validation on linux-x64: full test suite, package build, `Test-BassiaPackage.ps1`, `install -Package` via
       PowerShell, source install via `bassia-versions.ps1` after the template refactor.
-- [ ] CI green on every platform.
+- [x] CI green on every platform.
 
 ## Validation
 
