@@ -2,7 +2,7 @@ using Bassia.Cli;
 
 namespace Bassia.Tests;
 
-/// <summary><c>-human</c>: the same results printed for a person instead of as TOML.</summary>
+/// <summary><c>-human</c>: the same results printed as Markdown for a person instead of as TOML.</summary>
 public class HumanOutputTests
 {
 	[Fact]
@@ -20,7 +20,7 @@ public class HumanOutputTests
 			["nested"] = new Dictionary<string, object?> { ["inner"] = "x" }
 		});
 
-		Assert.Equal("All good.\ncount: 3\nflag: true\ntags:\n  - a\n  - b\nnested:\n  inner: x", text);
+		Assert.Equal("All good.\n\n- **count:** 3\n- **flag:** true\n\n## tags\n\n- a\n- b\n\n## nested\n\n- **inner:** x", text);
 	}
 
 	[Fact]
@@ -28,7 +28,7 @@ public class HumanOutputTests
 	{
 		var text = HumanOutput.Render(new Dictionary<string, object?> { ["ok"] = false, ["command"] = "demo", ["error"] = "It broke." });
 
-		Assert.Equal("error: It broke.", text);
+		Assert.Equal("**error:** It broke.", text);
 	}
 
 	[Fact]
@@ -45,8 +45,8 @@ public class HumanOutputTests
 			["entry"] = new List<Dictionary<string, object?>> { new() { ["name"] = "-url", ["description"] = new string('d', 80) } }
 		});
 
-		Assert.Equal("m\nentry:\n  name  runs\n  ----  ----\n  app   2\n  lib   0", shortEntries);
-		Assert.Equal($"m\nentry:\n  - name: -url\n    description: {new string('d', 80)}", longEntries);
+		Assert.Equal("m\n\n## entry\n\n| name | runs |\n| --- | --- |\n| app | 2 |\n| lib | 0 |", shortEntries);
+		Assert.Equal($"m\n\n## entry\n\n- **name:** -url\n  - **description:** {new string('d', 80)}", longEntries);
 	}
 
 	[Fact]
@@ -59,12 +59,26 @@ public class HumanOutputTests
 			["component"] = new List<Dictionary<string, object?>> { new() { ["name"] = "app" } }
 		});
 
-		Assert.Equal("m\n\nA  B\n-  -\n1  2", text);
+		Assert.Equal("m\n\n```\nA  B\n-  -\n1  2\n```", text);
 		Assert.DoesNotContain("component", text);
 	}
 
 	[Fact]
-	public async Task Human_PrintsPlainTextWithoutTheMarkerAndKeepsTheExitCode()
+	public void Render_EscapesWhatMarkdownWouldTakeForMarkup()
+	{
+		var text = HumanOutput.Render(new Dictionary<string, object?>
+		{
+			["message"] = "m",
+			["usage"] = "bassia <command> [-x] a|b *",
+			["rest_of_line"] = "_x_ and a_b",
+			["drawn"] = "one ``` two\nthree"
+		});
+
+		Assert.Equal("m\n\n- **usage:** bassia \\<command\\> \\[-x\\] a\\|b \\*\n- **rest_of_line:** \\_x\\_ and a_b\n\n## drawn\n\n````\none ``` two\nthree\n````", text);
+	}
+
+	[Fact]
+	public async Task Human_PrintsMarkdownWithoutTheMarkerAndKeepsTheExitCode()
 	{
 		var (exitCode, output, error) = await TestEnvironment.RunAsync("version", "-human");
 
@@ -108,9 +122,9 @@ public class HumanOutputTests
 
 		Assert.Equal(2, missingExit);
 		Assert.Empty(missingOut);
-		Assert.StartsWith("error: -url is required.", missingError);
+		Assert.StartsWith("**error:** -url is required.", missingError);
 		Assert.Contains("Usage: bassia component add", missingError);
 		Assert.Equal(2, unknownExit);
-		Assert.StartsWith("error: Unknown command 'nosuch'", unknownError);
+		Assert.StartsWith("**error:** Unknown command 'nosuch'", unknownError);
 	}
 }

@@ -18,7 +18,7 @@ internal static class Help
 		"  bassia tutorial             guided setup of a monorepo, or options for the one you are in\n" +
 		"  bassia prompt <ask>         say what you want in plain English\n" +
 		"\n" +
-		"Every command prints its result as TOML; add -human to read it as text.";
+		"Every command prints its result as TOML; add -human to read it as Markdown.";
 
 	public static Task<int> RunAsync(Invocation invocation) =>
 		Task.FromResult(Show((invocation.Get("command") ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries)));

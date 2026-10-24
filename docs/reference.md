@@ -99,9 +99,22 @@ At any question, `?` explains the step, and `? <question>` asks the LLM of `bass
 its usage, every switch and examples. Help is TOML too.
 
 Results are TOML by default. Add `-human` to any command (`bassia -help -human`, `bassia component -help -human`,
-`bassia status -human`) to print it for a person instead: the message (or `error: ...`), `key: value` lines, bullets
-for lists and an ASCII table for lists of entries, without the `# bassia result` marker. Only the format changes; the
-exit codes and the stdout/stderr split are the same. `-human` after a rest-of-line switch belongs to that command line.
+`bassia status -human`) to print it for a person instead, as Markdown: the message (or `**error:** ...`), `- **key:** value`
+bullets, a heading per list or nested table, a table for lists of entries and fenced code blocks for drawn text
+(graphs, trees), without the `# bassia result` marker. Only the format changes; the exit codes and the stdout/stderr
+split are the same. `-human` after a rest-of-line switch belongs to that command line.
+
+The Markdown reads fine as it is; to render it in the terminal, pipe it to a Markdown reader:
+
+```
+bassia component -help -human | glow -                    # glow: https://github.com/charmbracelet/glow
+bassia status -human | mdcat                              # mdcat
+bassia help -human | bat -l md                            # bat: syntax highlighting only
+bassia help -human | pandoc -f gfm -t plain | less        # pandoc: plain text, paged
+bassia help -human | Out-String | Show-Markdown           # PowerShell 7: built-in, renders ANSI
+```
+
+Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stderr, so use `2>&1 |` to render it too.
 
 | Area | Commands |
 | --- | --- |
