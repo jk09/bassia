@@ -100,7 +100,7 @@ internal sealed class JobRegistry(Monorepo monorepo)
 		try
 		{
 			using var process = Process.GetProcessById(pid);
-			return !process.HasExited && Stamp(process.StartTime) == processStart;
+			return !process.HasExited && SameStart(process.StartTime, processStart);
 		}
 		catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
 		{
@@ -136,7 +136,7 @@ internal sealed class JobRegistry(Monorepo monorepo)
 		try
 		{
 			using var process = Process.GetProcessById(job.Pid);
-			if (Stamp(process.StartTime) == job.ProcessStart)
+			if (SameStart(process.StartTime, job.ProcessStart))
 			{
 				process.Kill(entireProcessTree: true);
 				process.WaitForExit(10_000);
@@ -181,6 +181,20 @@ internal sealed class JobRegistry(Monorepo monorepo)
 	/// <summary>A process start time, to the second, as recorded and compared.</summary>
 	private static string Stamp(DateTime startTime) =>
 		startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+
+	/// <summary>How far two readings of one process's start time may differ and still name the same process.</summary>
+	internal static readonly TimeSpan StartTolerance = TimeSpan.FromSeconds(2);
+
+	/// <summary>
+	/// Whether a process that started at <paramref name="startTime"/> is the one recorded as <paramref name="processStart"/>.
+	/// Not an equality of stamps: on Linux each process derives a start time from the clock and the uptime, so two
+	/// processes read the same start a few milliseconds apart, and near a second boundary their stamps differ. A
+	/// recycled process id that also started within the tolerance is not a realistic case.
+	/// </summary>
+	internal static bool SameStart(DateTime startTime, string processStart) =>
+		DateTime.TryParseExact(processStart, "yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture,
+			DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var recorded)
+		&& (startTime.ToUniversalTime() - recorded).Duration() <= StartTolerance;
 }
 
 /// <summary>The current process's registration as a job: its stop signal, and its removal when disposed.</summary>
