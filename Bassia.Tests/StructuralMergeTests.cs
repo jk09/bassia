@@ -232,6 +232,32 @@ public class StructuralMergeTests
 		Assert.Equal(executable, StructuralMerge.Executable(command));
 
 	[Fact]
+	public void Bundled_ResolvesABareDriverMissingFromPathToTheCopyNextToBassia()
+	{
+		var directory = Directory.CreateTempSubdirectory("bassia-bundled-").FullName;
+		try
+		{
+			var name = "no-such-weave-driver-8c41d0";
+			Assert.Equal(name + " --audit", StructuralMerge.Bundled(name + " --audit", directory));
+
+			var file = Path.Combine(directory, OperatingSystem.IsWindows() ? name + ".exe" : name);
+			File.WriteAllText(file, "");
+			var bundled = "\"" + file.Replace('\\', '/') + "\"";
+			Assert.Equal(bundled, StructuralMerge.Bundled(name, directory));
+			Assert.Equal(bundled + " --audit %O %A %B", StructuralMerge.Bundled($"\"{name}\" --audit %O %A %B", directory));
+			Assert.Equal(file, StructuralMerge.Executable(StructuralMerge.Bundled(name, directory)).Replace('/', Path.DirectorySeparatorChar));
+
+			// A path, or a driver that is on PATH, is the user's choice and stays as configured.
+			Assert.Equal("/opt/weave/" + name, StructuralMerge.Bundled("/opt/weave/" + name, directory));
+			Assert.Equal("git merge-file %A %O %B", StructuralMerge.Bundled("git merge-file %A %O %B", directory));
+		}
+		finally
+		{
+			Directory.Delete(directory, true);
+		}
+	}
+
+	[Fact]
 	public void Warnings_AreTheWeaveWarningPayloadsOfStderr() =>
 		Assert.Equal(["{\"a\":1}", "{\"b\":2}"],
 			StructuralMerge.Warnings("weave: 2 entities auto-resolved\nweave-warning: {\"a\":1}\r\nAuto-merging x\nweave-warning: {\"b\":2}\nweave-warning: {\"a\":1}\n"));

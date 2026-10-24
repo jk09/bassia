@@ -79,6 +79,7 @@ internal sealed class StructuralMerge
 			return (null, Off);
 		}
 
+		command = Bundled(command, AppContext.BaseDirectory);
 		if (!IsInstalled(command))
 		{
 			return (null, $"unavailable: '{Executable(command)}' was not found; install weave (https://github.com/Ataraxy-Labs/weave) " +
@@ -123,6 +124,31 @@ internal sealed class StructuralMerge
 
 		var space = command.IndexOfAny([' ', '\t']);
 		return space < 0 ? command : command[..space];
+	}
+
+	/// <summary>
+	/// The command with its executable resolved to the copy bundled next to Bassia (the release packages ship weave's
+	/// <c>weave-driver</c> there) when it is a bare name that is not on <c>PATH</c>; otherwise the command unchanged.
+	/// </summary>
+	internal static string Bundled(string command, string directory)
+	{
+		var executable = Executable(command);
+		if (executable.Length == 0 || executable.Contains('/') || executable.Contains('\\') || IsInstalled(command))
+		{
+			return command;
+		}
+
+		var name = OperatingSystem.IsWindows() && !Path.HasExtension(executable) ? executable + ".exe" : executable;
+		var bundled = Path.Combine(directory, name);
+		if (!File.Exists(bundled))
+		{
+			return command;
+		}
+
+		// Git runs the driver through sh, also on Windows, where forward slashes spare the path sh's backslash escapes.
+		var trimmed = command.Trim();
+		var rest = trimmed[Math.Min(trimmed.Length, trimmed[0] is '"' or '\'' ? executable.Length + 2 : executable.Length)..];
+		return $"\"{Path.GetFullPath(bundled).Replace('\\', '/')}\"{rest}";
 	}
 
 	/// <summary>Whether the command's executable exists: as a path, or on <c>PATH</c> (with <c>PATHEXT</c> on Windows).</summary>

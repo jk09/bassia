@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "Vbw4ZCQE5p4=",
+  "success": true,
+  "projectFilePath": "/home/user/bassia/Bassia/Bassia.csproj",
+  "expectedPackageFiles": [
+    "/root/.nuget/packages/tomlyn.signed/2.10.1/tomlyn.signed.2.10.1.nupkg.sha512"
+  ],
+  "logs": []
+}

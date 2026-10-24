@@ -561,7 +561,7 @@ The integration's record (`integration.toml`: runs, resolver, structural driver,
 
 Parallel agentic runs often add or change *different* functions, methods or keys of the *same* file. Git's line merge reports that as a conflict when the hunks touch, although nothing collides, and the integration would hand it to the LLM resolver. [weave](https://github.com/Ataraxy-Labs/weave) merges such files by entity instead of by line: it parses base, ours and theirs with tree-sitter (38 languages, plus JSON, YAML, TOML, Markdown and more), merges independent entities cleanly and only conflicts when both sides changed the same entity incompatibly. Like git's merge it is deterministic, so a result weave merges cleanly is a `structural` step that never reaches the resolver.
 
-- Install weave's `weave-driver` (`brew install weave`, or `cargo install --path crates/weave-driver` from a clone of the repository) and put it on `PATH`. Bassia uses it when it is found; otherwise the integration behaves exactly as without it, and `integration plan` reports `structural_merge = "unavailable: ..."`. Name another driver with `bassia config set integration.weave <command>` or `-weave <command>`; `off` disables it.
+- The release packages bundle weave's `weave-driver` next to `bassia`, which uses that copy when no `weave-driver` is on `PATH`. Otherwise install it (`brew install weave`, or `cargo install --path crates/weave-driver` from a clone of the repository) and put it on `PATH`. Bassia uses it when it is found; otherwise the integration behaves exactly as without it, and `integration plan` reports `structural_merge = "unavailable: ..."`. Name another driver with `bassia config set integration.weave <command>` or `-weave <command>`; `off` disables it.
 - Nothing in a component repo is changed: the driver and the attributes that assign it to weave's file types are passed to git with `-c` for each command, and the attributes file lives in the workspace (`.workspace/.structural-merge.gitattributes`). A component's own `.gitattributes` still takes precedence; the `-c core.attributesFile` replaces a user-wide attributes file for these merges only.
 - A merge weave completes with warnings (`weave-warning:` on its stderr, e.g. an entity depends on another entity the other side changed, or the merged file no longer parses) goes to the resolver for review, with the warnings in its brief.
 - What weave still conflicts on goes to the resolver as before, but the resolver starts from weave's entity-labelled conflicts (``<<<<<<< ours — function `process` ...`` with a `refused_by:` line) instead of git's.
@@ -688,6 +688,17 @@ dashboard through DNS rebinding.
 dotnet build
 dotnet run --project Bassia -- help           # or put the built Bassia executable (or bassia.cmd) on PATH
 ```
+
+### Packages
+
+CI (`.github/workflows/ci.yml`) builds an installable package per platform (`win-x64`, `linux-x64`, `linux-arm64`,
+`osx-x64`, `osx-arm64`) on every push and pull request: the CLI published framework-dependent, weave's `weave-driver`
+pinned by checksum in `packaging/weave.toml`, `install.sh` or `install.ps1`/`install.cmd`, and the version manager. It
+installs each package on its own platform with `packaging/Test-BassiaPackage.ps1` (the installer refuses a machine
+without the .NET runtimes, installs, and the installed `bassia` merges with the bundled weave), uploads the packages as
+artifacts, and publishes them as a GitHub release when a `v<semver>` tag is pushed. The installers check git and the
+.NET and ASP.NET Core runtimes first, then install into the same side-by-side layout as `scripts/bassia-versions.ps1`.
+Build one locally with `./packaging/New-BassiaPackage.ps1 -Rid <rid>`; see [packaging/README.md](../packaging/README.md).
 
 ## Test
 

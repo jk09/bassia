@@ -25,6 +25,7 @@
 	./scripts/bassia-versions.ps1 install                    # latest v<semver> release tag, Release build, made the default
 	./scripts/bassia-versions.ps1 install v0.2.0 -Configuration Debug -NoUse
 	./scripts/bassia-versions.ps1 install main               # an untagged build of a branch or commit
+	./scripts/bassia-versions.ps1 install -Package ./bassia-v1.2.0-win-x64   # an unpacked release package (install.ps1)
 	./scripts/bassia-versions.ps1 list
 	./scripts/bassia-versions.ps1 use v0.1.0
 	./scripts/bassia-versions.ps1 uninstall v0.1.0
@@ -71,7 +72,11 @@ param(
 	[string] $Source,
 
 	# The install root; defaults to $env:BASSIA_HOME or the per-user location above.
-	[string] $Root
+	[string] $Root,
+
+	# install/check: install the prebuilt release package unpacked in this folder (its package.toml and bassia/, see
+	# packaging/README.md) instead of building from source. It needs the .NET runtime and git, not the SDK.
+	[string] $Package
 )
 
 Set-StrictMode -Version 3
@@ -314,6 +319,93 @@ function Write-Requirement($Check) {
 	else { Write-Step "missing: a .NET SDK >= $($Check.Required.Minimum). $($Check.Hint)" }
 }
 
+# ----- release packages --------------------------------------------------------------------------------------------
+
+# The runtime identifier of this machine, as the release packages are named (win-x64, linux-arm64, osx-arm64, ...).
+function Get-HostRid {
+	$os = if ($script:OnWindows) { 'win' } elseif ($IsMacOS) { 'osx' } else { 'linux' }
+	$arch = try { "$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)".ToLowerInvariant() }
+	catch { if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' } }
+	"$os-$arch"
+}
+
+function Read-Package([string] $Directory) {
+	$Directory = [IO.Path]::GetFullPath($Directory)
+	$manifest = Read-FlatToml (Join-Path $Directory 'package.toml')
+	foreach ($key in 'id', 'version', 'commit', 'rid', 'dotnet') {
+		if (-not $manifest[$key]) { throw "'$Directory' is not an unpacked Bassia release package: package.toml has no '$key'." }
+	}
+	if (-not (Test-VersionId $manifest['id'])) { throw "The package's id '$($manifest['id'])' is not a usable version id." }
+	$payload = Join-Path $Directory 'bassia'
+	if (-not (Test-Path -LiteralPath (Get-BassiaExecutable $payload))) { throw "The package in '$Directory' has no bassia/$(Split-Path -Leaf (Get-BassiaExecutable $payload))." }
+	[pscustomobject]@{
+		Directory = $Directory
+		Payload   = $payload
+		Id        = $manifest['id']
+		Version   = $manifest['version']
+		Ref       = $manifest['ref']
+		Commit    = $manifest['commit']
+		Rid       = $manifest['rid']
+		Dotnet    = $manifest['dotnet']
+		Weave     = $manifest['weave']
+	}
+}
+
+# The shared frameworks `dotnet --list-runtimes` reports, by name.
+function Get-InstalledRuntimes {
+	if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { return @() }
+	$list = Invoke-Native -FilePath 'dotnet' -Arguments @('--list-runtimes') -AllowFailure
+	@($list.Output | ForEach-Object {
+			if ($_ -match '^(\S+)\s+(\S+)\s+\[(.+)\]$') {
+				[pscustomobject]@{ Name = $Matches[1]; Text = $Matches[2]; Version = ConvertTo-SdkVersion $Matches[2] }
+			}
+		} | Where-Object { $_ -and $_.Version })
+}
+
+# A framework-dependent package runs on the .NET and ASP.NET Core runtimes of its major version, at or above its minor
+# (the default roll-forward), and needs git.
+function Test-PackageRequirement($Pkg) {
+	$required = [version] "$($Pkg.Dotnet).0"
+	$runtimes = @(Get-InstalledRuntimes)
+	$missing = @()
+	$found = @()
+	foreach ($name in 'Microsoft.NETCore.App', 'Microsoft.AspNetCore.App') {
+		$match = @($runtimes | Where-Object { $_.Name -eq $name -and $_.Version.Major -eq $required.Major -and $_.Version -ge $required } | Sort-Object Version -Descending)
+		if ($match.Count) { $found += "$name $($match[0].Text)" } else { $missing += "$name $($Pkg.Dotnet).x" }
+	}
+	$git = if (Get-Command git -ErrorAction SilentlyContinue) { (Invoke-Native -FilePath 'git' -Arguments @('--version')).Output[0] } else { $null }
+	$hostRid = Get-HostRid
+	$hint = if ($script:OnWindows) {
+		"Install it for the current user (no elevation): winget install --scope user Microsoft.DotNet.AspNetCore.$($required.Major), or & ([scriptblock]::Create((irm https://dot.net/v1/dotnet-install.ps1))) -Runtime aspnetcore -Channel $($Pkg.Dotnet) and add %LOCALAPPDATA%\Microsoft\dotnet to PATH."
+	}
+	else {
+		"Install it for the current user (no elevation): curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --runtime aspnetcore --channel $($Pkg.Dotnet) and add ~/.dotnet to PATH (and set DOTNET_ROOT=~/.dotnet); or use your package manager."
+	}
+	[pscustomobject]@{
+		Package   = $Pkg
+		Found     = $found
+		Missing   = $missing
+		Git       = $git
+		HostRid   = $hostRid
+		Satisfied = (-not $missing) -and $git -and ($hostRid -eq $Pkg.Rid)
+		Hint      = $hint
+	}
+}
+
+function Write-PackageRequirement($Check) {
+	$pkg = $Check.Package
+	Write-Step "package $($pkg.Id) ($($pkg.Version), $($pkg.Rid)$(if ($pkg.Weave) { ", weave $($pkg.Weave)" }))"
+	Write-Step "requires the .NET $($pkg.Dotnet) and ASP.NET Core $($pkg.Dotnet) runtimes, and git"
+	if ($Check.Git) { Write-Step "found:   $($Check.Git)" } else { Write-Step 'missing: git (https://git-scm.com/downloads)' }
+	foreach ($runtime in $Check.Found) { Write-Step "found:   $runtime" }
+	if ($Check.Missing) { Write-Step "missing: $($Check.Missing -join ', '). $($Check.Hint)" }
+	if ($Check.HostRid -ne $pkg.Rid) { Write-Step "missing: this machine is $($Check.HostRid); use the bassia-*-$($Check.HostRid) package instead" }
+	if ($Check.Satisfied) { Write-Step 'ok:      the package runs here' }
+	if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+		Write-Step "note:    'claude' (Claude Code) is not on PATH; it is the default agent and merge resolver (agent.command, merge.resolver)"
+	}
+}
+
 # ----- install root -------------------------------------------------------------------------------------------------
 
 function Get-VersionsDirectory { Join-Path $script:InstallRoot 'versions' }
@@ -348,11 +440,13 @@ function Set-DefaultVersion([string] $Id) {
 	$null = New-Item -ItemType $type -Path $link -Target $target
 }
 
-function Read-InstallRecord([string] $Directory) {
+function Read-InstallRecord([string] $Directory) { Read-FlatToml (Join-Path $Directory 'bassia-install.toml') }
+
+# The top-level keys of a flat TOML file of strings and scalars, as bassia-install.toml and package.toml are.
+function Read-FlatToml([string] $File) {
 	$record = [ordered]@{}
-	$file = Join-Path $Directory 'bassia-install.toml'
-	if (Test-Path -LiteralPath $file) {
-		foreach ($line in Get-Content -LiteralPath $file) {
+	if (Test-Path -LiteralPath $File) {
+		foreach ($line in Get-Content -LiteralPath $File) {
 			if ($line -match '^\s*([a-z_]+)\s*=\s*"(.*)"\s*$') { $record[$Matches[1]] = $Matches[2] -replace '\\(.)', '$1' }
 			elseif ($line -match '^\s*([a-z_]+)\s*=\s*(\S+)\s*$') { $record[$Matches[1]] = $Matches[2] }
 		}
@@ -388,99 +482,20 @@ function Get-BassiaExecutable([string] $Directory) {
 	Join-Path $Directory $name
 }
 
-# The activation scripts and (on Unix) env.sh, regenerated on every install so they follow this script's version.
+# The activation scripts and (on Unix) env.sh, regenerated from templates/ on every install so they follow this script's
+# version. The release packages' install.sh writes the same files from the same templates.
 function Write-RootScripts {
 	$root = $script:InstallRoot
-	$activatePs1 = @'
-# Use an installed Bassia version in this PowerShell session only; the default (<root>/current) stays as it is.
-# Usage: . <root>/activate.ps1 [<version>]   - without a version, the nearest .bassia-version file names it.
-# Undo with: bassia_deactivate
-param([string] $Version)
-
-if (-not $Version) {
-	$dir = (Get-Location).ProviderPath
-	while ($dir) {
-		$file = Join-Path $dir '.bassia-version'
-		if (Test-Path -LiteralPath $file -PathType Leaf) { $Version = (Get-Content -LiteralPath $file -TotalCount 1).Trim(); break }
-		$parent = Split-Path -Parent $dir
-		if ($parent -eq $dir) { break }
-		$dir = $parent
-	}
-}
-if (-not $Version) { Write-Error 'bassia: name a version, or add a .bassia-version file to this folder or a parent.'; return }
-$versionDir = Join-Path (Join-Path $PSScriptRoot 'versions') $Version
-if (-not (Test-Path -LiteralPath $versionDir -PathType Container)) {
-	$installed = (Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'versions') -Directory -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') } | ForEach-Object Name) -join ', '
-	Write-Error "bassia: version '$Version' is not installed. Installed: $installed"
-	return
-}
-if (Get-Command bassia_deactivate -ErrorAction SilentlyContinue) { bassia_deactivate }
-$global:_BASSIA_OLD_PATH = $env:PATH
-$env:PATH = $versionDir + [IO.Path]::PathSeparator + $env:PATH
-$env:BASSIA_VERSION = $Version
-function global:bassia_deactivate {
-	$env:PATH = $global:_BASSIA_OLD_PATH
-	Remove-Item Env:BASSIA_VERSION -ErrorAction SilentlyContinue
-	Remove-Variable -Name _BASSIA_OLD_PATH -Scope Global -ErrorAction SilentlyContinue
-	Remove-Item Function:bassia_deactivate -ErrorAction SilentlyContinue
-}
-Write-Host "bassia: using $Version in this session (bassia_deactivate to undo)"
-'@
-	Set-Content -LiteralPath (Join-Path $root 'activate.ps1') -Value $activatePs1 -Encoding utf8
+	$templates = Join-Path $PSScriptRoot 'templates'
+	Copy-Item -LiteralPath (Join-Path $templates 'activate.ps1') -Destination (Join-Path $root 'activate.ps1') -Force
 
 	if ($script:OnWindows) { return }
 
 	$quotedRoot = "'" + ($root -replace "'", "'\''") + "'"
-	$activateSh = @'
-# Use an installed Bassia version in this shell only (bash, zsh); the default (<root>/current) stays as it is.
-# Usage: . <root>/activate.sh [<version>]   - without a version, the nearest .bassia-version file names it.
-# Undo with: bassia_deactivate
-_bassia_root=__ROOT__
-_bassia_version="${1:-}"
-if [ -z "$_bassia_version" ]; then
-	_bassia_dir="$PWD"
-	while [ -n "$_bassia_dir" ]; do
-		if [ -f "$_bassia_dir/.bassia-version" ]; then
-			_bassia_version="$(head -n 1 "$_bassia_dir/.bassia-version" | tr -d ' \t\r')"
-			break
-		fi
-		if [ "$_bassia_dir" = "/" ]; then break; fi
-		_bassia_dir="$(dirname "$_bassia_dir")"
-	done
-	unset _bassia_dir
-fi
-if [ -z "$_bassia_version" ]; then
-	echo "bassia: name a version, or add a .bassia-version file to this folder or a parent." >&2
-elif [ ! -d "$_bassia_root/versions/$_bassia_version" ]; then
-	echo "bassia: version '$_bassia_version' is not installed. Installed: $(ls "$_bassia_root/versions" 2>/dev/null | tr '\n' ' ')" >&2
-else
-	if command -v bassia_deactivate >/dev/null 2>&1; then bassia_deactivate; fi
-	_BASSIA_OLD_PATH="$PATH"
-	PATH="$_bassia_root/versions/$_bassia_version:$PATH"
-	BASSIA_VERSION="$_bassia_version"
-	export PATH BASSIA_VERSION
-	bassia_deactivate() {
-		PATH="$_BASSIA_OLD_PATH"
-		export PATH
-		unset BASSIA_VERSION _BASSIA_OLD_PATH
-		unset -f bassia_deactivate
+	foreach ($name in 'activate.sh', 'env.sh') {
+		$text = [IO.File]::ReadAllText((Join-Path $templates $name))
+		Set-Content -LiteralPath (Join-Path $root $name) -Value ($text.Replace('__ROOT__', $quotedRoot) -replace "`r`n", "`n") -Encoding utf8 -NoNewline
 	}
-	echo "bassia: using $_bassia_version in this shell (bassia_deactivate to undo)"
-fi
-unset _bassia_root _bassia_version
-'@
-	Set-Content -LiteralPath (Join-Path $root 'activate.sh') -Value ($activateSh.Replace('__ROOT__', $quotedRoot) -replace "`r`n", "`n") -Encoding utf8 -NoNewline
-
-	$envSh = @'
-# Puts the default Bassia version on PATH. Sourced from the shell profiles by bassia-versions.ps1.
-BASSIA_HOME=__ROOT__
-export BASSIA_HOME
-case ":$PATH:" in
-	*":$BASSIA_HOME/current:"*) ;;
-	*) PATH="$BASSIA_HOME/current:$PATH"; export PATH ;;
-esac
-'@
-	Set-Content -LiteralPath (Join-Path $root 'env.sh') -Value ($envSh.Replace('__ROOT__', $quotedRoot) -replace "`r`n", "`n") -Encoding utf8 -NoNewline
 }
 
 # ----- PATH registration --------------------------------------------------------------------------------------------
@@ -550,6 +565,12 @@ function Unregister-Path {
 # ----- commands -----------------------------------------------------------------------------------------------------
 
 function Invoke-Check {
+	if ($Package) {
+		$check = Test-PackageRequirement (Read-Package $Package)
+		Write-PackageRequirement $check
+		if (-not $check.Satisfied) { exit 1 }
+		return
+	}
 	$script:SourceRepo = Get-SourceRepo
 	Update-Tags
 	$check = Test-Requirement (Resolve-Target $Version)
@@ -575,6 +596,7 @@ function Invoke-Available {
 }
 
 function Invoke-Install {
+	if ($Package) { Install-Package; return }
 	$script:SourceRepo = Get-SourceRepo
 	Update-Tags
 	$target = Resolve-Target $Version
@@ -649,16 +671,76 @@ function Invoke-Install {
 		}
 	}
 
+	Complete-Install $target.Id
+}
+
+# After a version is in versions/<id>: the root scripts, the default and the PATH registration.
+function Complete-Install([string] $Id) {
 	Write-RootScripts
 	$default = Get-DefaultVersion
-	if (-not $NoUse -or -not $default -or -not (Test-Path -LiteralPath (Join-Path $versions $default))) {
-		Set-DefaultVersion $target.Id
-		Write-Step "default version: $($target.Id)"
+	if (-not $NoUse -or -not $default -or -not (Test-Path -LiteralPath (Join-Path (Get-VersionsDirectory) $default))) {
+		Set-DefaultVersion $Id
+		Write-Step "default version: $Id"
 	}
 	else {
-		Write-Step "default version stays $default (bassia-versions.ps1 use $($target.Id) to switch)"
+		Write-Step "default version stays $default (bassia-versions.ps1 use $Id to switch)"
 	}
 	if (-not $NoModifyPath) { Register-Path }
+}
+
+# Installs a prebuilt release package: copied into a staging folder, smoke-tested, recorded, then moved into place.
+function Install-Package {
+	$pkg = Read-Package $Package
+	$check = Test-PackageRequirement $pkg
+	Write-PackageRequirement $check
+	if (-not $check.Satisfied) { throw "Cannot install $($pkg.Id) on this machine; see the missing requirements above." }
+
+	$versions = Get-VersionsDirectory
+	$destination = Join-Path $versions $pkg.Id
+	if ((Test-Path -LiteralPath $destination) -and -not $Force) {
+		Write-Step "$($pkg.Id) is already installed at $destination (pass -Force to reinstall it)"
+	}
+	else {
+		$null = New-Item -ItemType Directory -Force -Path $versions
+		Get-ChildItem -LiteralPath $versions -Directory -Filter '.staging-*' | Remove-Item -Recurse -Force
+		$staging = Join-Path $versions ".staging-$($pkg.Id)-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+		try {
+			Copy-Item -LiteralPath $pkg.Payload -Destination $staging -Recurse
+			$exe = Get-BassiaExecutable $staging
+			$smoke = Invoke-Native -FilePath $exe -Arguments @('version') -AllowFailure
+			if ($smoke.ExitCode -ne 0 -or -not ($smoke.Output -match '^ok = true$')) {
+				throw "The packaged bassia failed its smoke test (bassia version): $(($smoke.Output + $smoke.Error) -join ' ')"
+			}
+			$driver = Join-Path $staging $(if ($script:OnWindows) { 'weave-driver.exe' } else { 'weave-driver' })
+			if (Test-Path -LiteralPath $driver) {
+				$weave = Invoke-Native -FilePath $driver -Arguments @('--version') -AllowFailure
+				if ($weave.ExitCode -ne 0) { throw "The packaged weave-driver does not run here: $(($weave.Output + $weave.Error) -join ' ')" }
+			}
+
+			$record = @(
+				'# Written by bassia-versions.ps1 when this version was installed from a release package.'
+				"id = $(ConvertTo-TomlString $pkg.Id)"
+				"ref = $(ConvertTo-TomlString $(if ($pkg.Ref) { $pkg.Ref } else { $pkg.Id }))"
+				"commit = $(ConvertTo-TomlString $pkg.Commit)"
+				"version = $(ConvertTo-TomlString $pkg.Version)"
+				"configuration = $(ConvertTo-TomlString 'Release')"
+				'self_contained = false'
+				"rid = $(ConvertTo-TomlString $pkg.Rid)"
+				"weave = $(ConvertTo-TomlString $(if ($pkg.Weave) { $pkg.Weave } else { '' }))"
+				"source = $(ConvertTo-TomlString "package $(Split-Path -Leaf $pkg.Directory)")"
+				"installed_at = $(ConvertTo-TomlString ([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')))"
+			)
+			Set-Content -LiteralPath (Join-Path $staging 'bassia-install.toml') -Value $record -Encoding utf8
+
+			if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
+			Move-Item -LiteralPath $staging -Destination $destination
+			Write-Step "installed $($pkg.Id) ($($pkg.Version)) at $destination"
+		}
+		finally {
+			if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
+		}
+	}
+	Complete-Install $pkg.Id
 }
 
 function Invoke-List {

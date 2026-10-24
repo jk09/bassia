@@ -1,0 +1,15 @@
+/home/user/bassia/Bassia/bin/Release/net10.0/linux-x64/Bassia
+/home/user/bassia/Bassia/bin/Release/net10.0/linux-x64/Bassia.deps.json
+/home/user/bassia/Bassia/bin/Release/net10.0/linux-x64/Bassia.runtimeconfig.json
+/home/user/bassia/Bassia/bin/Release/net10.0/linux-x64/Bassia.dll
+/home/user/bassia/Bassia/bin/Release/net10.0/linux-x64/Tomlyn.Signed.dll
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.csproj.AssemblyReference.cache
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.GeneratedMSBuildEditorConfig.editorconfig
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.AssemblyInfoInputs.cache
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.AssemblyInfo.cs
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.csproj.CoreCompileInputs.cache
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.csproj.Up2Date
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.dll
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/refint/Bassia.dll
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/Bassia.genruntimeconfig.cache
+/home/user/bassia/Bassia/obj/Release/net10.0/linux-x64/ref/Bassia.dll

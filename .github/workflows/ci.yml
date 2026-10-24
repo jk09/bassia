@@ -1,0 +1,137 @@
+# Tests Bassia and builds the installable packages (packaging/README.md): one per platform, each holding the CLI, weave's
+# weave-driver and the installers, for a machine that already has the .NET runtime and git. Every package is installed
+# and exercised on its own platform before it is uploaded as an artifact; a pushed v<semver> tag also publishes them as
+# a GitHub release.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_NOLOGO: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Put the pinned weave-driver on PATH
+        shell: pwsh
+        run: |
+          ./packaging/Get-Weave.ps1 -Rid linux-x64 -Destination "$env:RUNNER_TEMP/weave"
+          "$env:RUNNER_TEMP/weave" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # The end-to-end tests clone their components from BASSIA_E2E_COMPONENT_URL; a local upstream keeps them
+      # independent of the network and of the (private) default one.
+      - name: Create the end-to-end upstream
+        run: |
+          upstream="$RUNNER_TEMP/e2e-upstream"
+          git init -q -b main "$upstream"
+          printf '# example\n' > "$upstream/README.md"
+          printf '*.o\n*.out\n' > "$upstream/.gitignore"
+          git -C "$upstream" add .
+          git -C "$upstream" -c user.name='Bassia CI' -c user.email=ci@bassia.invalid commit -q -m 'Initial commit'
+          echo "BASSIA_E2E_COMPONENT_URL=$upstream" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: dotnet build --configuration Release
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
+
+  package:
+    name: Package (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            os: ubuntu-latest
+          - rid: linux-arm64
+            os: ubuntu-24.04-arm
+          - rid: osx-arm64
+            os: macos-latest
+          - rid: osx-x64
+            os: macos-15-intel
+          - rid: win-x64
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Ensure PowerShell 7
+        if: runner.os != 'Windows'
+        run: |
+          if ! command -v pwsh >/dev/null; then
+            dotnet tool install --global PowerShell
+            echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          fi
+
+      - name: Build the package
+        shell: pwsh
+        env:
+          # A tag builds as the release (v1.2.0); anything else as <branch>-<short commit>.
+          PACKAGE_REF: ${{ github.ref_type == 'tag' && github.ref_name || github.head_ref || github.ref_name }}
+        run: ./packaging/New-BassiaPackage.ps1 -Rid ${{ matrix.rid }} -Ref $env:PACKAGE_REF -OutputDirectory dist
+
+      - name: Install and check the package
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem dist -File | Where-Object { $_.Name -match '\.(zip|tar\.gz)$' } | Select-Object -First 1
+          ./packaging/Test-BassiaPackage.ps1 -Archive $archive.FullName
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bassia-${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: github.ref_type == 'tag'
+    needs: [test, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Bassia $TAG" --generate-notes $prerelease \
+            *.tar.gz *.zip SHA256SUMS
