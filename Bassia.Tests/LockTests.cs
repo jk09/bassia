@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Bassia.Integration;
 using Bassia.Locks;
 using Bassia.Split;
+using Tomlyn;
 using Tomlyn.Model;
 
 namespace Bassia.Tests;
@@ -67,7 +68,7 @@ public class LockTests
 				return list;
 			}
 
-			Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), $"run {runId} never held anything: {list}");
+			Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), $"run {runId} never held anything:\n{TomlSerializer.Serialize(list)}");
 			await Task.Delay(200);
 		}
 	}
@@ -212,6 +213,23 @@ public class LockTests
 		var release = await OkAsync(monorepo, "lock", "release", "-run", "quiet-fern", "-all");
 		Assert.Equal(["example/a.txt"], ((TomlArray)release["released"]).Cast<string>());
 		Assert.Null(table.Find(suspended));
+	}
+
+	[Fact]
+	public void ProcessStart_ReadAFewMillisecondsApartAcrossASecondBoundary_IsStillTheSameProcess()
+	{
+		// The stamp a run records for itself, and another process's reading of the same start just past the second.
+		var recorded = "2026-10-24T10:12:00Z";
+		var reading = new DateTime(2026, 10, 24, 10, 12, 0, DateTimeKind.Utc);
+
+		Assert.True(JobRegistry.SameStart(reading.AddMilliseconds(999), recorded));
+		Assert.True(JobRegistry.SameStart(reading.AddMilliseconds(-3), recorded));
+		Assert.False(JobRegistry.SameStart(reading.AddSeconds(30), recorded));
+		Assert.False(JobRegistry.SameStart(reading, "not a stamp"));
+
+		// This process, as another process sees it, is alive.
+		Assert.True(JobRegistry.IsProcessAlive(Environment.ProcessId, JobRegistry.CurrentProcessStart()));
+		Assert.False(JobRegistry.IsProcessAlive(Environment.ProcessId, "2000-01-01T00:00:00Z"));
 	}
 
 	[Fact]
