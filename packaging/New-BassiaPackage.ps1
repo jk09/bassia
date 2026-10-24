@@ -166,7 +166,8 @@ try {
 	}
 
 	$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-	Set-Content -LiteralPath "$archive.sha256" -Value "$hash  $(Split-Path -Leaf $archive)" -Encoding ascii -NoNewline
+	# One sha256sum line, LF-terminated on every platform, so the release can concatenate them into SHA256SUMS.
+	[IO.File]::WriteAllText("$archive.sha256", "$hash  $(Split-Path -Leaf $archive)`n")
 	Write-Host "New-BassiaPackage: $archive ($([Math]::Round((Get-Item -LiteralPath $archive).Length / 1MB, 1)) MB, sha256 $hash)"
 	$archive
 }
