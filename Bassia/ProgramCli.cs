@@ -99,11 +99,18 @@ internal static class ProgramCli
 		{
 			return WriteResult(false, spec.FullName, ex.Message);
 		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			// An exception no command expects is a crash: say so, and file it as an issue if the user agreed to that.
+			var report = await Feedback.CrashReporter.HandleAsync(spec.FullName, ex);
+			return WriteResult(false, spec.FullName, $"Bassia stopped unexpectedly ({ex.GetType().Name}: {ex.Message}).",
+				report is null ? null : new Dictionary<string, object?> { ["report"] = report });
+		}
 	}
 
 	/// <summary>The failures a command reports as its TOML error rather than as a crash.</summary>
 	internal static bool IsReportable(Exception ex) =>
-		ex is AgentException or MonorepoException or GitException or IntegrationException or Prompt.PromptException or IOException or UnauthorizedAccessException;
+		ex is AgentException or MonorepoException or GitException or IntegrationException or Prompt.PromptException or Feedback.FeedbackException or IOException or UnauthorizedAccessException;
 
 	/// <summary>A command line that does not parse: a TOML error on stderr, exit code 2.</summary>
 	internal static int UsageError(string command, string message)
@@ -215,6 +222,7 @@ internal static class ProgramCli
 		}
 
 		var group = CommandTable.Group(args[0]);
+		var firstArgument = group.Any(command => command.Sub is not null) ? 2 : 1;
 		for (var i = 1; i < args.Length; i++)
 		{
 			var token = args[i];
@@ -224,7 +232,7 @@ internal static class ProgramCli
 			}
 
 			// 'bassia prompt <ask...>': everything from the first bare word on is the ask.
-			if (!token.StartsWith('-') && group.Any(command => command.Positional is not null && command.FindSwitch(command.Positional) is { Rest: true }))
+			if (i >= firstArgument && !token.StartsWith('-') && group.Any(command => command.Positional is not null && command.FindSwitch(command.Positional) is { Rest: true }))
 			{
 				return i;
 			}

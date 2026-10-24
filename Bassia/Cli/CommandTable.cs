@@ -111,6 +111,36 @@ internal static class CommandTable
 			["bassia version"],
 			MonorepoCommands.VersionAsync),
 
+		// ----- feedback -----
+
+		new("feedback", "send", "Send feedback - a bug, an idea or a question - as an issue in Bassia's GitHub repository, after showing it and asking you to confirm.",
+			[
+				new("kind", "bug|idea|question", "What it is (default: bug); it becomes the issue's label."),
+				new("yes", null, "Send without asking (needed when stdin is not a terminal)."),
+				new("message", "text", "The feedback: the rest of the command line (put it last); its first line becomes the issue title. May be given without -message.", Required: true, Rest: true)
+			],
+			["bassia feedback send status shows a stale run after a crash", "bassia feedback send -kind idea -yes let tag create take a pattern"],
+			FeedbackCommands.SendAsync, Positional: "message",
+			Usage: "bassia feedback send [-kind <bug|idea|question>] [-yes] <message...>",
+			Details: "The issue is filed in jk09/bassia with the token in BASSIA_FEEDBACK_TOKEN (else GITHUB_TOKEN). " +
+				"Before anything leaves the machine the issue is shown, with the home folder, user and machine names, credentials and tokens " +
+				"replaced; the Bassia version, runtime and operating system are added. Without -yes it needs a terminal to ask on. A send that " +
+				"fails is kept and can be retried with 'feedback pending -send'."),
+
+		new("feedback", "reports", "Show or choose what happens when Bassia crashes: off (nothing is sent), ask (show the report and ask) or auto (file it without asking).",
+			[new("mode", "off|ask|auto", "The new choice, kept for this user. Until one is made, nothing is sent and a crash at a terminal asks once.")],
+			["bassia feedback reports", "bassia feedback reports -mode auto", "bassia feedback reports -mode off"],
+			FeedbackCommands.ReportsAsync,
+			Details: "A crash is an exception no command handles. The report holds the command's name (never its arguments), the exception, its " +
+				"redacted stack trace, and the Bassia, runtime and OS versions. A crash already filed from this machine is not filed again, and " +
+				"the same crash from others is added to its open issue. Without a terminal only auto sends. The choice lives in " +
+				"feedback.toml under BASSIA_HOME (the installer's folder), and the token in BASSIA_FEEDBACK_TOKEN or GITHUB_TOKEN."),
+
+		new("feedback", "pending", "List the approved reports that could not be sent yet (no token, no network), or send them.",
+			[new("send", null, "Send them now; each one that goes through is removed.")],
+			["bassia feedback pending", "bassia feedback pending -send"],
+			FeedbackCommands.PendingAsync),
+
 		// ----- components -----
 
 		new("component", "list", "List the registered components with their dependencies, tags, branches and runs, as a table and as [[component]] entries.",

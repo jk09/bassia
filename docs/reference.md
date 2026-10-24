@@ -130,6 +130,7 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-manual] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
 | Natural language and skills | `prompt [-backend <name>] [-llm <command>] [-model <m>] [-skill <s>,...] [-yes] [-dry-run] [-max-rounds <n>] <ask...>`, `skill list`, `skill show -name <s>` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
+| Feedback and crash reports | `feedback send [-kind bug\|idea\|question] [-yes] <message...>`, `feedback reports [-mode off\|ask\|auto]`, `feedback pending [-send]` |
 
 The commands this replaced - `agent`, `add-component`, `integrate`, `commit`, `branch` and `ui` - fail with exit code
 2 and name their successor.
@@ -694,6 +695,38 @@ without JavaScript; the script animates and refreshes the live parts.
 
 Requests must be addressed to `127.0.0.1` or `localhost`, so a web page open in the same browser cannot read the
 dashboard through DNS rebinding.
+
+### Feedback and crash reports
+
+`bassia feedback send` files feedback - a bug, an idea or a question - as an issue in the Bassia repository
+(`jk09/bassia`). It first shows the whole issue and asks you to confirm; `-yes` confirms in advance, and without a
+terminal to ask on nothing is sent unless `-yes` is given.
+
+```powershell
+bassia feedback send status shows a stale run after a crash
+bassia feedback send -kind idea -yes let tag create take a pattern
+```
+
+When Bassia itself crashes (an exception no command expects) it prints a short error, exit code 1, and can file the
+crash as an issue. Nothing is sent until you have agreed, and what is sent follows your choice, shown and changed with
+`bassia feedback reports [-mode off|ask|auto]`:
+
+| Mode | What a crash does |
+|------|-------------------|
+| not chosen yet (the default) | Nothing is sent. At a terminal it shows the report and asks once: yes, *always*, no or *never*. |
+| `ask` | At a terminal it shows the report and asks; without one nothing is sent. |
+| `auto` | It files the report without asking, also in scripts and for agents. |
+| `off` | Nothing is sent and nothing is asked. |
+
+A report holds the Bassia version, the runtime and OS, the name of the failing command (never its arguments or prompt)
+and the exception with its stack trace. The home folder, user and machine names, credentials in URLs and anything that
+looks like a token are replaced first. The same crash is filed once per machine, and when an open issue already has it,
+the report is added to that issue as a comment.
+
+Issues are created with the GitHub token in `BASSIA_FEEDBACK_TOKEN` (else `GITHUB_TOKEN`); a fine-grained token that may
+only write issues of the repository is enough. Without a token, or when GitHub cannot be reached, an approved report is
+kept in `feedback/pending` under `BASSIA_HOME` and `bassia feedback pending -send` sends it later. A failed report never
+changes the outcome of the command. The choice is stored in `feedback.toml` in the same folder.
 
 ## Build
 
