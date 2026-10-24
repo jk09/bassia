@@ -12,7 +12,7 @@ using Tomlyn.Model;
 internal static class TomlResult
 {
 	/// <summary>
-	/// Comment line opening every printed result. <c>bassia run start</c> lets the agent command inherit stdout, so a
+	/// Comment line opening every printed result. <c>bassia agent start</c> lets the agent command inherit stdout, so a
 	/// result can be preceded by arbitrary output; the marker is where a caller starts parsing. It is a TOML
 	/// comment, so the marked text stays a valid document on its own.
 	/// </summary>

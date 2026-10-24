@@ -8,7 +8,7 @@
 
 ## Tech stack
 
-The `Bassia` initially consists of a command-line frontend written in .NET which relies on a separately installed `git` to maintain the components and meta-repo. 
+The `Bassia` initially consists of a command-line frontend written in .NET which relies on a separately installed `git` to maintain the components and meta-repo. The component graph (`Bassia/Core`) does not depend on `git`: it reaches component histories and the registry only through the storage contract in `Bassia/Storage`, which `Storage/Git` implements (and `Storage/Memory`, used by the unit tests); see "Architecture" in `docs/reference.md`.
 
 ## Agentic workflow
 

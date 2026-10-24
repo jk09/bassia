@@ -8,7 +8,7 @@ namespace Bassia.Locks;
 /// took meanwhile. When the agent is done, <see cref="FinishAsync"/> records it all in the run record and releases.
 /// Nothing is polled while no run of the monorepo locks anything.
 /// </summary>
-internal sealed class RunLocks : IAsyncDisposable
+internal sealed class RunLocks : Core.IAgentRunLocks
 {
 	/// <summary>How often the checkouts are looked at and the holds renewed.</summary>
 	internal static TimeSpan Interval { get; set; } = TimeSpan.FromSeconds(2);

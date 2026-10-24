@@ -108,8 +108,8 @@ try {
 		$env:GIT_AUTHOR_EMAIL = $env:GIT_COMMITTER_EMAIL = 'ci@bassia.invalid'
 		Assert-That ((Invoke-Logged $bassia @('init')).ExitCode -eq 0) 'bassia init creates a monorepo'
 		Assert-That ((Invoke-Logged $bassia @('component', 'add', '-url', $upstream, '-name', 'lib')).ExitCode -eq 0) 'bassia component add registers a component'
-		$run = Invoke-Logged $bassia @('run', 'start', '-select', 'lib', '-run', 'cd lib && git --version > VERSION.txt')
-		Assert-That ($run.ExitCode -eq 0 -and $run.Text -match 'result_status = "pushed"') 'bassia run start records a run that pushes a result'
+		$run = Invoke-Logged $bassia @('agent', 'start', '-select', 'lib', '-run', 'cd lib && git --version > VERSION.txt')
+		Assert-That ($run.ExitCode -eq 0 -and $run.Text -match 'result_status = "pushed"') 'bassia agent start records a run that pushes a result'
 		$plan = Invoke-Logged $bassia @('integration', 'plan', '-runs', 'all')
 		Assert-That ($plan.ExitCode -eq 0 -and $plan.Text -match 'structural_merge = ".*weave-driver') 'the integration triage uses the bundled weave-driver'
 	}

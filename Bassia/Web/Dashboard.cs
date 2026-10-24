@@ -2,6 +2,7 @@ namespace Bassia.Web;
 
 using System.Text;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Integration;
 using Microsoft.AspNetCore.Builder;
@@ -290,7 +291,7 @@ internal sealed partial class Dashboard
 			{HeldRow("Released, results not landed", state.Locks.InComponent(name).Where(row => row.State == Locks.LockState.Released))}
 			</table>
 			<p><a href="/timeline?c={Url(name)}">Timeline of {E(name)} and what it needs</a> · <a href="/tags?c={Url(name)}">its tags</a></p>
-			<p>{Cmd($"bassia run start -select {name} -prompt \"...\"")}</p>
+			<p>{Cmd($"bassia agent start -select {name} -prompt \"...\"")}</p>
 			</section><section class="wide">
 			{Charts.ComponentMap(state.Monorepo.Components, await ActivityAsync(state), focus: name)}
 			</section></div>

@@ -1,8 +1,7 @@
 namespace Bassia.Split;
 
-using System.Text;
-using Bassia.Git;
-using Bassia.Graph;
+using Bassia.Core;
+using Bassia.Storage;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -20,7 +19,8 @@ internal sealed class SplitAllocation
 {
 	public required SplitPlan Plan { get; init; }
 	public required ComponentDefinition Source { get; init; }
-	public required string SourceDir { get; init; }
+	public required IComponentStore Store { get; init; }
+	public string SourceLocation => Store.Location;
 	public required string Branch { get; init; }
 	public required string TipCommit { get; init; }
 
@@ -65,7 +65,7 @@ internal static class ComponentSplitter
 	// ----- checking a plan -----
 
 	/// <summary>Checks <paramref name="plan"/> against the monorepo and the source's tip; throws <see cref="SplitPlanException"/> listing every problem.</summary>
-	public static async Task<SplitAllocation> AllocateAsync(Monorepo monorepo, SplitPlan plan, string? sourceName, List<string> problems)
+	public static async Task<SplitAllocation> AllocateAsync(MonorepoGraph graph, SplitPlan plan, string? sourceName, List<string> problems)
 	{
 		if (sourceName is not null && plan.Source is not null && plan.Source != sourceName)
 		{
@@ -79,36 +79,30 @@ internal static class ComponentSplitter
 			throw Fail(problems);
 		}
 
-		var source = monorepo.FindComponent(name);
-		var sourceDir = monorepo.SourceRepoDir(name);
+		var registry = graph.Registry;
+		var source = registry.Find(name);
 		if (source is null)
 		{
 			problems.Add($"The source '{name}' is not a registered component.");
 			throw Fail(problems);
 		}
 
-		if (!Directory.Exists(sourceDir))
+		if (!graph.Storage.Exists(name))
 		{
-			problems.Add($"The source '{name}' has no repository at '{sourceDir}'.");
+			problems.Add($"The source '{name}' has no repository at '{graph.Storage.LocationOf(name)}'.");
 			throw Fail(problems);
 		}
 
-		var git = GitClient.In(sourceDir);
-		var branch = plan.Branch;
-		if (branch is null)
-		{
-			var head = await git.RunAsync(["symbolic-ref", "--short", "HEAD"]);
-			branch = head.ExitCode == 0 ? head.Output.Trim() : "main";
-		}
-
-		var tip = await git.RunAsync(["rev-parse", "--verify", "--quiet", $"refs/heads/{branch}^{{commit}}"]);
-		if (tip.ExitCode != 0)
+		var store = graph.Storage.Open(name);
+		var branch = plan.Branch ?? await store.DefaultBranchAsync() ?? "main";
+		var tip = await store.BranchTipAsync(branch);
+		if (tip is null)
 		{
 			problems.Add($"The source '{name}' has no branch '{branch}'.");
 			throw Fail(problems);
 		}
 
-		var files = await ListTipAsync(sourceDir, branch);
+		var files = await ListTipAsync(store, tip);
 		var perPart = plan.Parts.Select(_ => new List<TipFile>()).ToList();
 		var shared = new List<TipFile>();
 		var dropped = new List<TipFile>();
@@ -171,7 +165,7 @@ internal static class ComponentSplitter
 			perPart[index].AddRange(shared);
 		}
 
-		var after = CheckRegistration(monorepo, plan, source, problems, out var referrers);
+		var after = CheckRegistration(registry, graph.Storage, plan, source, problems, out var referrers);
 
 		if (problems.Count > 0)
 		{
@@ -182,9 +176,9 @@ internal static class ComponentSplitter
 		{
 			Plan = plan,
 			Source = source,
-			SourceDir = sourceDir,
+			Store = store,
 			Branch = branch,
-			TipCommit = tip.Output.Trim(),
+			TipCommit = tip,
 			Files = perPart,
 			Shared = shared,
 			Dropped = dropped,
@@ -195,22 +189,22 @@ internal static class ComponentSplitter
 	}
 
 	/// <summary>Checks names and references, and returns the components as they will be after the split.</summary>
-	private static List<ComponentDefinition> CheckRegistration(Monorepo monorepo, SplitPlan plan, ComponentDefinition source, List<string> problems, out List<SplitReferrer> referrers)
+	private static List<ComponentDefinition> CheckRegistration(ComponentRegistry registry, IComponentStorage storage, SplitPlan plan, ComponentDefinition source, List<string> problems, out List<SplitReferrer> referrers)
 	{
 		var partNames = plan.Parts.Select(part => part.Name).ToHashSet(StringComparer.Ordinal);
 		foreach (var part in plan.Parts)
 		{
-			if (monorepo.FindComponent(part.Name) is not null)
+			if (registry.Contains(part.Name))
 			{
 				problems.Add($"Part '{part.Name}': a component of that name is already registered.");
 			}
-			else if (Directory.Exists(monorepo.SourceRepoDir(part.Name)) || File.Exists(monorepo.SourceRepoDir(part.Name)))
+			else if (storage.Exists(part.Name))
 			{
-				problems.Add($"Part '{part.Name}': '{monorepo.SourceRepoDir(part.Name)}' already exists.");
+				problems.Add($"Part '{part.Name}': '{storage.LocationOf(part.Name)}' already exists.");
 			}
 		}
 
-		bool Known(string name) => partNames.Contains(name) || (name != source.Name && monorepo.FindComponent(name) is not null);
+		bool Known(string name) => partNames.Contains(name) || (name != source.Name && registry.Contains(name));
 
 		var parts = new List<ComponentDefinition>();
 		foreach (var part in plan.Parts)
@@ -235,8 +229,7 @@ internal static class ComponentSplitter
 			parts.Add(new ComponentDefinition(part.Name, part.Url ?? "", references));
 		}
 
-		var graph = new ComponentGraph(monorepo.Components);
-		var referring = graph.ReferrersOf(source.Name).Select(reference => reference.Name).ToHashSet(StringComparer.Ordinal);
+		var referring = registry.ReferrersOf(source.Name).Select(referrer => referrer.Name).ToHashSet(StringComparer.Ordinal);
 		var rewiring = new List<SplitReferrer>();
 		foreach (var referrer in plan.Referrers)
 		{
@@ -262,7 +255,7 @@ internal static class ComponentSplitter
 		// A referrer the plan does not mention references every part instead of the source.
 		foreach (var name in referring.Where(name => plan.Referrers.All(referrer => referrer.Name != name)))
 		{
-			var component = monorepo.FindComponent(name)!;
+			var component = registry.Require(name);
 			var references = component.References
 				.SelectMany(reference => reference.Name == source.Name ? plan.Parts.Select(part => new ComponentReference(part.Name, part.Name)) : [reference])
 				.DistinctBy(reference => reference.Name)
@@ -272,7 +265,7 @@ internal static class ComponentSplitter
 
 		referrers = rewiring;
 
-		var after = monorepo.Components
+		var after = registry.Components
 			.Where(component => component.Name != source.Name)
 			.Select(component => rewiring.FirstOrDefault(referrer => referrer.Name == component.Name) is { } rewired
 				? component with { References = rewired.References }
@@ -367,196 +360,73 @@ internal static class ComponentSplitter
 	private static SplitPlanException Fail(List<string> problems, List<string>? unallocated = null, List<string>? ambiguous = null) =>
 		new(problems, unallocated ?? [], ambiguous ?? []);
 
-	/// <summary>The files at the tip of <paramref name="branch"/>, with mode, object and size.</summary>
-	internal static async Task<List<TipFile>> ListTipAsync(string repository, string branch)
-	{
-		var files = new List<TipFile>();
-		foreach (var entry in GitBinary.SplitNul(await GitBinary.RunAsync(repository, ["ls-tree", "-r", "-z", "-l", "--full-tree", $"refs/heads/{branch}"])))
-		{
-			// <mode> SP <type> SP <object> SP+ <size> TAB <path>
-			var tab = entry.IndexOf('\t');
-			var fields = entry[..tab].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-			files.Add(new TipFile(entry[(tab + 1)..], fields[0], fields[2], long.TryParse(fields[3], out var size) ? size : 0));
-		}
-
-		return files;
-	}
-
 	// ----- performing a split -----
 
-	public static async Task<SplitResult> SplitAsync(Monorepo monorepo, SplitAllocation allocation)
+	/// <summary>
+	/// Performs a checked split: the storage writes each part's history into a new store, the source is tagged
+	/// <c>split/&lt;id&gt;</c> at its tip, and the meta-repo registers the parts, rewires the referrers and retires the
+	/// source in one revision. On failure everything created is removed again; the source's history is never rewritten.
+	/// </summary>
+	public static async Task<SplitResult> SplitAsync(MonorepoGraph graph, SplitAllocation allocation)
 	{
 		var id = NewId();
 		var tag = TagName(id);
-		var plan = allocation.Plan;
-		var sourceDir = allocation.SourceDir;
-		var source = GitClient.In(sourceDir);
-		var created = new List<string>();
-		var componentsPath = ComponentsFile.PathOf(monorepo.Root);
-		var componentsText = File.ReadAllText(componentsPath);
+		var source = allocation.Store;
+		var timestamp = DateTimeOffset.UtcNow.ToString("o");
 		var sourceTagged = false;
 
 		try
 		{
-			var tags = await ListTagsAsync(sourceDir, allocation.Branch);
-			var export = await FastExport.ReadAsync(sourceDir, allocation.Branch, tags.Where(item => item.Annotated).Select(item => item.Name).ToList());
-			var renames = plan.FollowRenames ? await ListRenamesAsync(sourceDir, allocation.Branch, export) : [];
-			var ownership = new Ownership(plan, allocation.TipOwner, export.Commits, renames);
-			var rewriter = new HistoryRewriter(export, ownership, (parent, commit) => DiffAsync(sourceDir, export.Commits[parent].OriginalId, export.Commits[commit].OriginalId));
-			var lightweight = tags.Where(item => !item.Annotated && export.IndexOf.ContainsKey(item.Commit))
-				.Select(item => new LightweightTag(item.Name, export.IndexOf[item.Commit])).ToList();
-			var ident = (await source.RunOrThrowAsync(["var", "GIT_COMMITTER_IDENT"])).Trim();
-			var objects = Path.Combine(await source.RunOrThrowAsync(["rev-parse", "--absolute-git-dir"]), "objects");
-			var timestamp = DateTimeOffset.UtcNow.ToString("o");
+			var parts = await graph.Storage.SplitAsync(source, new SplitHistoryRequest(allocation, id, tag, part => RecordMessage(id, allocation, part, timestamp)));
+			var unmerged = await UnmergedResultsAsync(source, allocation.TipCommit);
 
-			var parts = new List<SplitPartResult>();
-			for (var index = 0; index < plan.Parts.Count; index++)
-			{
-				var part = plan.Parts[index];
-				var record = RecordMessage(id, allocation, part, timestamp);
-				var history = await rewriter.RewriteAsync(index, allocation.Branch, $"{Trailer}: {allocation.Source.Name}@",
-					export.IndexOf[allocation.TipCommit], lightweight, ident, record, tag);
-
-				var partDir = monorepo.SourceRepoDir(part.Name);
-				var gitDir = Path.Combine(partDir, ".git");
-				created.Add(partDir);
-				await GitClient.In(monorepo.Root).RunOrThrowAsync(["init", "--bare", "--quiet", gitDir]);
-				var target = GitClient.In(gitDir);
-
-				// Borrow the source's objects while importing, then copy what the part reaches and stop borrowing.
-				var alternates = Path.Combine(gitDir, "objects", "info", "alternates");
-				await File.WriteAllTextAsync(alternates, objects.Replace('\\', '/') + "\n");
-				await GitBinary.RunAsync(gitDir, ["fast-import", "--quiet"], history.Stream);
-				await target.RunOrThrowAsync(["symbolic-ref", "HEAD", $"refs/heads/{allocation.Branch}"]);
-				await target.RunOrThrowAsync(["repack", "-a", "-d", "-q"]);
-				File.Delete(alternates);
-				await target.RunOrThrowAsync(["fsck", "--connectivity-only", "--no-dangling", "--no-progress"]);
-				if (part.Url is not null)
-				{
-					await target.RunOrThrowAsync(["remote", "add", "origin", part.Url]);
-				}
-
-				await VerifyTipAsync(gitDir, allocation.Branch, part.Name, allocation.Files[index]);
-				parts.Add(new SplitPartResult(part.Name, partDir, allocation.Files[index].Count, allocation.Files[index].Sum(file => file.Size),
-					history.Commits, await target.RunOrThrowAsync(["rev-parse", $"refs/heads/{allocation.Branch}"]),
-					history.Tags, history.DroppedTags, ownership.ClaimedPaths(index)));
-			}
-
-			var unmerged = (await source.RunOrThrowAsync(["for-each-ref", "--no-merged", $"refs/heads/{allocation.Branch}", "--format=%(refname:strip=2)",
-				"refs/tags/agent-run/", "refs/tags/integration/"])).Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
-
-			await source.RunOrThrowAsync(["tag", "-a", tag, "-m", RecordMessage(id, allocation, null, timestamp), allocation.TipCommit]);
+			await source.CreateTagAsync(tag, allocation.TipCommit, RecordMessage(id, allocation, null, timestamp));
 			sourceTagged = true;
 
-			foreach (var part in allocation.PartDefinitions)
-			{
-				ComponentsFile.Add(monorepo.Root, part.Name, part.Url, part.References);
-			}
-
-			foreach (var referrer in allocation.Referrers)
-			{
-				ComponentsFile.SetReferences(monorepo.Root, referrer.Name, referrer.References);
-			}
-
-			ComponentsFile.Remove(monorepo.Root, allocation.Source.Name);
-			var commit = await MonorepoCommands.CommitMetaRepoAsync(monorepo.Root, RecordMessage(id, allocation, null, timestamp));
+			var changes = allocation.PartDefinitions.Select(part => (RegistryChange)new RegistryChange.Add(part))
+				.Concat(allocation.Referrers.Select(referrer => new RegistryChange.SetReferences(referrer.Name, referrer.References)))
+				.Append(new RegistryChange.Remove(allocation.Source.Name))
+				.ToList();
+			var commit = await graph.MetaRepo.CommitAsync(changes, RecordMessage(id, allocation, null, timestamp));
 			return new SplitResult(id, allocation, parts, tag, commit, unmerged);
 		}
 		catch
 		{
-			if (File.ReadAllText(componentsPath) != componentsText)
-			{
-				File.WriteAllText(componentsPath, componentsText);
-			}
-
 			if (sourceTagged)
 			{
-				await source.RunAsync(["tag", "-d", tag]);
+				await source.DeleteTagAsync(tag);
 			}
 
-			foreach (var directory in created.Where(Directory.Exists))
+			foreach (var part in allocation.Plan.Parts.Where(part => graph.Storage.Exists(part.Name) && !graph.Registry.Contains(part.Name)))
 			{
-				DeleteDirectory(directory);
+				await graph.Storage.DeleteAsync(part.Name);
 			}
 
 			throw;
 		}
 	}
 
-	/// <summary>The tip of the part must hold exactly its allocated files, each with the source tip's mode and content.</summary>
-	private static async Task VerifyTipAsync(string gitDir, string branch, string part, IReadOnlyList<TipFile> expected)
+	/// <summary>Run and integration result tags not merged into the source's branch: work the split leaves with the retired source.</summary>
+	private static async Task<IReadOnlyList<string>> UnmergedResultsAsync(IComponentStore source, string tip)
 	{
-		var actual = (await ListTipAsync(gitDir, branch)).ToDictionary(file => file.Path, StringComparer.Ordinal);
-		var wanted = expected.ToDictionary(file => file.Path, StringComparer.Ordinal);
-		var missing = wanted.Keys.Where(path => !actual.ContainsKey(path)).ToList();
-		var extra = actual.Keys.Where(path => !wanted.ContainsKey(path)).ToList();
-		var differing = wanted.Values.Where(file => actual.TryGetValue(file.Path, out var got) && (got.Object != file.Object || got.Mode != file.Mode)).Select(file => file.Path).ToList();
-		if (missing.Count + extra.Count + differing.Count > 0)
+		var unmerged = new List<string>();
+		foreach (var tag in (await source.ListTagsAsync()).Where(tag => tag.Name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal) || tag.Name.StartsWith("integration/", StringComparison.Ordinal)))
 		{
-			throw new GitException($"The rewritten history of '{part}' does not end in its allocated files " +
-				$"(missing: {Sample(missing)}; unexpected: {Sample(extra)}; different: {Sample(differing)}); nothing was changed.");
+			if (!await source.IsAncestorAsync(tag.Commit, tip))
+			{
+				unmerged.Add(tag.Name);
+			}
 		}
+
+		return unmerged;
 	}
 
-	private static string Sample(List<string> paths) => paths.Count == 0 ? "none" : string.Join(", ", paths.Take(5)) + (paths.Count > 5 ? $" and {paths.Count - 5} more" : "");
-
-	private sealed record SourceTag(string Name, bool Annotated, string Commit);
-
-	/// <summary>The tags reachable from the branch, each with the commit it (finally) points to.</summary>
-	private static async Task<List<SourceTag>> ListTagsAsync(string repository, string branch)
-	{
-		var output = await GitClient.In(repository).RunOrThrowAsync(["for-each-ref", "--merged", $"refs/heads/{branch}",
-			"--format=%(refname:strip=2)%09%(objecttype)%09%(objectname)%09%(*objectname)", "refs/tags/"]);
-		return output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-			.Select(line => line.Split('\t'))
-			.Where(fields => fields.Length >= 3 && (fields[1] == "commit" || (fields[1] == "tag" && fields.Length == 4)))
-			.Select(fields => new SourceTag(fields[0], fields[1] == "tag", fields[1] == "tag" ? fields[3] : fields[2]))
+	/// <summary>The files at a commit as a split allocates them: its files and the units nested in it, in path order.</summary>
+	internal static async Task<List<TipFile>> ListTipAsync(IComponentStore store, string commit) =>
+		(await store.ListFilesAsync(commit)).Select(file => new TipFile(file.Path, file.Mode, file.Object, file.Size))
+			.Concat((await store.ListNestedAsync(commit)).Select(unit => new TipFile(unit.Path, "160000", unit.Commit, 0)))
+			.OrderBy(file => file.Path, StringComparer.Ordinal)
 			.ToList();
-	}
-
-	/// <summary>Every rename on the branch (git's rename detection), as stream indices.</summary>
-	private static async Task<List<Rename>> ListRenamesAsync(string repository, string branch, FastExport export)
-	{
-		var fields = GitBinary.SplitNul(await GitBinary.RunAsync(repository,
-			["log", "-M", "--diff-filter=R", "--name-status", "-z", "--format=%x01%H", $"refs/heads/{branch}"]));
-		var renames = new List<Rename>();
-		var commit = -1;
-		for (var i = 0; i < fields.Count; i++)
-		{
-			var field = fields[i].TrimStart('\n');
-			if (field.StartsWith('\x01'))
-			{
-				commit = export.IndexOf.TryGetValue(field[1..], out var index) ? index : -1;
-			}
-			else if (field.StartsWith('R') && i + 2 < fields.Count)
-			{
-				if (commit >= 0)
-				{
-					renames.Add(new Rename(commit, fields[i + 1], fields[i + 2]));
-				}
-
-				i += 2;
-			}
-		}
-
-		return renames;
-	}
-
-	/// <summary>The changes of <paramref name="commit"/> relative to <paramref name="parent"/> (full ids).</summary>
-	private static async Task<List<FileChange>> DiffAsync(string repository, string parent, string commit)
-	{
-		var fields = GitBinary.SplitNul(await GitBinary.RunAsync(repository, ["diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", parent, commit]));
-		var changes = new List<FileChange>();
-		for (var i = 0; i + 1 < fields.Count; i += 2)
-		{
-			// :<old mode> <new mode> <old object> <new object> <status>
-			var header = fields[i].TrimStart(':').Split(' ');
-			var path = fields[i + 1];
-			changes.Add(header[4].StartsWith('D') ? new FileChange('D', "", "", path) : new FileChange('M', header[1], header[3], path));
-		}
-
-		return changes;
-	}
 
 	/// <summary>
 	/// The split record: a subject and a TOML <c>[split]</c> table. Each part's record commit and the <c>split/&lt;id&gt;</c>
@@ -601,15 +471,5 @@ internal static class ComponentSplitter
 		}
 
 		return array;
-	}
-
-	private static void DeleteDirectory(string directory)
-	{
-		foreach (var file in Directory.EnumerateFiles(directory, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
-		{
-			File.SetAttributes(file, FileAttributes.Normal);
-		}
-
-		Directory.Delete(directory, recursive: true);
 	}
 }

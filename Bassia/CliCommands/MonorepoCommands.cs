@@ -3,6 +3,7 @@ namespace Bassia;
 using System.Reflection;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Graph;
 using Bassia.Integration;
@@ -153,23 +154,7 @@ internal static class MonorepoCommands
 	};
 
 	/// <summary>Commits every change in the meta-repo and returns the new commit, or null when nothing changed.</summary>
-	internal static async Task<string?> CommitMetaRepoAsync(string root, string message)
-	{
-		var metaRepo = GitClient.In(Path.Combine(root, Monorepo.MetaRepoFolderName));
-		var status = await metaRepo.RunOrThrowAsync(["status", "--porcelain"]);
-		if (status.Length == 0)
-		{
-			return null;
-		}
-
-		var result = await metaRepo.CommitAllAsync(message);
-		if (result.ExitCode != 0)
-		{
-			throw new GitException($"git commit failed in the meta-repo: {result.Error.Trim()}");
-		}
-
-		return await metaRepo.RunOrThrowAsync(["rev-parse", "HEAD"]);
-	}
+	internal static Task<string?> CommitMetaRepoAsync(string root, string message) => Storage.Git.GitMetaStore.CommitAllAsync(root, message);
 
 	// ----- bassia version -----
 

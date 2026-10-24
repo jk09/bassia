@@ -15,7 +15,7 @@ namespace Bassia.Tests;
 /// what it can; a deterministic resolver merges the one real conflict) and advanced onto <c>main</c>. Everything is
 /// done through the <c>bassia</c> executable, and the outcome is verified with its own commands: <c>log -run</c>
 /// says where each session's commits are and whether they landed on <c>main</c>, <c>log -branch main</c> attributes
-/// the mainline to the sessions, <c>component show</c>, <c>run list</c> and <c>integration list</c> agree. A last
+/// the mainline to the sessions, <c>component show</c>, <c>agent list</c> and <c>integration list</c> agree. A last
 /// session builds and runs the programs from the advanced <c>main</c> branches.
 ///
 /// A session's agent is a deterministic stand-in: it applies a patch the test computed against the session's
@@ -217,7 +217,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 
 	// ----- sessions -----
 
-	/// <summary>Starts every session with <c>run start -detach</c> at once, then waits for each with <c>run wait</c>.</summary>
+	/// <summary>Starts every session with <c>agent start -detach</c> at once, then waits for each with <c>agent wait</c>.</summary>
 	private async Task<IReadOnlyList<StartedSession>> StartDetachedAsync(string root, string sessionsDir, IReadOnlyList<Session> sessions)
 	{
 		var commands = new List<string>();
@@ -227,26 +227,26 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		}
 
 		var results = await Task.WhenAll(sessions.Select((session, index) =>
-			BassiaAsync(root, "run", "start", "-select", session.SelectList, "-detach", "-run", commands[index])));
+			BassiaAsync(root, "agent", "start", "-select", session.SelectList, "-detach", "-run", commands[index])));
 
 		var started = new List<StartedSession>();
 		for (var index = 0; index < sessions.Count; index++)
 		{
-			var result = AssertOk(results[index], $"run start -detach ({sessions[index].Name})");
+			var result = AssertOk(results[index], $"agent start -detach ({sessions[index].Name})");
 			Assert.True((bool)result["detached"]);
 			started.Add(new StartedSession(sessions[index], (string)result["run_id"], commands[index]));
 		}
 
 		foreach (var session in started)
 		{
-			var waited = await OkAsync(root, "run", "wait", RunMetadata.Key(session.RunId), "-timeout", "600");
+			var waited = await OkAsync(root, "agent", "wait", RunMetadata.Key(session.RunId), "-timeout", "600");
 			Assert.Equal("completed", waited["status"]);
 		}
 
 		return started;
 	}
 
-	/// <summary>Starts every session with a foreground <c>run start</c>, each its own bassia process, all at once.</summary>
+	/// <summary>Starts every session with a foreground <c>agent start</c>, each its own bassia process, all at once.</summary>
 	private async Task<IReadOnlyList<StartedSession>> StartForegroundAsync(string root, string sessionsDir, IReadOnlyList<Session> sessions)
 	{
 		var commands = new List<string>();
@@ -256,11 +256,11 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		}
 
 		var results = await Task.WhenAll(sessions.Select((session, index) =>
-			BassiaAsync(root, "run", "start", "-select", session.SelectList, "-run", commands[index])));
+			BassiaAsync(root, "agent", "start", "-select", session.SelectList, "-run", commands[index])));
 
 		return sessions.Select((session, index) =>
 		{
-			var result = AssertOk(results[index], $"run start ({session.Name})");
+			var result = AssertOk(results[index], $"agent start ({session.Name})");
 			Assert.Equal("completed", result["status"]);
 			return new StartedSession(session, (string)result["run_id"], commands[index]);
 		}).ToList();
@@ -299,7 +299,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 
 	/// <summary>
 	/// Each session of a wave completed, pushed a result into exactly the components it edited (unchanged elsewhere),
-	/// and changed exactly the files it was meant to - as <c>run show</c> and <c>run diff</c> report; the sessions'
+	/// and changed exactly the files it was meant to - as <c>agent show</c> and <c>agent diff</c> report; the sessions'
 	/// recorded intervals all overlap.
 	/// </summary>
 	private async Task VerifyWaveAsync(string root, string wave, IReadOnlyList<StartedSession> started)
@@ -308,7 +308,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		var intervals = new List<(DateTimeOffset Created, DateTimeOffset Finished)>();
 		foreach (var (session, runId, command) in started)
 		{
-			var shown = await OkAsync(root, "run", "show", RunMetadata.Key(runId));
+			var shown = await OkAsync(root, "agent", "show", RunMetadata.Key(runId));
 			Assert.Equal("completed", shown["status"]);
 			Assert.False((bool)shown["live"]);
 			Assert.Equal(session.SelectList, shown["select"]);
@@ -320,7 +320,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 				Assert.Equal(session.Select[name], component["commitish"]);
 			}
 
-			var diff = await OkAsync(root, "run", "diff", RunMetadata.Key(runId));
+			var diff = await OkAsync(root, "agent", "diff", RunMetadata.Key(runId));
 			foreach (var component in Tables(diff, "component"))
 			{
 				var name = (string)component["name"];
@@ -331,7 +331,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 			intervals.Add((Timestamp((string)shown["created"]), Timestamp((string)shown["finished"])));
 			proof.Fact($"`{session.Name}`", $"run `{runId}`, select `{session.SelectList}`, edits {string.Join("; ", session.Edits.Select(edit => $"{edit.Key}: {string.Join(", ", edit.Value.Keys)}"))}");
 			proof.Fact("Command", $"`{command}`");
-			proof.Block($"bassia run show {RunMetadata.Key(runId)} (card)", (string)shown["card"]);
+			proof.Block($"bassia agent show {RunMetadata.Key(runId)} (card)", (string)shown["card"]);
 		}
 
 		// Some moment lies inside every session's recorded interval: the wave ran in parallel, not one by one.
@@ -511,10 +511,10 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		proof.Fact("bassia log -run all", (string)all["message"]);
 	}
 
-	/// <summary><c>run list</c> and <c>integration list</c>: every session completed, every integration completed and advanced.</summary>
+	/// <summary><c>agent list</c> and <c>integration list</c>: every session completed, every integration completed and advanced.</summary>
 	private async Task VerifyRecordsAsync(string root, IReadOnlyList<StartedSession> everyone, IReadOnlyList<Integrated> integrations)
 	{
-		var runs = await OkAsync(root, "run", "list", "-limit", "50");
+		var runs = await OkAsync(root, "agent", "list", "-limit", "50");
 		Assert.Equal(everyone.Select(session => session.RunId).Order(), Tables(runs, "run").Select(run => (string)run["run_id"]).Order());
 		Assert.All(Tables(runs, "run"), run => Assert.Equal("completed", run["status"]));
 
@@ -526,7 +526,7 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 		var status = await OkAsync(root, "status");
 		Assert.True((bool)status["meta_repo_clean"]);
 		proof.Section("Records");
-		proof.Block("bassia run list", (string)runs["table"]);
+		proof.Block("bassia agent list", (string)runs["table"]);
 		proof.Block("bassia integration list", (string)listed["table"]);
 	}
 
@@ -556,8 +556,8 @@ public sealed class ThreeComponentEndToEndTests(ITestOutputHelper output)
 			$"{compiler} -I . -o sortcli.out sortcli/sortcli.c sortlib/sort.c", "./sortcli.out 5 3 9 1",
 			$"cd {SortLib}",
 			$"{compiler} -o test_sort.out test_sort.c sort.c", "./test_sort.out");
-		var result = await BassiaAsync(root, "run", "start", "-select", string.Join(",", Components.Select(component => $"{component}@verified")), "-run", build);
-		var toml = AssertOk(result, "run start (build from main)");
+		var result = await BassiaAsync(root, "agent", "start", "-select", string.Join(",", Components.Select(component => $"{component}@verified")), "-run", build);
+		var toml = AssertOk(result, "agent start (build from main)");
 
 		// The build outputs are ignored by the example's C .gitignore, so the session changes no component.
 		Assert.Equal("completed", toml["status"]);

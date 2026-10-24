@@ -125,9 +125,9 @@ public sealed class FeedbackTests : IDisposable
 	[Fact]
 	public void CrashReport_IsRedactedAndNamesTheCommandNotItsArguments()
 	{
-		var draft = ReportBuilder.Crash("jk09/bassia", "run start", Crash(), new Redactor(@"C:\Users\ada", "ada", "ADA-PC"));
+		var draft = ReportBuilder.Crash("jk09/bassia", "agent start", Crash(), new Redactor(@"C:\Users\ada", "ada", "ADA-PC"));
 
-		Assert.StartsWith("[crash] System.InvalidOperationException in 'bassia run start'", draft.Title);
+		Assert.StartsWith("[crash] System.InvalidOperationException in 'bassia agent start'", draft.Title);
 		Assert.DoesNotContain("ghp_", draft.Body);
 		Assert.DoesNotContain(@"C:\Users\ada", draft.Body);
 		Assert.Contains($"bassia-fingerprint: {draft.Fingerprint}", draft.Body);

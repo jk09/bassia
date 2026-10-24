@@ -28,7 +28,7 @@ internal static class CommandCatalog
 		"status", "config list", "config get", "version",
 		"component list", "component show", "component survey",
 		"tag list", "tag show", "graph", "log",
-		"run list", "run show", "run logs", "run wait", "run diff",
+		"agent list", "agent show", "agent logs", "agent wait", "agent diff",
 		"lock list", "lock check",
 		"integration plan", "integration list", "integration show", "integration logs", "integration wait",
 		"skill list", "skill show", "help"

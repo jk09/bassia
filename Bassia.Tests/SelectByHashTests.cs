@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 
 namespace Bassia.Tests;
 

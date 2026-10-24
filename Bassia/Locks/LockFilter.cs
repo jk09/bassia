@@ -132,7 +132,7 @@ internal sealed class LockFilter
 }
 
 /// <summary>
-/// A run's own lock patterns, as <c>run start -lock-files</c> and <c>-lock-folders</c> give them: comma-separated
+/// A run's own lock patterns, as <c>agent start -lock-files</c> and <c>-lock-folders</c> give them: comma-separated
 /// patterns, each for every component of the run or, with a <c>&lt;component&gt;:</c> prefix, for that one only.
 /// </summary>
 internal sealed class RunLockPatterns

@@ -3,6 +3,7 @@ namespace Bassia;
 using System.Diagnostics;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Locks;
 
@@ -500,7 +501,7 @@ internal static class LockCommands
 		var runId = candidates.Count switch
 		{
 			1 => candidates[0],
-			0 => throw new AgentException($"Unknown agentic run '{name}'. List the runs with 'bassia run list'."),
+			0 => throw new AgentException($"Unknown agentic run '{name}'. List the runs with 'bassia agent list'."),
 			_ => throw new AgentException($"'{name}' names more than one agentic run ({string.Join(", ", candidates.Select(RunMetadata.Key))}); give more of its id.")
 		};
 

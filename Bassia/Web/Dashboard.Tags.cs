@@ -93,7 +93,7 @@ internal sealed partial class Dashboard
 			<tr><td>Integrated by</td><td>{(story.IntegratedBy.Count == 0 ? "<span class=\"muted\">none</span>" : string.Join(" ", story.IntegratedBy.Select(record => IntegrationLink(record.IntegrationId))))}</td></tr>
 			</table></section><section>
 			<h3>Commands</h3>
-			<p>{Cmd($"bassia run start -select {tag.Select} -prompt \"...\"")}</p>
+			<p>{Cmd($"bassia agent start -select {tag.Select} -prompt \"...\"")}</p>
 			<p>{Cmd($"bassia tag show {tag.Name}")}</p>
 			</section></div>
 			<h2>Where it came from and where it went</h2>

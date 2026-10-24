@@ -9,7 +9,7 @@ internal static class CommandTable
 	/// <summary>Commands that were replaced by the current grammar, with the command to use instead.</summary>
 	public static readonly IReadOnlyDictionary<string, string> Replaced = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
 	{
-		["agent"] = "'bassia agent' was replaced by 'bassia run start -select <component@tag,...> -run <command>' (and 'bassia run retry', 'bassia run abandon').",
+		["run"] = "'bassia run' was replaced by 'bassia agent' (renamed): use 'bassia agent start|list|show|logs|wait|stop|retry|abandon|diff' (e.g. 'bassia agent start -select <component@tag,...> -prompt <text>').",
 		["add-component"] = "'bassia add-component' was replaced by 'bassia component add -url <url> [-name <name>]'.",
 		["integrate"] = "'bassia integrate' was replaced by 'bassia integration plan|start|advance'.",
 		["commit"] = "'bassia commit' was removed: 'bassia config set' and the 'bassia component' commands commit the meta-repo themselves; use 'git -C .bassia commit' for hand edits.",
@@ -163,6 +163,21 @@ internal static class CommandTable
 			],
 			ComponentCommands.AddAsync, Positional: "url"),
 
+		new("component", "create", "Create a new, empty component next to the meta-repo and register it in components.toml.",
+			[
+				new("name", "name", "The component's logical name.", Required: true),
+				new("references", "component[:path],...", "Components this one nests, each at a subfolder (default: its name)."),
+				new("branch", "branch", "Its main branch (default: main)."),
+				new("url", "url", "The upstream it will be published to, recorded with it.")
+			],
+			[
+				"bassia component create -name docs",
+				"bassia component create -name app -references lib,ui:vendor/ui"
+			],
+			ComponentCommands.CreateAsync, Positional: "name",
+			Details: "Its history starts with one commit without files on its main branch, so an agentic run can select it at once with -select <name> " +
+				"(the tip of its main branch) and write its first files. Tag a baseline with 'bassia component tag'."),
+
 		new("component", "unwind", "Turn a component's git submodules, recursively, into components it references at the submodule paths, so runs nest them as junctioned folders.",
 			[
 				new("name", "component", "The component.", Required: true),
@@ -313,10 +328,10 @@ internal static class CommandTable
 
 		// ----- agentic runs -----
 
-		new("run", "start", "Start an agentic run: materialize the selected components at their tags, hashes or default-branch tips in an isolated run folder, run the agent there, then commit, tag and push each changed component.",
+		new("agent", "start", "Start an agentic run: materialize the selected components at their tags, hashes or default-branch tips in an isolated run folder, run the agent there, then commit, tag and push each changed component.",
 			[
 				new("select", "component[@tag|hash],...", "Every component of the run: a bare name starts from the tip of its default branch (resolved and recorded when the run starts), or add an annotated tag or a commit hash (6 to 40 lowercase hex digits, unambiguous in the component); must cover the components they reference.", Required: true),
-				new("detach", null, "Return at once and continue in the background; follow with run show/logs/wait, stop with run stop."),
+				new("detach", null, "Return at once and continue in the background; follow with agent show/logs/wait, stop with agent stop."),
 				new("prompt", "text", "Compose the agent command from this prompt and the configured agent.command."),
 				new("agent", "command", "With -prompt: the agent command to use instead of agent.command."),
 				new("model", "model", "With -prompt: passed to the agent as --model."),
@@ -329,62 +344,62 @@ internal static class CommandTable
 				new("run", "command", "The agent command, verbatim: the rest of the command line (put it last).", Rest: true)
 			],
 			[
-				"bassia run start -select app@v1,lib@v1 -prompt \"add a changelog\" -model opus",
-				"bassia run start -select app@v1,lib@v1 -detach -prompt \"fix the failing tests\"",
-				"bassia run start -select lib@v1 -run claude -p \"refactor the parser\" --permission-mode acceptEdits",
-				"bassia run start -select app@3f9c2e1,lib@v1 -prompt \"bisect the regression\"",
-				"bassia run start -select app,lib -prompt \"update the docs\"",
-				"bassia run start -select app,lib -lock-folders \"app:src/*\" -prompt \"rewrite the parser\""
+				"bassia agent start -select app@v1,lib@v1 -prompt \"add a changelog\" -model opus",
+				"bassia agent start -select app@v1,lib@v1 -detach -prompt \"fix the failing tests\"",
+				"bassia agent start -select lib@v1 -run claude -p \"refactor the parser\" --permission-mode acceptEdits",
+				"bassia agent start -select app@3f9c2e1,lib@v1 -prompt \"bisect the regression\"",
+				"bassia agent start -select app,lib -prompt \"update the docs\"",
+				"bassia agent start -select app,lib -lock-folders \"app:src/*\" -prompt \"rewrite the parser\""
 			],
 			RunCommands.StartAsync,
-			Usage: "bassia run start -select <component[@tag|hash],...> [-detach] [-lock-files <[component:]pattern,...>] [-lock-folders <[component:]pattern,...>] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
+			Usage: "bassia agent start -select <component[@tag|hash],...> [-detach] [-lock-files <[component:]pattern,...>] [-lock-folders <[component:]pattern,...>] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
 			Details: "Without -detach the agent's output streams to the terminal and the result follows when the run ends; Ctrl-C stops the run and records it as cancelled. " +
 				"With -detach the selection is checked first, then the run continues in a background bassia process and the result (run_id, pid, log) is printed at once. " +
 				"The agent runs in the run folder with BASSIA_ROOT, BASSIA_RUN_ID and BASSIA_RUN_DIR set. What it changes is held for the run as the lock " +
 				"filter says (see 'bassia help lock list'); when the filter locks anything, the run folder gets an AGENTS.md and a CLAUDE.md explaining it."),
 
-		new("run", "list", "List runs newest first - recorded ones and those still preparing - as a table and as [[run]] entries.",
+		new("agent", "list", "List runs newest first - recorded ones and those still preparing - as a table and as [[run]] entries.",
 			[
 				new("status", "status", "Only runs with this status: preparing, started, completed, partial, failed, cancelled, abandoned, or live / stale."),
 				new("component", "component", "Only runs that include this component."),
 				new("limit", "n", "At most this many (default: 20).")
 			],
-			["bassia run list", "bassia run list -status live", "bassia run list -component lib -limit 5"],
+			["bassia agent list", "bassia agent list -status live", "bassia agent list -component lib -limit 5"],
 			RunCommands.ListAsync),
 
-		new("run", "show", "Show a run: its record, per-component results, whether it is live, and its latest output line.",
+		new("agent", "show", "Show a run: its record, per-component results, whether it is live, and its latest output line.",
 			[Id],
-			["bassia run show -id brave-otter-3f2a91", "bassia run show brave-otter-3f2a91"],
+			["bassia agent show -id brave-otter-3f2a91", "bassia agent show brave-otter-3f2a91"],
 			RunCommands.ShowAsync, Positional: "id"),
 
-		new("run", "logs", "Print the captured output of a detached run (agent output and bassia's progress).",
+		new("agent", "logs", "Print the captured output of a detached run (agent output and bassia's progress).",
 			[Id, new("tail", "n", "The last n lines (default: 50; 0 for all).")],
-			["bassia run logs brave-otter-3f2a91", "bassia run logs -id brave-otter-3f2a91 -tail 0"],
+			["bassia agent logs brave-otter-3f2a91", "bassia agent logs -id brave-otter-3f2a91 -tail 0"],
 			RunCommands.LogsAsync, Positional: "id"),
 
-		new("run", "wait", "Wait until a run is no longer live; ok when it completed.",
+		new("agent", "wait", "Wait until a run is no longer live; ok when it completed.",
 			[Id, new("timeout", "seconds", "Give up after this long with timed_out = true (default: 0, wait as long as it takes).")],
-			["bassia run wait brave-otter-3f2a91", "bassia run wait -id brave-otter-3f2a91 -timeout 600"],
+			["bassia agent wait brave-otter-3f2a91", "bassia agent wait -id brave-otter-3f2a91 -timeout 600"],
 			RunCommands.WaitAsync, Positional: "id"),
 
-		new("run", "stop", "Stop a live run (started from any shell, or detached): kill the agent's process tree, record the run as cancelled and keep its folder.",
+		new("agent", "stop", "Stop a live run (started from any shell, or detached): kill the agent's process tree, record the run as cancelled and keep its folder.",
 			[Id, new("timeout", "seconds", "How long to wait for it to stop before killing its process (default: 30).")],
-			["bassia run stop brave-otter-3f2a91"],
+			["bassia agent stop brave-otter-3f2a91"],
 			RunCommands.StopAsync, Positional: "id"),
 
-		new("run", "retry", "Retry the commit/tag/push steps of a run that finished partial.",
+		new("agent", "retry", "Retry the commit/tag/push steps of a run that finished partial.",
 			[Id],
-			["bassia run retry brave-otter-3f2a91"],
+			["bassia agent retry brave-otter-3f2a91"],
 			RunCommands.RetryAsync, Positional: "id"),
 
-		new("run", "abandon", "Discard a finished run's folder and record it as abandoned; results already pushed stay where they are.",
+		new("agent", "abandon", "Discard a finished run's folder and record it as abandoned; results already pushed stay where they are.",
 			[Id],
-			["bassia run abandon brave-otter-3f2a91"],
+			["bassia agent abandon brave-otter-3f2a91"],
 			RunCommands.AbandonAsync, Positional: "id"),
 
-		new("run", "diff", "Show what a run changed in each component: files, insertions and deletions, a diffstat, and the patch with -patch.",
+		new("agent", "diff", "Show what a run changed in each component: files, insertions and deletions, a diffstat, and the patch with -patch.",
 			[Id, new("component", "component", "Only this component."), new("patch", null, "Include the full patch.")],
-			["bassia run diff brave-otter-3f2a91", "bassia run diff -id brave-otter-3f2a91 -component app -patch"],
+			["bassia agent diff brave-otter-3f2a91", "bassia agent diff -id brave-otter-3f2a91 -component app -patch"],
 			RunCommands.DiffAsync, Positional: "id"),
 
 		// ----- locks -----
@@ -524,7 +539,7 @@ internal static class CommandTable
 
 		new("help", null, "Show help: every command, the subcommands of a command, or one command's switches and examples.",
 			[new("command", "command [subcommand]", "The command to explain; may be given without -command.")],
-			["bassia help", "bassia help run", "bassia help run start", "bassia run start -help"],
+			["bassia help", "bassia help agent", "bassia help agent start", "bassia agent start -help"],
 			Help.RunAsync, Positional: "command")
 	];
 

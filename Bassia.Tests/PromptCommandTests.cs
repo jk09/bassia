@@ -106,9 +106,9 @@ public class PromptCommandTests
 	[Fact]
 	public void Reply_ArgsAsOneLine_AreSplitWithQuotes()
 	{
-		var reply = PromptReply.Parse("[[command]]\nargs = 'run start -select app -prompt \"add a changelog\"'\n");
+		var reply = PromptReply.Parse("[[command]]\nargs = 'agent start -select app -prompt \"add a changelog\"'\n");
 
-		Assert.Equal(["run", "start", "-select", "app", "-prompt", "add a changelog"], Assert.Single(reply.Commands).Args);
+		Assert.Equal(["agent", "start", "-select", "app", "-prompt", "add a changelog"], Assert.Single(reply.Commands).Args);
 		Assert.False(reply.Done);
 	}
 
@@ -147,7 +147,7 @@ public class PromptCommandTests
 	[InlineData("-name is required", "component", "show")]
 	[InlineData("cannot be run from a prompt", "prompt", "do", "it")]
 	[InlineData("cannot be run from a prompt", "web")]
-	[InlineData("was replaced", "agent")]
+	[InlineData("was replaced", "run")]
 	[InlineData("No command given", "-C", "/mono")]
 	public void Check_CommandThatDoesNotFit_IsRejectedWithTheReason(string reason, params string[] args)
 	{

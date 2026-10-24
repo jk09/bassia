@@ -58,9 +58,9 @@ internal static class Help
 				["usage"] = GlobalUsage,
 				["global_switches"] = new List<string> { "-C <path>: run as if bassia was started in <path>; may repeat, each relative to the previous one" },
 				["grammar"] = "Switches are case-insensitive and may be written -name or --name. A command's main argument may be given without its switch " +
-					"(bassia run show brave-otter-3f2a91). A rest-of-line switch (-run, -resolve) takes everything after it and comes last. Lists are comma-separated.",
+					"(bassia agent show brave-otter-3f2a91). A rest-of-line switch (-run, -resolve) takes everything after it and comes last. Lists are comma-separated.",
 				["result"] = "A result opens with the line '# bassia result', then ok, command, message (or error), then the command's data. When a command " +
-					"streams other output first (run start without -detach), parse from the last '# bassia result' line.",
+					"streams other output first (agent start without -detach), parse from the last '# bassia result' line.",
 				["table"] = new TomlText(AsciiTable.Render(["COMMAND", "SUMMARY"],
 					CommandTable.Commands.Select(command => (IReadOnlyList<string>)[command.FullName, command.Summary]), 160))
 			});

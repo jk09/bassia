@@ -27,7 +27,7 @@ internal static class ComponentSurvey
 {
 	public static async Task<SurveyResult> RunAsync(string repository, string component, string branch, int depth, int commitLimit, int pairLimit)
 	{
-		var tip = await ComponentSplitter.ListTipAsync(repository, branch);
+		var tip = await GitHistorySplitter.ListTipAsync(repository, branch);
 		var folders = new Dictionary<string, (int Files, long Bytes, int Commits)>(StringComparer.Ordinal);
 		foreach (var file in tip.Where(file => file.Path.Contains('/')))
 		{

@@ -2,6 +2,7 @@ namespace Bassia;
 
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Unwind;
 
 /// <summary><c>bassia component unwind</c> and <c>component add -unwind</c>: a component's git submodules become components.</summary>
@@ -13,21 +14,14 @@ internal static class UnwindCommands
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var definition = ComponentCommands.RequireComponent(monorepo, invocation.Require("name"));
-		var root = new UnwindComponent
-		{
-			Name = definition.Name,
-			Url = definition.Url,
-			RepoDir = ComponentCommands.RequireRepo(monorepo, definition.Name),
-			IsNew = false,
-			References = definition.References.ToList()
-		};
+		ComponentCommands.RequireRepo(monorepo, definition.Name);
 
-		using var unwinder = await SubmoduleUnwinder.PlanAsync(monorepo, root);
+		using var unwinder = await monorepo.Graph().PlanUnwrapAsync(definition.Name);
 		var dryRun = invocation.Has("dry-run");
 		var count = unwinder.Unwinding.Sum(context => context.Pins.Count);
 		if (count == 0)
 		{
-			return ProgramCli.WriteResult(true, invocation.Command, $"Component '{definition.Name}' has no submodules on '{root.MainBranch}'; nothing to unwind.",
+			return ProgramCli.WriteResult(true, invocation.Command, $"Component '{definition.Name}' has no submodules on '{unwinder.Root.MainBranch}'; nothing to unwind.",
 				Describe(unwinder, dryRun, metaRepoCommit: null));
 		}
 
@@ -43,37 +37,22 @@ internal static class UnwindCommands
 	// ----- bassia component add -unwind -----
 
 	/// <summary>
-	/// Unwinds a component <c>component add</c> has just cloned to <paramref name="componentDir"/> but not registered:
-	/// the unwind registers it with the submodules' components in one meta-repo commit. When the plan fails, the clone
-	/// is removed again and nothing is registered.
+	/// Adds a component and unwinds it: the unwind registers it with the submodules' components in one meta-repo
+	/// commit. When the plan fails, the import is removed again and nothing is registered.
 	/// </summary>
-	public static async Task<int> AddUnwoundAsync(Invocation invocation, Monorepo monorepo, string name, string url, string componentDir, IReadOnlyList<ComponentReference> references)
+	public static async Task<int> AddUnwoundAsync(Invocation invocation, Monorepo monorepo, string name, string url, IReadOnlyList<ComponentReference> references)
 	{
-		var root = new UnwindComponent { Name = name, Url = url, RepoDir = componentDir, IsNew = true, References = references.ToList() };
-		SubmoduleUnwinder unwinder;
-		try
-		{
-			unwinder = await SubmoduleUnwinder.PlanAsync(monorepo, root);
-		}
-		catch
-		{
-			DeleteRepo(componentDir);
-			throw;
-		}
-
-		using (unwinder)
-		{
-			var commit = await unwinder.ApplyAsync($"Add component '{name}' from '{url}' and unwind its submodules{AddedSuffix(unwinder)}", references);
-			var count = unwinder.Unwinding.Sum(context => context.Pins.Count);
-			var payload = Describe(unwinder, dryRun: false, commit);
-			payload["url"] = url;
-			payload["path"] = componentDir;
-			return ProgramCli.WriteResult(true, invocation.Command,
-				count == 0
-					? $"Added component '{name}' from '{url}'; it has no submodules to unwind."
-					: $"Added component '{name}' from '{url}'. {Summary(unwinder, dryRun: false)}",
-				payload);
-		}
+		using var unwinder = await monorepo.Graph().ImportUnwrappedAsync(name, url, references);
+		var commit = await unwinder.ApplyAsync($"Add component '{name}' from '{url}' and unwind its submodules{AddedSuffix(unwinder)}", references);
+		var count = unwinder.Unwinding.Sum(context => context.Pins.Count);
+		var payload = Describe(unwinder, dryRun: false, commit);
+		payload["url"] = url;
+		payload["path"] = unwinder.Root.RepoDir;
+		return ProgramCli.WriteResult(true, invocation.Command,
+			count == 0
+				? $"Added component '{name}' from '{url}'; it has no submodules to unwind."
+				: $"Added component '{name}' from '{url}'. {Summary(unwinder, dryRun: false)}",
+			payload);
 	}
 
 	private static string AddedSuffix(SubmoduleUnwinder unwinder)
@@ -140,20 +119,5 @@ internal static class UnwindCommands
 				["conflicts"] = tag.Conflicts.Count == 0 ? null : tag.Conflicts.ToList()
 			}).ToList()
 		};
-	}
-
-	private static void DeleteRepo(string directory)
-	{
-		if (!Directory.Exists(directory))
-		{
-			return;
-		}
-
-		foreach (var file in Directory.EnumerateFiles(directory, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
-		{
-			File.SetAttributes(file, FileAttributes.Normal);
-		}
-
-		Directory.Delete(directory, recursive: true);
 	}
 }

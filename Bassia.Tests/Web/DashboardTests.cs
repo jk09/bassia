@@ -1,5 +1,6 @@
 using System.Net;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Web;
 using Microsoft.AspNetCore.Builder;
@@ -205,7 +206,7 @@ public class DashboardTests
 		Assert.Contains("<svg class=\"chart donut\"", runs);
 		Assert.Contains("<svg class=\"chart flow\"", page);
 		Assert.Contains(RunMetadata.TagName(runId, 0), page); // its result tag in the flow and the table
-		Assert.Contains($"bassia run diff {RunMetadata.Key(runId)} -patch", page);
+		Assert.Contains($"bassia agent diff {RunMetadata.Key(runId)} -patch", page);
 		Assert.Contains("waiting", page); // its result waits in the merge queue
 		Assert.Contains("No agentic run", await host.GetAsync("/runs/agent-run-brave-otter-000000", HttpStatusCode.NotFound));
 	}
@@ -322,7 +323,7 @@ public class DashboardTests
 		Assert.Contains("class=\"span\"", multi); // release-1 joins app and lib
 		Assert.Contains("set by hand", baseline);
 		Assert.Contains($"href=\"/runs/{runId}\"", baseline); // the run that started from it
-		Assert.Contains("bassia run start -select app@release-1,lib@release-1", baseline);
+		Assert.Contains("bassia agent start -select app@release-1,lib@release-1", baseline);
 		Assert.Contains("<svg class=\"chart flow\"", baseline);
 		Assert.Contains("run <a class=\"id\"", result); // made by the run
 		Assert.Contains("No component has a tag", await host.GetAsync("/tag?name=nope", HttpStatusCode.NotFound));

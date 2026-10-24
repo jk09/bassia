@@ -2,6 +2,7 @@ namespace Bassia;
 
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Prompt;
 
 /// <summary><c>bassia prompt</c> - the command line driven by an ask in natural language - and <c>bassia skill ...</c>.</summary>

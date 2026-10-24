@@ -1,6 +1,7 @@
 namespace Bassia.Integration;
 
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Bassia.Git;
 using Bassia.Locks;
 

@@ -16,7 +16,7 @@ internal sealed class Invocation
 
 	public CommandSpec Spec { get; }
 
-	/// <summary>The command's name as results report it, e.g. <c>run start</c>.</summary>
+	/// <summary>The command's name as results report it, e.g. <c>agent start</c>.</summary>
 	public string Command => Spec.FullName;
 
 	public bool HelpRequested { get; private set; }

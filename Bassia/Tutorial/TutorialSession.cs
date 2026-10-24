@@ -185,7 +185,7 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 		output.WriteLine();
 		output.WriteLine("  bassia status -human                  what is in the monorepo and what is going on");
 		output.WriteLine("  bassia component add -url <url>       add another repository");
-		output.WriteLine($"  bassia run start -select {main} -prompt \"<what to do>\"");
+		output.WriteLine($"  bassia agent start -select {main} -prompt \"<what to do>\"");
 		output.WriteLine($"                                        let an AI agent work on {main} and what it needs");
 		output.WriteLine("  bassia web                            a dashboard of the monorepo in your browser");
 		output.WriteLine("  bassia prompt <what you want>         say what you want in plain English");
@@ -655,7 +655,7 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 		}
 		while (task.Length == 0);
 
-		await ConfirmAndRunAsync([["-C", monorepo.Root, "run", "start", "-select", string.Join(",", selected), "-detach", "-prompt", task]], cancellation);
+		await ConfirmAndRunAsync([["-C", monorepo.Root, "agent", "start", "-select", string.Join(",", selected), "-detach", "-prompt", task]], cancellation);
 	}
 
 	private async Task<string> AskComponentAsync(string question, IReadOnlyList<string> names, CancellationToken cancellation)

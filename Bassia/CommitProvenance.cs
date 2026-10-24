@@ -1,6 +1,7 @@
 namespace Bassia;
 
 using Bassia.CliCommands.Agent;
+using Bassia.Core;
 using Tomlyn;
 using Tomlyn.Model;
 

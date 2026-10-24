@@ -10,7 +10,7 @@ internal static class InitCommand
 		"# Bassia meta-repo configuration. Read and change it with 'bassia config list|get|set'.\n" +
 		"\n" +
 		"[agent]\n" +
-		"# Agent command of a run started from a prompt ('bassia run start -prompt ...');\n" +
+		"# Agent command of a run started from a prompt ('bassia agent start -prompt ...');\n" +
 		"# the prompt is appended as one quoted argument.\n" +
 		"command = \"" + Monorepo.DefaultAgentCommand + "\"\n" +
 		"\n" +
@@ -42,7 +42,7 @@ internal static class InitCommand
 		"[lock]\n" +
 		"# Paths parallel agentic runs must not change at the same time. While a run's agent changes a file, the run holds it\n" +
 		"# (or its folder) and every other run sees that ('bassia lock list|check|wait'). Override one component in a\n" +
-		"# [lock.component.<name>] table; 'bassia run start -lock-files/-lock-folders' adds to them for one run.\n" +
+		"# [lock.component.<name>] table; 'bassia agent start -lock-files/-lock-folders' adds to them for one run.\n" +
 		"# files: patterns of files held one by one, e.g. [\"**/*.cs\"]. folders: patterns of folders held as a whole, e.g.\n" +
 		"# [\"src/*\"] (each folder directly under src) or [\"**\"] (the folder of every changed file). Empty: nothing is held.\n" +
 		"files = []\n" +

@@ -266,7 +266,7 @@ internal sealed class RunMetadata
 /// checked out or moved (so many parallel runs never contend for an index lock). Each record version is a commit
 /// (child of the previous version) reachable only through its annotated tag <c>agent-run/&lt;key&gt;/&lt;lineage&gt;</c>.
 /// </summary>
-internal sealed class RunMetadataStore
+internal sealed class RunMetadataStore : Storage.IRunRecordStore
 {
 	private readonly GitClient git;
 	private readonly string repoDir;
@@ -278,6 +278,8 @@ internal sealed class RunMetadataStore
 	}
 
 	public string RepoDir => repoDir;
+
+	public string Location => repoDir;
 
 	/// <summary>A complete bare repo is in place (<c>objects/</c> exists).</summary>
 	private bool IsInitialized => Directory.Exists(Path.Combine(repoDir, "objects"));
