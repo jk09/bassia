@@ -78,7 +78,7 @@ try {
 	$refused = Invoke-Installer @()
 	$env:PATH = $savedPath
 	Assert-That ($refused.ExitCode -ne 0) 'the installer fails without the .NET runtimes'
-	Assert-That ($refused.Text -match 'missing: Microsoft\.AspNetCore\.App') 'it names the missing ASP.NET Core runtime'
+	Assert-That ($refused.Text -match 'missing:.*Microsoft\.AspNetCore\.App') 'it names the missing ASP.NET Core runtime'
 	Assert-That (-not (Test-Path -LiteralPath (Join-Path $root "versions/$id"))) 'it installs nothing'
 
 	# 2. Install.
