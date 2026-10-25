@@ -21,7 +21,10 @@ concurrency:
 env:
   DOTNET_NOLOGO: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-  DOTNET_VERSION: '10.0.x'
+  # The SDK channel, installed from builds.dotnet.microsoft.com directly: the aka.ms redirect actions/setup-dotnet
+  # resolves to (dotnetorigin.blob.core.windows.net) answered 409 for 10.0.403 and failed every job before the build.
+  DOTNET_CHANNEL: '10.0'
+  DOTNET_FEED: 'https://builds.dotnet.microsoft.com/dotnet'
 
 jobs:
   test:
@@ -31,9 +34,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Install the .NET SDK
+        if: runner.os != 'Windows'
+        run: |
+          curl -sSL --retry 3 "$DOTNET_FEED/scripts/v1/dotnet-install.sh" -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" --channel "$DOTNET_CHANNEL" --azure-feed "$DOTNET_FEED" --install-dir "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
 
       - name: Put the pinned weave-driver on PATH
         shell: pwsh
@@ -80,9 +87,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Install the .NET SDK
+        if: runner.os != 'Windows'
+        run: |
+          curl -sSL --retry 3 "$DOTNET_FEED/scripts/v1/dotnet-install.sh" -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" --channel "$DOTNET_CHANNEL" --azure-feed "$DOTNET_FEED" --install-dir "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+
+      - name: Install the .NET SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'dotnet-install.ps1'
+          Invoke-WebRequest "$env:DOTNET_FEED/scripts/v1/dotnet-install.ps1" -OutFile $script -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          & $script -Channel $env:DOTNET_CHANNEL -AzureFeed $env:DOTNET_FEED -InstallDir $dir
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Ensure PowerShell 7
         if: runner.os != 'Windows'
