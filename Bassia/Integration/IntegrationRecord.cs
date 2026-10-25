@@ -375,9 +375,9 @@ internal sealed class IntegrationRecord
 }
 
 /// <summary>Integration records in the <c>.agentic-runs</c> store, beside (and never mixed up with) the run records.</summary>
-internal sealed class IntegrationStore(RunMetadataStore store)
+internal sealed class IntegrationStore(Storage.IRecordStore store)
 {
-	public string RepoDir => store.RepoDir;
+	public string RepoDir => store.Location;
 
 	public Task EnsureRepositoryAsync() => store.EnsureRepositoryAsync();
 

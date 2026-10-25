@@ -24,15 +24,18 @@ internal static class AgentCommand
 	// ----- bassia agent start -select ... -run ... -----
 
 	/// <summary>The run engine for <paramref name="monorepo"/>: its component graph and run records, the agent run as a shell command, lock tables held.</summary>
-	internal static AgentRuns Runs(Monorepo monorepo, IRunRecordStore? records = null) =>
-		monorepo.Graph().AgentRuns(records ?? monorepo.RunRecords(), new AgentRunOptions
+	internal static AgentRuns Runs(Monorepo monorepo, IRunRecordStore? records = null)
+	{
+		var graph = monorepo.Graph();
+		return graph.AgentRuns(records ?? monorepo.RunRecords(), new AgentRunOptions
 		{
 			WorkspaceDir = monorepo.WorkspaceDir,
 			CommitSubject = monorepo.CommitSubject,
 			RunAgent = (metadata, context) => RunAgentProcessAsync(monorepo, metadata, context),
-			StartLocks = (metadata, report) => RunLocks.Start(monorepo, metadata, report),
+			StartLocks = (metadata, report) => RunLocks.Start(monorepo, graph.Storage, metadata, report),
 			Prepared = metadata => WriteLockGuide(metadata, RunLocks.Filters(monorepo, metadata))
 		});
+	}
 
 	/// <summary>
 	/// The full <c>bassia agent start -select ... -run ...</c> sequence, shared by the CLI and the frontends.

@@ -2,8 +2,8 @@ namespace Bassia.Integration;
 
 using Bassia.CliCommands.Agent;
 using Bassia.Core;
-using Bassia.Git;
 using Bassia.Locks;
+using Bassia.Storage;
 
 /// <summary>What the user decided on top of the triage: a base per component and a strategy per step.</summary>
 internal sealed record IntegrationChoices
@@ -51,7 +51,11 @@ internal static class IntegrationPlanner
 	private static bool IsResult(ComponentRun component) =>
 		component.ResultStatus == ResultStatus.Pushed && component.ResultCommit is not null && component.ResultTag is not null;
 
-	public static async Task<IReadOnlyList<ComponentIntegration>> PlanAsync(Monorepo monorepo, IReadOnlyList<RunMetadata> runs, IntegrationChoices? choices = null)
+	public static Task<IReadOnlyList<ComponentIntegration>> PlanAsync(Monorepo monorepo, IReadOnlyList<RunMetadata> runs, IntegrationChoices? choices = null) =>
+		PlanAsync(monorepo.Graph(), IntegrationSettings.For(monorepo), runs, choices);
+
+	/// <summary>The triage of <paramref name="runs"/> on <paramref name="graph"/>, with the policies of <paramref name="settings"/>.</summary>
+	public static async Task<IReadOnlyList<ComponentIntegration>> PlanAsync(MonorepoGraph graph, IntegrationSettings settings, IReadOnlyList<RunMetadata> runs, IntegrationChoices? choices = null)
 	{
 		choices ??= IntegrationChoices.None;
 		if (runs.Count == 0)
@@ -73,26 +77,25 @@ internal static class IntegrationPlanner
 		}
 
 		var plan = new List<ComponentIntegration>();
-		foreach (var definition in monorepo.Components.Where(component => touched.Contains(component.Name)))
+		foreach (var definition in graph.Registry.Components.Where(component => touched.Contains(component.Name)))
 		{
-			plan.Add(await PlanComponentAsync(monorepo, definition.Name, ordered, choices));
+			plan.Add(await PlanComponentAsync(graph, settings, definition.Name, ordered, choices));
 		}
 
 		return plan;
 	}
 
-	private static async Task<ComponentIntegration> PlanComponentAsync(Monorepo monorepo, string name, IReadOnlyList<RunMetadata> runs, IntegrationChoices choices)
+	private static async Task<ComponentIntegration> PlanComponentAsync(MonorepoGraph graph, IntegrationSettings settings, string name, IReadOnlyList<RunMetadata> runs, IntegrationChoices choices)
 	{
-		var sourceDir = monorepo.SourceRepoDir(name);
-		if (!Directory.Exists(sourceDir))
+		if (!graph.Storage.Exists(name))
 		{
-			throw new IntegrationException($"Component '{name}' has no local repository at '{sourceDir}'.");
+			throw new IntegrationException($"Component '{name}' has no local repository at '{graph.Storage.LocationOf(name)}'.");
 		}
 
-		var git = GitClient.In(sourceDir);
-		var baseRef = choices.Onto.GetValueOrDefault(name) ?? await DefaultBranchAsync(git, name);
-		var baseCommit = await ResolveAsync(git, baseRef)
-			?? throw new IntegrationException($"'{baseRef}' does not exist in component '{name}' ('{sourceDir}').");
+		var store = graph.Storage.Open(name);
+		var baseRef = choices.Onto.GetValueOrDefault(name) ?? await DefaultBranchAsync(store, name);
+		var baseCommit = await Revisions.ResolveAsync(store, baseRef)
+			?? throw new IntegrationException($"'{baseRef}' does not exist in component '{name}' ('{store.Location}').");
 
 		var component = new ComponentIntegration { Name = name, BaseRef = baseRef, BaseCommit = baseCommit };
 		var candidates = new List<IntegrationStep>();
@@ -104,7 +107,7 @@ internal static class IntegrationPlanner
 				continue;
 			}
 
-			var sourceCommit = await ResolveAsync(git, result.ResultTag!)
+			var sourceCommit = await Revisions.ResolveAsync(store, result.ResultTag!)
 				?? throw new IntegrationException($"The result tag '{result.ResultTag}' of run '{run.RunId}' is missing from component '{name}'.");
 			if (sourceCommit != result.ResultCommit)
 			{
@@ -126,15 +129,15 @@ internal static class IntegrationPlanner
 		candidates = AfterWhatTheyContain(candidates, caughtUp);
 
 		// Chain every result git (or the structural merge) can merge on its own onto a simulated head, oldest first.
-		var policy = choices.Policy ?? monorepo.MergePolicyFor(name);
-		var lockPolicy = choices.LockPolicy ?? LockFilter.ConflictPolicy(monorepo.Config, name);
+		var policy = choices.Policy ?? settings.MergePolicyFor(name);
+		var lockPolicy = choices.LockPolicy ?? settings.LockPolicyFor(name);
 		var acceptWarnings = policy.Warnings == WarningsPolicy.Accept;
 		var head = baseCommit;
 		List<IntegrationStep> deterministic = [], semantic = [], manual = [], skipped = [];
 		foreach (var step in candidates)
 		{
 			var chosen = choices.StrategyFor(name, step.RunId);
-			var probe = await ClassifyAsync(git, head, step, choices.Structural, acceptWarnings);
+			var probe = await ClassifyAsync(store, head, step, choices.Structural, acceptWarnings);
 			var unmerged = step.Triage == Triage.Conflict && step.Structural != StructuralTriage.Clean
 				&& !(acceptWarnings && step.Structural == StructuralTriage.Warnings);
 
@@ -214,14 +217,14 @@ internal static class IntegrationPlanner
 				// Git's own merge, or the structural merge where git conflicts and weave does not.
 				step.Strategy = step.Triage == Triage.Conflict ? MergeStrategy.Structural : MergeStrategy.Syntactic;
 				deterministic.Add(step);
-				head = probe.Triage == Triage.FastForward ? step.SourceCommit : await MergeProbe.SimulateMergeAsync(git, head, step.SourceCommit, probe.Tree!);
+				head = probe.Triage == Triage.FastForward ? step.SourceCommit : await MergeProbe.SimulateMergeAsync(store, head, step.SourceCommit, probe.Snapshot!);
 			}
 		}
 
 		// What the resolver will face first: the semantic results against everything git and weave merged.
 		foreach (var step in semantic)
 		{
-			await ClassifyAsync(git, head, step, choices.Structural);
+			await ClassifyAsync(store, head, step, choices.Structural);
 		}
 
 		// Which results collide with each other on their own - the reason a result that merges cleanly onto the base
@@ -232,10 +235,10 @@ internal static class IntegrationPlanner
 		{
 			for (var j = i + 1; j < active.Count; j++)
 			{
-				var probe = await MergeProbe.ProbeAsync(git, active[i].SourceCommit, active[j].SourceCommit);
+				var probe = await MergeProbe.ProbeAsync(store, active[i].SourceCommit, active[j].SourceCommit);
 				if (probe.Triage == Triage.Conflict && choices.Structural is { } structural)
 				{
-					probe = await MergeProbe.ProbeAsync(git, active[i].SourceCommit, active[j].SourceCommit, structural);
+					probe = await MergeProbe.ProbeAsync(store, active[i].SourceCommit, active[j].SourceCommit, structural);
 				}
 
 				if (probe.Triage == Triage.Conflict)
@@ -277,9 +280,9 @@ internal static class IntegrationPlanner
 	/// conflicts, the structural merge's. Returns the probe whose tree a deterministic merge would produce: the
 	/// structural one when git conflicts and weave merges cleanly (or with warnings the policy accepts), git's otherwise.
 	/// </summary>
-	private static async Task<MergeProbe.Result> ClassifyAsync(GitClient git, string head, IntegrationStep step, StructuralMerge? structural, bool acceptWarnings = false)
+	private static async Task<MergeProbe.Result> ClassifyAsync(IComponentStore store, string head, IntegrationStep step, StructuralMerge? structural, bool acceptWarnings = false)
 	{
-		var probe = await MergeProbe.ProbeAsync(git, head, step.SourceCommit);
+		var probe = await MergeProbe.ProbeAsync(store, head, step.SourceCommit);
 		step.Triage = probe.Triage;
 		step.Conflicts.Clear();
 		step.Conflicts.AddRange(probe.Conflicts);
@@ -291,7 +294,7 @@ internal static class IntegrationPlanner
 			return probe;
 		}
 
-		var structured = await MergeProbe.ProbeAsync(git, head, step.SourceCommit, structural);
+		var structured = await MergeProbe.ProbeAsync(store, head, step.SourceCommit, structural);
 		step.StructuralConflicts.AddRange(structured.Conflicts);
 		step.StructuralWarnings.AddRange(structured.Warnings);
 		step.Structural = structured.Triage == Triage.Conflict ? StructuralTriage.Conflict
@@ -300,72 +303,40 @@ internal static class IntegrationPlanner
 		return step.Structural == StructuralTriage.Clean || (acceptWarnings && step.Structural == StructuralTriage.Warnings) ? structured : probe;
 	}
 
-	/// <summary>The branch the component repo's <c>HEAD</c> names: what <c>component add</c> cloned, usually <c>main</c>.</summary>
-	private static async Task<string> DefaultBranchAsync(GitClient git, string name)
-	{
-		var head = await git.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-		return head.ExitCode == 0 && head.Output.Trim().Length > 0
-			? head.Output.Trim()
-			: throw new IntegrationException($"Component '{name}' has no default branch; name a base with -onto {name}@<branch-or-tag>.");
-	}
-
-	internal static async Task<string?> ResolveAsync(GitClient git, string commitIsh)
-	{
-		var result = await git.RunAsync(["rev-parse", "--quiet", "--verify", $"{commitIsh}^{{commit}}"]);
-		return result.ExitCode == 0 ? result.Output.Trim() : null;
-	}
+	/// <summary>The component's default branch: what <c>component add</c> imported, usually <c>main</c>.</summary>
+	private static async Task<string> DefaultBranchAsync(IComponentStore store, string name) =>
+		await store.DefaultBranchAsync()
+			?? throw new IntegrationException($"Component '{name}' has no default branch; name a base with -onto {name}@<branch-or-tag>.");
 }
 
-/// <summary>Asks git how two commits would merge, without a working tree and without moving any ref.</summary>
+/// <summary>Asks a component's store how two commits would merge, without a working copy and without moving any ref.</summary>
 internal static class MergeProbe
 {
-	/// <param name="Warnings">The structural merge driver's warnings; always empty for git's own merge.</param>
-	internal sealed record Result(Triage Triage, string? Tree, IReadOnlyList<string> Conflicts, IReadOnlyList<string> Warnings);
+	/// <param name="Snapshot">The merged content, to chain the next merge onto (see <see cref="SimulateMergeAsync"/>).</param>
+	/// <param name="Warnings">The structural merge driver's warnings; always empty for the store's own merge.</param>
+	internal sealed record Result(Triage Triage, string? Snapshot, IReadOnlyList<string> Conflicts, IReadOnlyList<string> Warnings);
 
-	/// <param name="structural">Merge with the structural driver (weave) instead of git's line merge alone.</param>
-	public static async Task<Result> ProbeAsync(GitClient git, string ours, string theirs, StructuralMerge? structural = null)
+	/// <param name="structural">Merge with the structural driver (weave) instead of the store's own merge alone.</param>
+	public static async Task<Result> ProbeAsync(IComponentStore store, string ours, string theirs, StructuralMerge? structural = null)
 	{
-		if (await IsAncestorAsync(git, theirs, ours))
+		if (await store.IsAncestorAsync(theirs, ours))
 		{
 			return new Result(Triage.UpToDate, null, [], []);
 		}
 
-		if (await IsAncestorAsync(git, ours, theirs))
+		if (await store.IsAncestorAsync(ours, theirs))
 		{
 			return new Result(Triage.FastForward, null, [], []);
 		}
 
-		// merge-tree --write-tree (git 2.38+) runs the real three-way merge in the object database: exit code 0 is a
-		// clean merge and prints the tree, 1 is a conflict and lists the conflicted paths after the tree. It honours a
-		// merge driver given with -c, which is how the structural merge is probed without touching the repo.
-		var merge = await git.RunAsync([.. structural?.GitOptions ?? [], "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs]);
-		var lines = merge.Output.Replace("\r", "").Split('\n');
-		var warnings = structural is null ? [] : StructuralMerge.Warnings(merge.Error);
-		return merge.ExitCode switch
-		{
-			0 => new Result(Triage.Clean, lines[0].Trim(), [], warnings),
-			1 => new Result(Triage.Conflict, lines[0].Trim(), lines.Skip(1).TakeWhile(line => line.Length > 0).Distinct(StringComparer.Ordinal).ToList(), warnings),
-			_ => throw new IntegrationException(
-				$"git merge-tree failed in '{git.WorkingDirectory}' (the triage needs git 2.38 or later): {merge.Error.Trim()}")
-		};
+		var merge = await store.MergeAsync(ours, theirs, structural?.Driver);
+		return new Result(merge.Clean ? Triage.Clean : Triage.Conflict, merge.Snapshot, merge.Conflicts, merge.Warnings);
 	}
 
 	/// <summary>
-	/// The merge commit git would make, as an unreferenced object: it lets the triage chain the next merge onto it.
-	/// Nothing points at it, so git's garbage collection removes it in due course.
+	/// The merge commit a merge would make, referenced by nothing: it lets the triage chain the next merge onto it. A
+	/// store may forget it in due course (git's garbage collection removes it).
 	/// </summary>
-	public static Task<string> SimulateMergeAsync(GitClient git, string ours, string theirs, string tree) =>
-		git.RunOrThrowAsync(["-c", "user.name=Bassia triage", "-c", "user.email=triage@bassia.invalid",
-			"commit-tree", tree, "-p", ours, "-p", theirs, "-m", "bassia integration triage"]);
-
-	public static async Task<bool> IsAncestorAsync(GitClient git, string ancestor, string descendant)
-	{
-		var result = await git.RunAsync(["merge-base", "--is-ancestor", ancestor, descendant]);
-		return result.ExitCode switch
-		{
-			0 => true,
-			1 => false,
-			_ => throw new GitException($"git merge-base --is-ancestor failed in '{git.WorkingDirectory}': {result.Error.Trim()}")
-		};
-	}
+	public static Task<string> SimulateMergeAsync(IComponentStore store, string ours, string theirs, string snapshot) =>
+		store.CommitSnapshotAsync(snapshot, [ours, theirs], "bassia integration triage");
 }

@@ -43,6 +43,25 @@ test graph behaviour was end-to-end through real repositories. `bassia agent` wa
       with the replacement (like other replaced commands). Help, docs, README, scripts, tutorial, web dashboard texts and
       tests use the new name.
 
+### Integration and locks (follow-up)
+
+- [x] The storage contract covers what integration and lock catch-up need: a three-way merge of two commits without a
+      working copy (clean or conflicted paths, an opaque merged snapshot, driver warnings), committing a snapshot with
+      given parents, merge base, diff text and changed paths between commits; and in a working copy: head, merge
+      (fast-forward or not, committing or leaving the merge open), conflicted paths, merge in progress, reset to a
+      commit, uncommitted changed paths, containment of a commit, fetching a store tag, and concluding an open merge.
+- [x] A file-level merge driver (weave) is a storage-neutral `FileMergeDriver` (command, file extensions, warning
+      prefix); the git backend turns it into its merge-driver configuration, the memory backend runs it per file.
+- [x] Integration records go through a generic record store (`IRecordStore`, which `IRunRecordStore` extends);
+      `IntegrationPlanner`, `IntegrationRunner` (run, advance) and `IntegrationStore` use only the graph, the storage
+      contract, the record store and injected settings (workspace, merge/lock policy per component, the resolver).
+- [x] `LockCheckouts` (changed files, containment, catch-up merge, forgetting landed results) uses only working copies
+      and stores from the storage contract.
+- [x] Unit tests on the memory backend cover the integration triage (fast-forward, clean, conflict, chained results,
+      manual paths, skip), running an integration (git-like merges, a fake resolver resolving a conflict, a resolver
+      that fails, publish and tag, advance and a moved base) and lock catch-up (changed files, behind, bringing a result
+      in, a catch-up that would overwrite local changes, forgetting landed results); the existing end-to-end tests pass.
+
 ## Approach
 
 Three layers, outermost depending on the inner ones only:
@@ -57,10 +76,9 @@ Three layers, outermost depending on the inner ones only:
 
 ## Decisions
 
-- Scope of the abstraction: the graph operations named in the request are storage-independent. Integration (git/weave
-  merges), locks catch-up in run checkouts, `bassia log`, `agent diff`, `component survey` and the web dashboard's
-  history views still use git directly; they read component history in ways the contract does not cover yet (diffs,
-  merges, per-commit changed paths), and can move behind it later.
+- Scope of the abstraction: the graph operations named in the request are storage-independent; the follow-up moved
+  integration and lock catch-up behind the contract too. `bassia log`, `agent diff`, `component survey` and the web
+  dashboard's history views still use git directly.
 - Commit names (`-ref` of `component tag|fork`) are resolved by `Core.Revisions` through the contract: `HEAD`, branch
   and tag names, full ids or unique prefixes, with `~n` / `^n` steps - not every git revision expression.
 - A created component starts with one commit without files rather than an unborn branch, so every component always
@@ -75,6 +93,16 @@ Three layers, outermost depending on the inner ones only:
 - `bassia agent` was listed as replaced (by `bassia run`); the entry now points the other way, `bassia run` -> `bassia
   agent`. The run's job kind on disk, `-run <command>` switches and the `agent-run/` tag names are unchanged.
 
+- Follow-up scope: "locks behind the storage contract" means the git work locks do in run checkouts and component
+  stores (`LockCheckouts`). The lock table (`.locks`) is cross-process coordination state, not component history, and
+  stays a file store; `bassia log`, `agent diff`, `component survey` and the dashboard's history views still read git.
+- Integration probes a merge whose head exists only in its working copy (a merge it made) by merging in the working
+  copy and resetting, rather than asking the store, which does not have that commit yet.
+- A lock catch-up that fails aborts the merge (`AbortMergeAsync`) instead of resetting, so the agent's uncommitted
+  changes survive.
+- The memory backend merges at file granularity: a file both sides changed differently conflicts (whole-file conflict
+  markers) unless a `FileMergeDriver` handles its extension. It is a reference for the contract, not a merge engine.
+
 ## Progress
 
 - [x] Storage contract, memory and git backends
@@ -82,6 +110,9 @@ Three layers, outermost depending on the inner ones only:
 - [x] CLI rewired; existing tests pass
 - [x] Unit tests for the graph API against the memory backend
 - [x] `run` -> `agent` rename across code, help, docs and tests
+- [x] Merge, diff and working-copy merge operations in the contract, git and memory backends
+- [x] Integration planner, runner, records and lock catch-up on the contract
+- [x] Unit tests for integration and locks on the memory backend; existing tests pass
 
 ## Validation
 

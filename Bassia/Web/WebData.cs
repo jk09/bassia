@@ -190,7 +190,7 @@ internal sealed class MergeQueue
 						branches[result.Name] = name;
 					}
 
-					heads[result.Name] = head = name is null ? null : await IntegrationPlanner.ResolveAsync(git, name);
+					heads[result.Name] = head = name is null ? null : await git.RunAsync(["rev-parse", "--quiet", "--verify", $"{name}^{{commit}}"]) is { ExitCode: 0 } resolved ? resolved.Output.Trim() : null;
 				}
 
 				// The latest integration that took this result decides, unless the default branch already has it.

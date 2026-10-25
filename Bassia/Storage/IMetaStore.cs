@@ -35,8 +35,11 @@ internal interface IMetaStore
 	Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message);
 }
 
-/// <summary>Where agentic run records are kept: each record version is appended to the run's history.</summary>
-internal interface IRunRecordStore
+/// <summary>
+/// Where versioned records are kept (agentic runs, integrations): a record is a key (<c>&lt;prefix&gt;&lt;key&gt;</c>, its
+/// <c>refBase</c>) with a history of versions numbered from 0 (its lineage), each a named text file.
+/// </summary>
+internal interface IRecordStore
 {
 	/// <summary>Where the records live, as the backend names it.</summary>
 	string Location { get; }
@@ -44,6 +47,22 @@ internal interface IRunRecordStore
 	/// <summary>Creates the store on first use; safe to call from parallel runs.</summary>
 	Task EnsureRepositoryAsync();
 
+	/// <summary>The highest version of the record <paramref name="refBase"/>, or -1 when it has none.</summary>
+	Task<int> LatestIndexAsync(string refBase);
+
+	/// <summary>The distinct keys of the records whose refBase starts with <paramref name="refPrefix"/>.</summary>
+	Task<IReadOnlyList<string>> ListKeysAsync(string refPrefix);
+
+	/// <summary>The file of the record's latest version, with that version; null when the record is unknown.</summary>
+	Task<(string Content, int Lineage)?> ReadLatestAsync(string refBase, string fileName);
+
+	/// <summary>Writes version <paramref name="lineage"/> of the record; returns the version's name (its tag).</summary>
+	Task<string> WriteAsync(string refBase, int lineage, string fileName, string content, string message);
+}
+
+/// <summary>Where agentic run records are kept: each record version is appended to the run's history.</summary>
+internal interface IRunRecordStore : IRecordStore
+{
 	/// <summary>Every recorded run at its latest version, newest first.</summary>
 	Task<IReadOnlyList<RunMetadata>> ListLatestAsync();
 

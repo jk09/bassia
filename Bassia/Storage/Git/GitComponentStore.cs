@@ -141,7 +141,7 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 	public async Task<IReadOnlyList<StoredCommit>> HistoryAsync(string tip) =>
 		ParseCommits(await git.RunOrThrowAsync(["log", "--topo-order", "--format=%H%x00%P%x00%B%x01", tip]));
 
-	private static List<StoredCommit> ParseCommits(string output) =>
+	internal static List<StoredCommit> ParseCommits(string output) =>
 		output.Split('\x01', StringSplitOptions.RemoveEmptyEntries)
 			.Select(entry => entry.TrimStart('\n', '\r').Split('\0'))
 			.Where(fields => fields.Length >= 3 && fields[0].Length > 0)
@@ -245,6 +245,45 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 		return result.ExitCode == 0 && result.Output.Trim().Length > 0 ? result.Output.Trim() : null;
 	}
 
+	// ----- merging and comparing -----
+
+	/// <summary>
+	/// <c>git merge-tree --write-tree</c> (git 2.38+): the real three-way merge in the object database. Exit code 0 is a
+	/// clean merge and prints the tree, 1 is a conflict and lists the conflicted paths after the tree. A file merge driver
+	/// is given to it as configuration, so it is probed without touching the repository.
+	/// </summary>
+	public async Task<MergeResult> MergeAsync(string ours, string theirs, FileMergeDriver? driver = null)
+	{
+		var merge = await git.RunAsync([.. GitMergeDriver.Options(driver), "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs]);
+		var lines = merge.Output.Replace("\r", "").Split('\n');
+		var warnings = driver?.Warnings(merge.Error) ?? [];
+		return merge.ExitCode switch
+		{
+			0 => new MergeResult(true, lines[0].Trim(), [], warnings),
+			1 => new MergeResult(false, lines[0].Trim(), lines.Skip(1).TakeWhile(line => line.Length > 0).Distinct(StringComparer.Ordinal).ToList(), warnings),
+			_ => throw new GitException($"git merge-tree failed in '{Location}' (merging needs git 2.38 or later): {merge.Error.Trim()}")
+		};
+	}
+
+	/// <summary>An unreferenced commit of the tree; git's garbage collection removes it in due course.</summary>
+	public Task<string> CommitSnapshotAsync(string snapshot, IReadOnlyList<string> parents, string message) =>
+		git.RunOrThrowAsync(["-c", "user.name=Bassia", "-c", "user.email=bassia@bassia.invalid",
+			"commit-tree", snapshot, .. parents.SelectMany(parent => new[] { "-p", parent }), "-m", message]);
+
+	public async Task<string?> MergeBaseAsync(string first, string second)
+	{
+		var result = await git.RunAsync(["merge-base", first, second]);
+		return result.ExitCode == 0 && result.Output.Trim().Length > 0 ? result.Output.Trim() : null;
+	}
+
+	public async Task<IReadOnlyList<string>> ChangedPathsAsync(string from, string to) =>
+		Lines(await git.RunOrThrowAsync(["diff", "--name-only", "--no-renames", from, to]));
+
+	public async Task<string> DiffAsync(string from, string to) => (await git.RunAsync(["diff", "--no-color", from, to])).Output;
+
+	internal static List<string> Lines(string text) =>
+		text.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
 	// ----- working copies -----
 
 	public async Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch)
@@ -280,6 +319,12 @@ internal sealed class GitWorkspace(string directory, string sourceRepoDir) : ICo
 	public async Task<string?> CommitAsync(string message)
 	{
 		await checkout.RunOrThrowAsync(["add", "--all"]);
+		if (await MergeInProgressAsync())
+		{
+			await checkout.RunOrThrowAsync(["commit", "--quiet", "--no-edit", "-m", message]);
+			return await HeadAsync();
+		}
+
 		var status = await checkout.RunOrThrowAsync(["status", "--porcelain"]);
 		if (status.Length == 0)
 		{
@@ -287,7 +332,7 @@ internal sealed class GitWorkspace(string directory, string sourceRepoDir) : ICo
 		}
 
 		await checkout.RunOrThrowAsync(["commit", "--quiet", "-m", message]);
-		return await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
+		return await HeadAsync();
 	}
 
 	public async Task<IReadOnlyList<string>> ListTagsAsync(string prefix) =>
@@ -304,4 +349,141 @@ internal sealed class GitWorkspace(string directory, string sourceRepoDir) : ICo
 
 	public Task PublishAsync(string branch, IReadOnlyList<string> tags) =>
 		checkout.RunOrThrowAsync(["push", "--quiet", sourceRepoDir, $"refs/heads/{branch}:refs/heads/{branch}", .. tags.Select(tag => $"refs/tags/{tag}:refs/tags/{tag}")]);
+
+	public Task<string> HeadAsync() => checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
+
+	/// <summary>
+	/// <c>git status</c> of the working tree, untracked files included. The agent never commits - Bassia does once it
+	/// exits - so the working tree is all it changed. A missing or broken checkout changed nothing.
+	/// </summary>
+	public async Task<IReadOnlyList<string>> ChangedPathsAsync()
+	{
+		if (!System.IO.Directory.Exists(Directory))
+		{
+			return [];
+		}
+
+		var status = await checkout.RunAsync(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]);
+		if (status.ExitCode != 0)
+		{
+			return [];
+		}
+
+		// Each entry is "XY <path>", NUL-terminated.
+		return status.Output.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+			.Where(entry => entry.Length > 3)
+			.Select(entry => entry[3..])
+			.Distinct(StringComparer.Ordinal)
+			.ToList();
+	}
+
+	public async Task<bool> ContainsAsync(string commit) =>
+		(await checkout.RunAsync(["cat-file", "-e", $"{commit}^{{commit}}"])).ExitCode == 0
+		&& (await checkout.RunAsync(["merge-base", "--is-ancestor", commit, "HEAD"])).ExitCode == 0;
+
+	public async Task<bool> FetchTagAsync(string tag) =>
+		(await checkout.RunAsync(["fetch", "--quiet", "--no-tags", sourceRepoDir, $"+refs/tags/{tag}:refs/tags/{tag}"])).ExitCode == 0;
+
+	public async Task<MergeOutcome> MergeAsync(string commit, WorkspaceMerge options)
+	{
+		List<string> arguments = [.. GitMergeDriver.Options(options.Driver)];
+		if (options.Diff3)
+		{
+			arguments.AddRange(["-c", "merge.conflictStyle=diff3"]);
+		}
+
+		arguments.AddRange(["merge", "--quiet"]);
+		if (!options.FastForward)
+		{
+			arguments.Add("--no-ff");
+		}
+
+		arguments.AddRange(options.Commit ? ["--no-edit", "-m", options.Message] : ["--no-commit"]);
+		var merge = await checkout.RunAsync([.. arguments, commit]);
+		var warnings = options.Driver?.Warnings(merge.Error) ?? [];
+		if (merge.ExitCode == 0)
+		{
+			return new MergeOutcome(MergeStatus.Merged, [], warnings);
+		}
+
+		// Only a conflict leaves the merge open. Anything else (no git identity, local changes the merge would overwrite)
+		// stops git before it starts, and fails with git's own message.
+		var error = (merge.Error + merge.Output).Trim();
+		error = error.Length == 0 ? $"git merge exited with {merge.ExitCode}" : error;
+		return await MergeInProgressAsync()
+			? new MergeOutcome(MergeStatus.Conflicted, await ConflictedPathsAsync(), warnings, error)
+			: new MergeOutcome(MergeStatus.Failed, [], warnings, error);
+	}
+
+	public async Task<bool> MergeInProgressAsync() =>
+		(await checkout.RunAsync(["rev-parse", "--quiet", "--verify", "MERGE_HEAD"])).ExitCode == 0;
+
+	public async Task<IReadOnlyList<string>> ConflictedPathsAsync() =>
+		GitComponentStore.Lines((await checkout.RunAsync(["diff", "--name-only", "--diff-filter=U"])).Output);
+
+	/// <summary>
+	/// <c>git merge --abort</c> alone keeps files a failed resolver created, and the next <c>git add --all</c> would then
+	/// commit them; so the reset is hard and untracked files go too.
+	/// </summary>
+	public async Task ResetAsync(string commit)
+	{
+		if (await MergeInProgressAsync())
+		{
+			await checkout.RunAsync(["merge", "--abort"]);
+		}
+
+		await checkout.RunOrThrowAsync(["reset", "--quiet", "--hard", commit]);
+		await checkout.RunOrThrowAsync(["clean", "--quiet", "-d", "--force", "-x"]);
+	}
+
+	public async Task AbortMergeAsync()
+	{
+		if (await MergeInProgressAsync())
+		{
+			await checkout.RunOrThrowAsync(["merge", "--abort"]);
+		}
+	}
+
+	public async Task<IReadOnlyList<string>> ChangedPathsAsync(string from, string to) =>
+		from == to ? [] : GitComponentStore.Lines(await checkout.RunOrThrowAsync(["diff", "--name-only", from, to]));
+
+	public async Task<string?> MergeBaseAsync(string first, string second)
+	{
+		var result = await checkout.RunAsync(["merge-base", first, second]);
+		return result.ExitCode == 0 && result.Output.Trim().Length > 0 ? result.Output.Trim() : null;
+	}
+
+	public async Task<IReadOnlyList<StoredCommit>> LogAsync(string from, string to) =>
+		GitComponentStore.ParseCommits((await checkout.RunAsync(["log", "--format=%H%x00%P%x00%B%x01", $"{from}..{to}"])).Output);
+
+	public async Task<string> DiffAsync(string from, string to) => (await checkout.RunAsync(["diff", "--no-color", from, to])).Output;
+}
+
+/// <summary>A <see cref="FileMergeDriver"/> as git configuration: the driver's definition and an attributes file assigning it its files.</summary>
+internal static class GitMergeDriver
+{
+	public static IReadOnlyList<string> Options(FileMergeDriver? driver)
+	{
+		if (driver is null)
+		{
+			return [];
+		}
+
+		var attributes = string.Concat(driver.Extensions.Select(extension => $"*.{extension} merge={driver.Name}\n"));
+		var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(attributes)))[..16];
+		var attributesFile = Path.Combine(Path.GetTempPath(), $"bassia-merge-{driver.Name}-{hash}.gitattributes");
+		if (!File.Exists(attributesFile) || File.ReadAllText(attributesFile) != attributes)
+		{
+			var temporary = attributesFile + $".{Guid.NewGuid():N}";
+			File.WriteAllText(temporary, attributes);
+			File.Move(temporary, attributesFile, overwrite: true);
+		}
+
+		return
+		[
+			"-c", $"merge.{driver.Name}.name={driver.Name} merge driver",
+			"-c", $"merge.{driver.Name}.driver={driver.Command}",
+			"-c", $"core.attributesFile={attributesFile}"
+		];
+	}
 }

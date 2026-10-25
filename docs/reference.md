@@ -744,24 +744,31 @@ changes the outcome of the command. The choice is stored in `feedback.toml` in t
 Bassia has three layers; each depends only on the ones below it.
 
 1. **Storage** (`Bassia/Storage`) - the contract a component backend implements: `IComponentStore` is one
-   component's history (a DAG of commits, branches, annotated tags, file listings and nested units), with working
-   copies (`IComponentWorkspace`: check out, commit, tag, publish) for agents to edit; `IComponentStorage` creates,
-   imports, opens, forks, splits and deletes stores by component name and stages imports (`IStagingArea`);
-   `IMetaStore` keeps the component registry with history, applying `RegistryChange`s (add, remove, set references)
-   as revisions; `IRunRecordStore` keeps the versions of agentic run records. `Storage/Git` implements it on bare
-   repositories next to `.bassia`, `components.toml` and `.agentic-runs`; `Storage/Memory` is the reference
-   implementation, in memory with working copies in real folders.
+   component's history (a DAG of commits, branches, annotated tags, file listings and nested units) with three-way
+   merges of two commits, merge bases and diffs; working copies (`IComponentWorkspace`: check out, commit, tag,
+   publish, merge - committed, fast-forwarded or left open with conflicts - reset, abort, changed and contained
+   commits) are what agents and resolvers edit; `IComponentStorage` creates, imports, opens, forks, splits and deletes
+   stores by component name and stages imports (`IStagingArea`); a `FileMergeDriver` (weave) merges single files for
+   any backend. `IMetaStore` keeps the component registry with history, applying `RegistryChange`s (add, remove, set
+   references) as revisions; `IRecordStore` keeps versioned records, and `IRunRecordStore` agentic runs on top of it.
+   `Storage/Git` implements it on bare repositories next to `.bassia`, `components.toml` and `.agentic-runs`;
+   `Storage/Memory` is the reference implementation, in memory with working copies in real folders, merging at file
+   granularity.
 2. **Component graph** (`Bassia/Core`) - `ComponentRegistry` is the immutable, validated graph of components and
    their references (unique valid names, references to registered components at paths inside the referrer, no
    cycles; closure and dependency order). `MetaRepo` maintains it: every change is checked against the graph, then
    persisted as one revision. `MonorepoGraph` is the API over both: create, import, remove, reference, tag, fork,
    split and unwrap components, and `AgentRuns` runs agentic runs on it (selection, working copies with nested
    references, commit/tag/publish, records, retry, abandon), with the agent process and the lock session injected.
-3. **Commands** (`Bassia/CliCommands`, `Bassia/Web`, `Bassia/Integration`) - parse, call the graph for the monorepo
-   on disk (`Monorepo.Graph()`), and format results.
+   Integration (`Bassia/Integration`: the triage, the merges, the resolver, publishing and advancing, with
+   `IntegrationSettings` for policies and how the resolver runs) and lock catch-up (`LockCheckouts`) work on the same
+   contract.
+3. **Commands** (`Bassia/CliCommands`, `Bassia/Web`) - parse, call the graph for the monorepo on disk
+   (`Monorepo.Graph()`), and format results.
 
-A replacement for git implements the storage contract; nothing in the component graph changes. Integration, locks
-catch-up, `bassia log`, `agent diff`, `component survey` and the dashboard's history views still read git directly.
+A replacement for git implements the storage contract; nothing in the component graph, the integration or locking
+changes. `bassia log`, `agent diff`, `component survey` and the dashboard's history views still read git directly; the
+lock table (`.locks`) is a file store for coordinating processes, not component history.
 
 ## Build
 
@@ -790,7 +797,8 @@ dotnet test --filter Category=EndToEnd --logger "console;verbosity=detailed"
 ```
 
 The tests under `Bassia.Tests/Core` exercise the component graph (registry, meta-repo, create/import/remove/
-reference/tag/fork, split, unwrap and agentic runs including failures, retry and abandon) on the in-memory storage, so
+reference/tag/fork, split, unwrap and agentic runs including failures, retry and abandon), the integration (triage,
+merges, a resolver, structural merges, publishing, advancing) and lock catch-up on the in-memory storage, so
 they need neither git nor a shell and run in well under a second. Most other tests drive the CLI in-process against
 components created locally. `CliSurfaceTests` covers the grammar, the
 help of every command and the monorepo, configuration, component, graph and log commands; `RunCommandTests` the run
