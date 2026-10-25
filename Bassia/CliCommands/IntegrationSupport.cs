@@ -56,7 +56,8 @@ internal static class IntegrationSupport
 		["structural_driver"] = outcome.Record.StructuralDriver,
 		["metadata_repo"] = storeDir,
 		["metadata_tags"] = outcome.RecordTags,
-		["component"] = outcome.Record.Components.Select(ComponentData).ToList()
+		["component"] = outcome.Record.Components.Select(ComponentData).ToList(),
+		["verification"] = outcome.Record.Verification.Count == 0 ? null : TaskCommands.Describe(outcome.Record.Verification)
 	};
 
 	/// <summary>Named as in <c>integration.toml</c>, so a caller reads the result and the stored record with the same keys.</summary>

@@ -122,6 +122,7 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | Monorepo | `init [-path <dir>]`, `status`, `version`, `tutorial` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...] [-tags <t>,...] [-visibility <p>,...] [-owners <o>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>] [-tags ...] [-visibility ...] [-owners ...]`, `component show -name <c>`, `component set -name <c> [-references ...\|-clear-references] [-tags ...\|-clear-tags] [-visibility ...\|-public\|-private] [-owners ...\|-clear-owners] [-exports ...\|-clear-exports]`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...] [-tags ...] [-visibility ...] [-owners ...]` |
+| Tasks | `task list [-name <c>]`, `task run -task <t>,... [-select <c[@ref]>,...] [-keep]`, `affected -runs <ids>\|all \| -components <c>,...` |
 | Architectural boundaries | `boundary list`, `boundary add -source <pattern> [-allow <pattern>,...] [-deny <pattern>,...] [-description <text>]`, `boundary remove -index <n>`, `boundary check [-name <c>] [-code] [-strict]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
@@ -272,6 +273,7 @@ component, is rejected and nothing changes.
 | `merge.warnings` | `resolver` | A result weave merged with warnings: reviewed by the resolver, left for a human (`manual`), or weave's merge stands (`accept`) |
 | `merge.manual_paths` | (none) | Path patterns, as in split plans (`**/*.csproj,db/migrations`), whose conflicts always need a human |
 | `merge.boundaries` | `warn` | `manual`: a result that adds code boundary violations (see [Code boundaries](#code-boundaries-exports-indirect-use-and-paths-outside-a-component)) is left for a human; `warn` only records them |
+| `merge.verify` | (none) | Tasks (`build,test`) the integration runs on every component it affects before publishing anything; see [Tasks](#tasks-affected-components-and-the-verification-gate) |
 | `merge.advance` | `manual` | `auto`: a completed integration fast-forwards the base branches itself, as `integration advance` would |
 | `lock.files` | (none) | Path patterns of files a run holds one by one while its agent changes them (see [Locking files and folders](#locking-files-and-folders)) |
 | `lock.folders` | (none) | Path patterns of folders a run holds as a whole while its agent changes a file in them: `src/*` is each folder directly under `src`, `**` the folder of every file |
@@ -653,6 +655,50 @@ bassia lock list                                                       # who hol
 Locks are advisory while the agent works - Bassia cannot stop an agent from writing a file - so a collision is
 recorded and the integration enforces `lock.conflict` (see below). The integration also merges a result after the
 results it brought in, and treats it no less carefully than them.
+
+### Tasks, affected components and the verification gate
+
+A component defines its own tasks in a `bassia.toml` at its root, versioned with the code they build, as nx's
+`project.json` is:
+
+```toml
+[tasks.build]
+command = "dotnet build"
+depends_on = ["^build"]      # first: the build of every component it references, transitively
+
+[tasks.test]
+command = "dotnet test --no-build"
+depends_on = ["build"]       # first: its own build
+```
+
+```powershell
+bassia task list                                  # every component's tasks on its main branch
+bassia task run -task test -select app,lib@v2     # lib:build, app:build, app:test - in a checkout laid out as a run's
+bassia affected -runs brave-otter                 # what the run changed, and everything that references it
+bassia config set merge.verify -value build,test  # the integration's gate
+```
+
+- **Tasks.** `command` is a shell line run in the component's folder. In `depends_on`, `x` is the component's own
+  task `x` and `^x` is task `x` of each component it references, transitively, that defines one. An unknown
+  dependency or a cycle is an error naming the task.
+- **`task run`** checks out the selection's closure under the workspace (`tasks-<key>`), with each reference nested
+  as in a run. It runs the selected components' tasks and what they depend on, one after another in dependency order,
+  and stops at the first failure. Each task's output goes to a log under `<workspace>/.task-logs`. The checkout is
+  removed when every task passed, unless `-keep`. Without `-select`, every component is selected at its main-branch
+  tip. Inside an agentic run (`BASSIA_RUN_DIR`), the run's own checkout is used instead, so an agent can build and
+  test its change as it stands.
+- **`affected`** takes `-runs` (their pushed results) or `-components`. It lists those components and every component
+  that references one of them, transitively, in dependency order. It also gives the `-select` value covering their
+  closure.
+- **The gate.** `merge.verify` (a list of task names, also per component as `merge.component.<component>.verify`)
+  makes the integration verify before it publishes. Every component is merged first. Then the base tips of the
+  affected components it did not change are checked out next to the merged ones, the references are nested, and each
+  affected component's `merge.verify` tasks run (with what they depend on). A component that defines none of them is
+  not checked. If a task fails, nothing is published: the merged components are `failed` with the task named, the
+  integration is `partial`, and `integration.toml` records every task that ran under `[[verification]]` (exit code,
+  duration, log). The workspace is kept for inspection. Without `merge.verify`, the integration publishes as before.
+
+Task results are not cached yet.
 
 ### Integration: syntactic first, then structural, then semantic
 

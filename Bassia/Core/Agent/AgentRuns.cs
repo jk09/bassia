@@ -351,25 +351,14 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 
 		// A referenced component appears inside the referencing component as a link (junction) to its sibling
 		// working copy, so every reference to it in the run resolves to the same files and the same commit.
-		foreach (var definition in closure)
+		try
 		{
-			var owner = runs[definition.Name];
-			foreach (var reference in definition.References)
-			{
-				var target = runs[reference.Name];
-				var linkPath = Path.Combine(owner.Path, reference.Path);
-				if (Directory.Exists(linkPath) || File.Exists(linkPath))
-				{
-					throw new AgentException($"Component '{definition.Name}' already contains '{reference.Path}'; cannot nest component '{reference.Name}' there.");
-				}
-
-				Directory.CreateDirectory(Path.GetDirectoryName(linkPath)!);
-				await DirectoryLinks.CreateAsync(linkPath, target.Path);
-				owner.Junctions[reference.Path] = reference.Name;
-
-				// The nested component's files belong to its own history: never commit them in the owner.
-				await workspaces[definition.Name].HideAsync(reference.Path);
-			}
+			await Workspaces.NestAsync(closure, runs.ToDictionary(pair => pair.Key, pair => pair.Value.Path, StringComparer.Ordinal), workspaces,
+				(owner, reference) => runs[owner].Junctions[reference.Path] = reference.Name);
+		}
+		catch (MonorepoException ex)
+		{
+			throw new AgentException(ex.Message);
 		}
 	}
 

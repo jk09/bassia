@@ -54,6 +54,10 @@ internal static class CommandTable
 		"a component through another's nested reference such as lib/vendor/core (indirect), or leaves the component's root (outside). " +
 		"References the code never uses are listed as unused_references, for information.";
 
+	private const string TaskDetails = "A component's tasks are [tasks.<name>] tables in bassia.toml at its root: command (a shell line run in the " +
+		"component's folder) and depends_on - 'x' runs the component's own task x first, '^x' runs task x of every component it references, " +
+		"transitively, first (depends_on = [\"^build\"]). A component without bassia.toml has no tasks.";
+
 	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
 		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
 		"merge.component.<component>.<setting>, which falls back to merge.<setting>. merge.semantic (resolver|manual): a result git and weave cannot " +
@@ -349,6 +353,37 @@ internal static class CommandTable
 			["bassia boundary check", "bassia boundary check -strict", "bassia boundary check -name app", "bassia boundary check -code -strict"],
 			BoundaryCommands.CheckAsync,
 			Details: "Without -strict the violations are warnings and the command succeeds. " + BoundaryDetails + " " + CodeDetails),
+
+		// ----- tasks -----
+
+		new("task", "list", "List the components' tasks, as each one's bassia.toml defines them on its default branch.",
+			[new("name", "component", "Only this component.")],
+			["bassia task list", "bassia task list -name app"],
+			TaskCommands.ListAsync, Positional: "name",
+			Details: TaskDetails),
+
+		new("task", "run", "Run tasks of the selected components, with what they depend on, in a checkout of the selection laid out as a run's (or in the current run's folder).",
+			[
+				new("task", "task,...", "The tasks to run (build, test, ...).", Required: true),
+				new("select", "component[@tag|hash],...", "What to check out and run them in (default: every component at its main-branch tip; inside a run folder: the run's own checkout)."),
+				new("keep", null, "Keep the checkout after the tasks passed (a failure always keeps it).")
+			],
+			["bassia task run -task build", "bassia task run -task test -select app,lib@v2", "bassia task run test"],
+			TaskCommands.RunAsync, Positional: "task",
+			Details: "The tasks run one after another, each in its component's folder, and stop at the first that fails; each one's output goes " +
+				"to a log under <workspace>/.task-logs. The checkout is a folder under the workspace (tasks-<key>), removed when every task " +
+				"passed unless -keep. Inside an agentic run (BASSIA_RUN_DIR set) and without -select, the tasks run on the run's own checkout, " +
+				"as the agent left it. " + TaskDetails),
+
+		new("affected", null, "List the components a change affects: the components runs changed (or the ones named), and every component that references one of them, transitively.",
+			[
+				new("runs", "run-id,...|all", "The runs whose pushed results are the change."),
+				new("components", "component,...", "The changed components.")
+			],
+			["bassia affected -runs brave-otter", "bassia affected -components lib"],
+			TaskCommands.AffectedAsync,
+			Details: "The result lists them in dependency order and gives the -select value covering their closure, e.g. for 'bassia task run " +
+				"-task test -select <select>'. The integration's gate (merge.verify) checks the same set."),
 
 		// ----- tags across components -----
 

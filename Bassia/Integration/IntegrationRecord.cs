@@ -179,6 +179,9 @@ internal sealed class IntegrationRecord
 	public required string WorkspacePath { get; set; }
 	public List<ComponentIntegration> Components { get; } = [];
 
+	/// <summary>The tasks the verification gate ran (<c>merge.verify</c>), in order; it stopped at the first that failed.</summary>
+	public List<Core.TaskResult> Verification { get; } = [];
+
 	/// <summary><c>integration-&lt;key&gt;</c> with a fresh <see cref="RecordName"/> key, e.g. <c>integration-steady-heron-k2m8qa</c>.</summary>
 	public static string NewId() => IdPrefix + RecordName.NewKey();
 
@@ -273,6 +276,26 @@ internal sealed class IntegrationRecord
 		}
 
 		table["component"] = components;
+		if (Verification.Count > 0)
+		{
+			var verification = new TomlTableArray();
+			foreach (var result in Verification)
+			{
+				var entry = new TomlTable
+				{
+					["component"] = result.Component, ["task"] = result.Task, ["command"] = result.Command, ["seconds"] = result.Seconds, ["log"] = result.LogPath
+				};
+				if (result.ExitCode is { } exitCode)
+				{
+					entry["exit_code"] = (long)exitCode;
+				}
+
+				verification.Add(entry);
+			}
+
+			table["verification"] = verification;
+		}
+
 		return TomlSerializer.Serialize(table);
 	}
 
@@ -340,6 +363,16 @@ internal sealed class IntegrationRecord
 				}
 
 				record.Components.Add(component);
+			}
+		}
+
+		if (table.TryGetValue("verification", out var verification) && verification is TomlTableArray verificationTables)
+		{
+			foreach (TomlTable entry in verificationTables)
+			{
+				record.Verification.Add(new Core.TaskResult(Str(entry, "component"), Str(entry, "task"), Str(entry, "command"),
+					entry.TryGetValue("exit_code", out var exitCode) && exitCode is long code ? (int)code : null,
+					entry.TryGetValue("seconds", out var seconds) && seconds is double value ? value : 0, Str(entry, "log")));
 			}
 		}
 
