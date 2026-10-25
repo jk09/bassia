@@ -42,7 +42,7 @@ internal sealed class MemoryMetaStore : IMetaStore
 	}
 }
 
-/// <summary>The reference <see cref="IRunRecordStore"/>: every version of every run record in memory.</summary>
+/// <summary>The reference <see cref="IRunRecordStore"/>: every version of every record (runs, integrations) in memory.</summary>
 internal sealed class MemoryRunRecordStore : IRunRecordStore
 {
 	private readonly Dictionary<string, List<string>> versions = new(StringComparer.Ordinal);
@@ -51,42 +51,93 @@ internal sealed class MemoryRunRecordStore : IRunRecordStore
 
 	public Task EnsureRepositoryAsync() => Task.CompletedTask;
 
+	// ----- records -----
+
+	public Task<int> LatestIndexAsync(string refBase)
+	{
+		lock (versions)
+		{
+			return Task.FromResult(versions.TryGetValue(refBase, out var list) ? list.Count - 1 : -1);
+		}
+	}
+
+	public Task<IReadOnlyList<string>> ListKeysAsync(string refPrefix)
+	{
+		lock (versions)
+		{
+			return Task.FromResult<IReadOnlyList<string>>(versions.Keys.Where(key => key.StartsWith(refPrefix, StringComparison.Ordinal))
+				.Select(key => key[refPrefix.Length..]).ToList());
+		}
+	}
+
+	public Task<(string Content, int Lineage)?> ReadLatestAsync(string refBase, string fileName)
+	{
+		lock (versions)
+		{
+			return Task.FromResult<(string, int)?>(versions.TryGetValue(refBase, out var list) ? (list[^1], list.Count - 1) : null);
+		}
+	}
+
+	public Task<string> WriteAsync(string refBase, int lineage, string fileName, string content, string message)
+	{
+		lock (versions)
+		{
+			if (!versions.TryGetValue(refBase, out var list))
+			{
+				versions[refBase] = list = [];
+			}
+
+			if (lineage != list.Count)
+			{
+				throw new StorageException($"Version {lineage} of '{refBase}' cannot follow version {list.Count - 1}.");
+			}
+
+			list.Add(content);
+			return Task.FromResult($"{refBase}/{lineage}");
+		}
+	}
+
+	/// <summary>Every version of a record's file, oldest first.</summary>
+	public IReadOnlyList<string> Versions(string refBase)
+	{
+		lock (versions)
+		{
+			return versions.TryGetValue(refBase, out var list) ? list.ToList() : [];
+		}
+	}
+
+	// ----- run records -----
+
 	public async Task<IReadOnlyList<RunMetadata>> ListLatestAsync()
 	{
 		var runs = new List<RunMetadata>();
-		foreach (var runId in versions.Keys.ToList())
+		foreach (var key in await ListKeysAsync(RunMetadata.RefPrefix))
 		{
-			runs.Add((await LoadLatestAsync(runId))!);
+			runs.Add((await LoadLatestAsync(RunMetadata.NormalizeRunId(key)))!);
 		}
 
 		return runs.OrderByDescending(run => run.Created, StringComparer.Ordinal).ToList();
 	}
 
-	public Task<RunMetadata?> LoadLatestAsync(string runId)
+	public async Task<RunMetadata?> LoadLatestAsync(string runId)
 	{
-		if (!versions.TryGetValue(runId, out var list))
+		if (await ReadLatestAsync(RunMetadata.RefBase(runId), RunMetadata.FileName) is not { } found)
 		{
-			return Task.FromResult<RunMetadata?>(null);
+			return null;
 		}
 
-		var metadata = RunMetadata.FromToml(list[^1]);
-		metadata.Lineage = list.Count - 1;
-		return Task.FromResult<RunMetadata?>(metadata);
+		var metadata = RunMetadata.FromToml(found.Content);
+		metadata.Lineage = found.Lineage;
+		return metadata;
 	}
 
 	/// <summary>Every version of a run's record, oldest first.</summary>
-	public IReadOnlyList<RunMetadata> History(string runId) =>
-		versions.TryGetValue(runId, out var list) ? list.Select(RunMetadata.FromToml).ToList() : [];
+	public IReadOnlyList<RunMetadata> History(string runId) => Versions(RunMetadata.RefBase(runId)).Select(RunMetadata.FromToml).ToList();
 
-	public Task<string> CommitAsync(RunMetadata metadata)
+	public async Task<string> CommitAsync(RunMetadata metadata)
 	{
-		if (!versions.TryGetValue(metadata.RunId, out var list))
-		{
-			versions[metadata.RunId] = list = [];
-		}
-
-		metadata.Lineage = list.Count;
-		list.Add(metadata.ToToml());
-		return Task.FromResult(RunMetadata.TagName(metadata.RunId, metadata.Lineage));
+		metadata.Lineage = await LatestIndexAsync(RunMetadata.RefBase(metadata.RunId)) + 1;
+		return await WriteAsync(RunMetadata.RefBase(metadata.RunId), metadata.Lineage, RunMetadata.FileName, metadata.ToToml(),
+			$"{metadata.RunId} #{metadata.Lineage}: {metadata.Status}");
 	}
 }

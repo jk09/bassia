@@ -14,6 +14,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 	internal static TimeSpan Interval { get; set; } = TimeSpan.FromSeconds(2);
 
 	private readonly Monorepo monorepo;
+	private readonly Storage.IComponentStorage storage;
 	private readonly RunMetadata metadata;
 	private readonly IReadOnlyDictionary<string, LockFilter> filters;
 	private readonly Action<string> report;
@@ -25,9 +26,10 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 	private Task? loop;
 	private bool finished;
 
-	private RunLocks(Monorepo monorepo, RunMetadata metadata, IReadOnlyDictionary<string, LockFilter> filters, Action<string> report)
+	private RunLocks(Monorepo monorepo, Storage.IComponentStorage storage, RunMetadata metadata, IReadOnlyDictionary<string, LockFilter> filters, Action<string> report)
 	{
 		this.monorepo = monorepo;
+		this.storage = storage;
 		this.metadata = metadata;
 		this.filters = filters;
 		this.report = report;
@@ -48,9 +50,13 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 	}
 
 	/// <summary>Starts watching the run's checkouts; <paramref name="report"/> receives a line for every new hold or conflict.</summary>
-	public static RunLocks Start(Monorepo monorepo, RunMetadata metadata, Action<string> report)
+	public static RunLocks Start(Monorepo monorepo, RunMetadata metadata, Action<string> report) =>
+		Start(monorepo, monorepo.Graph().Storage, metadata, report);
+
+	/// <summary>Starts watching the run's working copies, which <paramref name="storage"/> made.</summary>
+	public static RunLocks Start(Monorepo monorepo, Storage.IComponentStorage storage, RunMetadata metadata, Action<string> report)
 	{
-		var locks = new RunLocks(monorepo, metadata, Filters(monorepo, metadata), report);
+		var locks = new RunLocks(monorepo, storage, metadata, Filters(monorepo, metadata), report);
 		locks.loop = locks.LoopAsync();
 		return locks;
 	}
@@ -108,7 +114,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 			var now = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
 			foreach (var component in metadata.Components)
 			{
-				now[component.Name] = await LockCheckouts.ChangedFilesAsync(component.Path);
+				now[component.Name] = await LockCheckouts.ChangedFilesAsync(storage, component.Name, component.Path);
 			}
 
 			changed = now;
@@ -239,7 +245,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 						var key = filters[component.Name].KeyFor(component.Name, path) ?? new LockKey(component.Name, path, LockKind.File);
 						return entry.Holds.Where(hold => hold.Key.Overlaps(key)).Select(hold => (Path: path, Hold: hold));
 					}).ToList();
-					if (hits.Count == 0 || await LockCheckouts.ContainsAsync(component.Path, result.Commit))
+					if (hits.Count == 0 || await LockCheckouts.ContainsAsync(storage, component.Name, component.Path, result.Commit))
 					{
 						continue;
 					}

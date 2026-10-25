@@ -1,6 +1,7 @@
 namespace Bassia.Integration;
 
 using System.Text;
+using Bassia.Storage;
 
 /// <summary>
 /// The structural merge: <see href="https://github.com/Ataraxy-Labs/weave">weave</see>'s entity-level merge driver,
@@ -41,29 +42,20 @@ internal sealed class StructuralMerge
 		"toml", "ts", "tsv", "tsx", "vbproj", "xaml", "xhtml", "xml", "yaml", "yml", "zig"
 	];
 
-	/// <param name="command">The driver as configured: an executable (git appends the placeholders) or a full command with them.</param>
-	/// <param name="attributesFile">The attributes file that assigns the driver to <see cref="Extensions"/>.</param>
-	private StructuralMerge(string command, string attributesFile)
-	{
-		Command = command;
-		AttributesFile = attributesFile;
-	}
+	/// <param name="command">The driver as configured: an executable (the placeholders are appended) or a full command with them.</param>
+	private StructuralMerge(string command) => Command = command;
 
 	/// <summary>The driver command as configured, e.g. <c>weave-driver</c>; what the records name.</summary>
 	public string Command { get; }
 
-	public string AttributesFile { get; }
-
-	/// <summary>The command git runs per file: the configured one, with git's placeholders appended unless it has its own.</summary>
+	/// <summary>The command run per file: the configured one, with the placeholders appended unless it has its own.</summary>
 	public string DriverLine => Command.Contains("%A", StringComparison.Ordinal) ? Command : $"{Command} {Placeholders}";
 
-	/// <summary>The options that make one git command (<c>merge</c>, <c>merge-tree</c>) merge with the structural driver.</summary>
-	public IReadOnlyList<string> GitOptions =>
-	[
-		"-c", $"merge.{DriverName}.name=Entity-level semantic merge (weave)",
-		"-c", $"merge.{DriverName}.driver={DriverLine}",
-		"-c", $"core.attributesFile={AttributesFile}"
-	];
+	/// <summary>The structural merge as the storage contract's file merge driver, which every backend knows how to run.</summary>
+	public FileMergeDriver Driver => new(DriverName, DriverLine, Extensions, WarningPrefix);
+
+	/// <summary>The structural merge with <paramref name="command"/> as its driver, installed or not (tests, previews).</summary>
+	internal static StructuralMerge Of(string command) => new(command);
 
 	/// <summary>
 	/// The structural merge of the monorepo, or null with the reason: <paramref name="command"/> (from <c>-weave</c>)
@@ -86,15 +78,7 @@ internal sealed class StructuralMerge
 				"or set integration.weave to its weave-driver");
 		}
 
-		var attributesFile = Path.Combine(monorepo.WorkspaceDir, ".structural-merge.gitattributes");
-		var attributes = string.Concat(Extensions.Select(extension => $"*.{extension} merge={DriverName}\n"));
-		Directory.CreateDirectory(monorepo.WorkspaceDir);
-		if (!File.Exists(attributesFile) || File.ReadAllText(attributesFile) != attributes)
-		{
-			File.WriteAllText(attributesFile, attributes);
-		}
-
-		return (new StructuralMerge(command, attributesFile), command);
+		return (new StructuralMerge(command), command);
 	}
 
 	/// <summary>The <c>weave-warning:</c> payloads (JSON) among a git command's stderr, in order and without repeats.</summary>

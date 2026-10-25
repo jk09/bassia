@@ -343,6 +343,55 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 
 	public Task<string?> UpstreamAsync() => Task.FromResult(Upstream);
 
+	// ----- merging and comparing -----
+
+	private readonly Dictionary<string, IReadOnlyDictionary<string, MemoryFile>> snapshots = new(StringComparer.Ordinal);
+
+	/// <summary>Remembers merged content under an id derived from it, for <see cref="CommitSnapshotAsync"/>.</summary>
+	internal string Snapshot(IReadOnlyDictionary<string, MemoryFile> files)
+	{
+		var id = "snapshot-" + Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(
+			string.Join('\n', files.OrderBy(file => file.Key, StringComparer.Ordinal).Select(file => $"{file.Key} {file.Value.Object}")))));
+		lock (gate)
+		{
+			snapshots[id] = files;
+		}
+
+		return id;
+	}
+
+	/// <summary>The in-process stand-ins for file merge drivers, by driver name (see <see cref="MemoryComponentStorage.Drivers"/>).</summary>
+	internal IReadOnlyDictionary<string, InProcessMergeDriver>? Drivers => Storage?.Drivers;
+
+	public async Task<MergeResult> MergeAsync(string ours, string theirs, FileMergeDriver? driver = null)
+	{
+		var mergeBase = await MergeBaseAsync(ours, theirs);
+		var merged = await MemoryMerge.MergeAsync(mergeBase is null ? null : Get(mergeBase).Files, Get(ours).Files, Get(theirs).Files, driver, Drivers);
+		return new MergeResult(merged.Clean, Snapshot(merged.Files), merged.Conflicts, merged.Warnings);
+	}
+
+	public Task<string> CommitSnapshotAsync(string snapshot, IReadOnlyList<string> parents, string message)
+	{
+		IReadOnlyDictionary<string, MemoryFile> files;
+		lock (gate)
+		{
+			files = snapshots.TryGetValue(snapshot, out var found) ? found : throw new StorageException($"Snapshot {snapshot} is not in component '{Name}'.");
+		}
+
+		return Task.FromResult(Add(parents, message, files, parents.Count > 0 ? Get(parents[0]).Nested : null));
+	}
+
+	/// <summary>The newest commit of <paramref name="second"/>'s ancestry that is also an ancestor of <paramref name="first"/>.</summary>
+	public Task<string?> MergeBaseAsync(string first, string second)
+	{
+		var ancestors = Ancestry(first).Select(commit => commit.Node.Id).ToHashSet(StringComparer.Ordinal);
+		return Task.FromResult(Ancestry(second).Select(commit => commit.Node.Id).FirstOrDefault(ancestors.Contains));
+	}
+
+	public Task<IReadOnlyList<string>> ChangedPathsAsync(string from, string to) => Task.FromResult(MemoryMerge.Changed(Get(from).Files, Get(to).Files));
+
+	public Task<string> DiffAsync(string from, string to) => Task.FromResult(MemoryMerge.Diff(Get(from).Files, Get(to).Files));
+
 	/// <summary>The storage holding this store, which remembers its working copies; null for an upstream.</summary>
 	internal MemoryComponentStorage? Storage { get; set; }
 

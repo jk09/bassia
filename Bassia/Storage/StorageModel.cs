@@ -38,3 +38,47 @@ internal sealed record StoredObject(string Id, string Kind);
 internal enum RefKind { Branch, AnnotatedTag, LightweightTag }
 
 internal sealed record ResolvedRef(string FullName, RefKind Kind, string Commit);
+
+/// <summary>
+/// A file-level merge driver - a program that merges one file three ways, like weave's entity-level merge. It is run as
+/// <paramref name="Command"/> with <c>%O</c>, <c>%A</c> and <c>%B</c> replaced by the paths of the base, ours and theirs
+/// versions (<c>%L</c> marker size, <c>%P</c> the file's path in the component); it writes the result over ours and exits
+/// non-zero when the file still conflicts. It handles the files with one of <paramref name="Extensions"/>; stderr lines
+/// starting with <paramref name="WarningPrefix"/> are warnings about a merge it completed.
+/// </summary>
+internal sealed record FileMergeDriver(string Name, string Command, IReadOnlyList<string> Extensions, string? WarningPrefix = null)
+{
+	public bool Handles(string path) => Extensions.Contains(System.IO.Path.GetExtension(path).TrimStart('.'), StringComparer.OrdinalIgnoreCase);
+
+	/// <summary>The warnings in a driver's stderr.</summary>
+	public IReadOnlyList<string> Warnings(string error) =>
+		WarningPrefix is null ? [] : error.Replace("\r", "").Split('\n')
+			.Select(line => line.Trim())
+			.Where(line => line.StartsWith(WarningPrefix, StringComparison.Ordinal))
+			.Select(line => line[WarningPrefix.Length..].Trim())
+			.Distinct(StringComparer.Ordinal)
+			.ToList();
+}
+
+/// <summary>
+/// What a merge of two commits came to: clean or not, the paths left conflicted, and the warnings of a file merge
+/// driver. <paramref name="Snapshot"/> names the merged content (conflicts included, as markers) for
+/// <see cref="IComponentStore.CommitSnapshotAsync"/>.
+/// </summary>
+internal sealed record MergeResult(bool Clean, string Snapshot, IReadOnlyList<string> Conflicts, IReadOnlyList<string> Warnings);
+
+/// <summary>How a working copy merges a commit (see <see cref="IComponentWorkspace.MergeAsync"/>).</summary>
+/// <param name="Commit">Conclude a clean merge with a commit; false leaves even a clean merge open.</param>
+/// <param name="FastForward">Move the head without a merge commit when it is an ancestor of the merged commit.</param>
+/// <param name="Diff3">Conflict markers include the common ancestor's version.</param>
+internal sealed record WorkspaceMerge(string Message, bool Commit = true, bool FastForward = false, bool Diff3 = false, FileMergeDriver? Driver = null);
+
+/// <summary>
+/// What a working-copy merge did: <see cref="MergeStatus.Merged"/> (committed, fast-forwarded or left open clean),
+/// <see cref="MergeStatus.Conflicted"/> (left open with <paramref name="Conflicts"/>; none when it stopped for another
+/// reason) or <see cref="MergeStatus.Failed"/> (nothing changed). <paramref name="Error"/> is the backend's account of
+/// anything but a clean merge; <paramref name="Warnings"/> are a file merge driver's.
+/// </summary>
+internal sealed record MergeOutcome(MergeStatus Status, IReadOnlyList<string> Conflicts, IReadOnlyList<string> Warnings, string? Error = null);
+
+internal enum MergeStatus { Merged, Conflicted, Failed }

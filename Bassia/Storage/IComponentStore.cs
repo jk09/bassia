@@ -82,6 +82,26 @@ internal interface IComponentStore
 	/// <summary>The upstream the store was imported from (git's <c>origin</c>), or null.</summary>
 	Task<string?> UpstreamAsync();
 
+	// ----- merging and comparing -----
+
+	/// <summary>
+	/// The three-way merge of <paramref name="ours"/> and <paramref name="theirs"/> on their merge base, computed without a
+	/// working copy and without moving any ref. With <paramref name="driver"/>, the files it handles are merged by it.
+	/// </summary>
+	Task<MergeResult> MergeAsync(string ours, string theirs, FileMergeDriver? driver = null);
+
+	/// <summary>A commit (referenced by nothing) with the content of <paramref name="snapshot"/> (see <see cref="MergeResult.Snapshot"/>) and these parents.</summary>
+	Task<string> CommitSnapshotAsync(string snapshot, IReadOnlyList<string> parents, string message);
+
+	/// <summary>The best common ancestor of two commits, or null when they share none.</summary>
+	Task<string?> MergeBaseAsync(string first, string second);
+
+	/// <summary>The paths whose content differs between two commits, in path order.</summary>
+	Task<IReadOnlyList<string>> ChangedPathsAsync(string from, string to);
+
+	/// <summary>A unified diff (patch text) from <paramref name="from"/> to <paramref name="to"/>, for people and agents to read.</summary>
+	Task<string> DiffAsync(string from, string to);
+
 	// ----- working copies -----
 
 	/// <summary>
@@ -105,6 +125,7 @@ internal interface IComponentWorkspace
 
 	/// <summary>
 	/// Commits every change in the working copy on its branch and returns the commit, or null when nothing changed.
+	/// With a merge open, it concludes it: the commit has the merged commit as its second parent, changed or not.
 	/// The commit is local to the working copy until it is published.
 	/// </summary>
 	Task<string?> CommitAsync(string message);
@@ -120,4 +141,51 @@ internal interface IComponentWorkspace
 
 	/// <summary>Publishes the working copy's branch and the named tags to the store it was checked out from.</summary>
 	Task PublishAsync(string branch, IReadOnlyList<string> tags);
+
+	/// <summary>The commit the working copy's branch is at.</summary>
+	Task<string> HeadAsync();
+
+	/// <summary>
+	/// The files changed in the working copy and not committed (modified, added, deleted, untracked), relative to its
+	/// root, hidden paths excluded.
+	/// </summary>
+	Task<IReadOnlyList<string>> ChangedPathsAsync();
+
+	/// <summary>Whether <paramref name="commit"/> is in the working copy's history: it has the commit and the head contains it.</summary>
+	Task<bool> ContainsAsync(string commit);
+
+	/// <summary>Brings the store's tag <paramref name="tag"/> and its history into the working copy; false when the store has no such tag.</summary>
+	Task<bool> FetchTagAsync(string tag);
+
+	/// <summary>
+	/// Merges <paramref name="commit"/> into the head. <see cref="WorkspaceMerge.Commit"/> concludes a clean merge with a
+	/// commit described by <see cref="WorkspaceMerge.Message"/>; otherwise (and on a conflict) the merge is left open in
+	/// the working copy - conflicts marked in the files - for <see cref="CommitAsync"/> to conclude or
+	/// <see cref="ResetAsync"/> to abandon. A merge that would overwrite uncommitted changes is refused.
+	/// </summary>
+	Task<MergeOutcome> MergeAsync(string commit, WorkspaceMerge options);
+
+	/// <summary>Whether a merge is open (started by <see cref="MergeAsync"/> and neither concluded nor reset).</summary>
+	Task<bool> MergeInProgressAsync();
+
+	/// <summary>The paths an open merge left conflicted.</summary>
+	Task<IReadOnlyList<string>> ConflictedPathsAsync();
+
+	/// <summary>Puts the working copy back exactly at <paramref name="commit"/>: no open merge, no changed and no untracked files.</summary>
+	Task ResetAsync(string commit);
+
+	/// <summary>Abandons an open merge, keeping the uncommitted changes that were there before it started.</summary>
+	Task AbortMergeAsync();
+
+	/// <summary>The paths whose content differs between two commits the working copy has.</summary>
+	Task<IReadOnlyList<string>> ChangedPathsAsync(string from, string to);
+
+	/// <summary>The best common ancestor of two commits the working copy has, or null.</summary>
+	Task<string?> MergeBaseAsync(string first, string second);
+
+	/// <summary>The commits reachable from <paramref name="to"/> but not from <paramref name="from"/>, newest first.</summary>
+	Task<IReadOnlyList<StoredCommit>> LogAsync(string from, string to);
+
+	/// <summary>A unified diff from <paramref name="from"/> to <paramref name="to"/>, two commits the working copy has.</summary>
+	Task<string> DiffAsync(string from, string to);
 }

@@ -13,6 +13,12 @@ internal sealed class MemoryComponentStorage(MemoryUpstreams? upstreams = null) 
 
 	public MemoryUpstreams Upstreams { get; } = upstreams ?? new MemoryUpstreams();
 
+	/// <summary>
+	/// File merge drivers run in-process instead of their commands, by <see cref="FileMergeDriver.Name"/>: how tests give
+	/// the memory backend a structural merge without installing one. A driver not listed runs its command.
+	/// </summary>
+	public Dictionary<string, InProcessMergeDriver> Drivers { get; } = new(StringComparer.Ordinal);
+
 	/// <summary>The store of a component, for tests to seed and inspect.</summary>
 	public MemoryComponentStore this[string name] => (MemoryComponentStore)Open(name);
 

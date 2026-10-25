@@ -49,7 +49,7 @@ internal static class LockCommands
 	{
 		var monorepo = LoadMonorepo();
 		var table = new LockTable(monorepo);
-		await LockCheckouts.ForgetLandedAsync(monorepo, table);
+		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var component = invocation.Get("component");
 		var run = invocation.Get("run") is { } name ? (await FindRunAsync(monorepo, name)).RunId : null;
 		var entries = table.ReadAll();
@@ -127,7 +127,7 @@ internal static class LockCommands
 	{
 		var monorepo = LoadMonorepo();
 		var table = new LockTable(monorepo);
-		await LockCheckouts.ForgetLandedAsync(monorepo, table);
+		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var run = await RunOfAsync(invocation, monorepo, required: false);
 		var paths = Resolve(invocation, monorepo, run);
 		var entries = table.ReadAll();
@@ -145,7 +145,7 @@ internal static class LockCommands
 
 			// A released result the run's checkout lacks; without a run, every released result that changed the path.
 			var behind = run is not null && run.Has(path.Key.Component) && Directory.Exists(run.Checkout(path.Key.Component))
-				? (await LockCheckouts.BehindAsync(table, run.RunId, path.Key.Component, run.Checkout(path.Key.Component), [path.Key])).Select(item => (item.Entry.RunId, item.Result.Tag)).ToList()
+				? (await LockCheckouts.BehindAsync(monorepo.Graph().Storage, table, run.RunId, path.Key.Component, run.Checkout(path.Key.Component), [path.Key])).Select(item => (item.Entry.RunId, item.Result.Tag)).ToList()
 				: run is null
 					? others.Where(entry => table.StateOf(entry) == LockState.Released && entry.Holds.Any(hold => hold.Key.Overlaps(path.Key)))
 						.SelectMany(entry => entry.Results.Where(result => result.Component == path.Key.Component).Select(result => (entry.RunId, result.Tag))).ToList()
@@ -200,7 +200,7 @@ internal static class LockCommands
 	{
 		var monorepo = LoadMonorepo();
 		var table = new LockTable(monorepo);
-		await LockCheckouts.ForgetLandedAsync(monorepo, table);
+		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var run = await LiveRunAsync(invocation, monorepo);
 		var paths = Resolve(invocation, monorepo, run);
 		var keys = paths.Select(path => path.Key).ToList();
@@ -234,7 +234,7 @@ internal static class LockCommands
 		{
 			if (Directory.Exists(run.Checkout(group.Key)))
 			{
-				behind.AddRange(await LockCheckouts.BehindAsync(table, run.RunId, group.Key, run.Checkout(group.Key), group.ToList()));
+				behind.AddRange(await LockCheckouts.BehindAsync(monorepo.Graph().Storage, table, run.RunId, group.Key, run.Checkout(group.Key), group.ToList()));
 			}
 		}
 
@@ -270,7 +270,7 @@ internal static class LockCommands
 	{
 		var monorepo = LoadMonorepo();
 		var table = new LockTable(monorepo);
-		await LockCheckouts.ForgetLandedAsync(monorepo, table);
+		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var run = await LiveRunAsync(invocation, monorepo);
 		var paths = Resolve(invocation, monorepo, run);
 		var keys = paths.Select(path => path.Key).ToList();
@@ -349,7 +349,7 @@ internal static class LockCommands
 				continue;
 			}
 
-			var pending = await LockCheckouts.BehindAsync(table, run.RunId, group.Key, checkout, group.ToList());
+			var pending = await LockCheckouts.BehindAsync(monorepo.Graph().Storage, table, run.RunId, group.Key, checkout, group.ToList());
 			behind.AddRange(pending);
 			if (invocation.Has("no-refresh"))
 			{
@@ -358,7 +358,7 @@ internal static class LockCommands
 
 			foreach (var item in pending)
 			{
-				outcomes.Add(await LockCheckouts.BringInAsync(monorepo, checkout, item));
+				outcomes.Add(await LockCheckouts.BringInAsync(monorepo.Graph().Storage, checkout, item));
 			}
 		}
 

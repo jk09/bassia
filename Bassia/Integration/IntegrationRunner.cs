@@ -1,6 +1,8 @@
 namespace Bassia.Integration;
 
+using Bassia.Core;
 using Bassia.Git;
+using Bassia.Storage;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -35,9 +37,22 @@ internal static class IntegrationRunner
 	/// <summary>The status of an integration that merged everything except the steps its merge policy left for a human.</summary>
 	public const string NeedsAttentionStatus = "needs_attention";
 
-	public static async Task<IntegrationOutcome> RunAsync(
+	public static Task<IntegrationOutcome> RunAsync(
 		GitClient git,
 		Monorepo monorepo,
+		IReadOnlyList<RunMetadata> runs,
+		IReadOnlyList<ComponentIntegration> plan,
+		string resolver,
+		IntegrationContext? context = null,
+		string? id = null,
+		StructuralMerge? structural = null) =>
+		RunAsync(monorepo.Graph(), IntegrationSettings.For(monorepo), new RunMetadataStore(git, monorepo.RunsRepoDir), runs, plan, resolver, context, id, structural);
+
+	/// <summary>Executes <paramref name="plan"/> on <paramref name="graph"/>, recording the integration in <paramref name="records"/>.</summary>
+	public static async Task<IntegrationOutcome> RunAsync(
+		MonorepoGraph graph,
+		IntegrationSettings settings,
+		IRecordStore records,
 		IReadOnlyList<RunMetadata> runs,
 		IReadOnlyList<ComponentIntegration> plan,
 		string resolver,
@@ -52,7 +67,7 @@ internal static class IntegrationRunner
 		}
 
 		cancellation.ThrowIfCancellationRequested();
-		var store = new IntegrationStore(new RunMetadataStore(git, monorepo.RunsRepoDir));
+		var store = new IntegrationStore(records);
 		await store.EnsureRepositoryAsync();
 
 		id ??= IntegrationRecord.NewId();
@@ -63,7 +78,7 @@ internal static class IntegrationRunner
 			Created = RunMetadata.Timestamp(),
 			Resolver = resolver,
 			StructuralDriver = structural?.Command,
-			WorkspacePath = Path.Combine(monorepo.WorkspaceDir, id)
+			WorkspacePath = Path.Combine(settings.WorkspaceDir, id)
 		};
 		draft.Runs.AddRange(plan.SelectMany(component => component.Steps).Select(step => step.RunId).Distinct(StringComparer.Ordinal)
 			.OrderBy(runId => runs.FirstOrDefault(run => run.RunId == runId)?.Created, StringComparer.Ordinal));
@@ -73,7 +88,7 @@ internal static class IntegrationRunner
 		var record = draft.Clone();
 		var tags = new List<string> { await store.CommitAsync(record) };
 		Directory.CreateDirectory(record.WorkspacePath);
-		var session = new Session(monorepo, record, runs, context, structural);
+		var session = new Session(graph, settings, record, runs, context, structural);
 		session.Report($"{id}: recorded as {tags[0]}; integrating {record.Components.Count} component(s).");
 
 		foreach (var component in record.Components)
@@ -97,9 +112,9 @@ internal static class IntegrationRunner
 		// merge.advance = auto: the components whose policy says so move their base branches at once.
 		var message = Summary(record);
 		var ok = record.Status is "completed" or NeedsAttentionStatus;
-		if (ok && record.Components.Any(component => monorepo.MergePolicyFor(component.Name).AutoAdvance && component.ResultStatus == ResultStatus.Pushed))
+		if (ok && record.Components.Any(component => settings.MergePolicyFor(component.Name).AutoAdvance && component.ResultStatus == ResultStatus.Pushed))
 		{
-			var advanced = await AdvanceAsync(git, monorepo, record, component => monorepo.MergePolicyFor(component.Name).AutoAdvance);
+			var advanced = await AdvanceAsync(graph, records, record, component => settings.MergePolicyFor(component.Name).AutoAdvance);
 			tags.AddRange(advanced.RecordTags);
 			message += $" merge.advance = auto: {advanced.Message}";
 			ok = advanced.Ok;
@@ -140,7 +155,10 @@ internal static class IntegrationRunner
 	/// Fast-forwards every integrated component's base branch to the integration result, but only if the branch has
 	/// not moved since the integration started (a compare-and-swap on the ref). A base given as a tag is never moved.
 	/// </summary>
-	public static async Task<IntegrationOutcome> AdvanceAsync(GitClient git, Monorepo monorepo, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null)
+	public static Task<IntegrationOutcome> AdvanceAsync(GitClient git, Monorepo monorepo, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null) =>
+		AdvanceAsync(monorepo.Graph(), new RunMetadataStore(git, monorepo.RunsRepoDir), record, which);
+
+	public static async Task<IntegrationOutcome> AdvanceAsync(MonorepoGraph graph, IRecordStore records, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null)
 	{
 		if (record.Status is "started" or "cancelled")
 		{
@@ -156,17 +174,18 @@ internal static class IntegrationRunner
 				continue;
 			}
 
-			var source = GitClient.In(monorepo.SourceRepoDir(component.Name));
-			var branch = await source.RunAsync(["show-ref", "--verify", "--quiet", $"refs/heads/{component.BaseRef}"]);
-			if (branch.ExitCode != 0)
+			var source = graph.Storage.Exists(component.Name) ? graph.Storage.Open(component.Name) : null;
+			if (source is null || await source.BranchTipAsync(component.BaseRef) is null)
 			{
 				errors.Add($"'{component.Name}': the base '{component.BaseRef}' is not a branch; select the result as {component.Name}@{component.ResultTag} instead");
 				continue;
 			}
 
-			var update = await source.RunAsync(["update-ref", "-m", $"bassia integration advance {record.IntegrationId}",
-				$"refs/heads/{component.BaseRef}", component.ResultCommit!, component.BaseCommit]);
-			if (update.ExitCode != 0)
+			try
+			{
+				await source.SetBranchAsync(component.BaseRef, component.ResultCommit!, component.BaseCommit);
+			}
+			catch (StorageException)
 			{
 				errors.Add($"'{component.Name}': '{component.BaseRef}' moved since the integration was built on {component.BaseCommit[..7]}; integrate again onto it");
 				continue;
@@ -181,7 +200,7 @@ internal static class IntegrationRunner
 			return new IntegrationOutcome(true, $"Integration '{record.IntegrationId}' has nothing left to advance.", record, []);
 		}
 
-		var store = new IntegrationStore(new RunMetadataStore(git, monorepo.RunsRepoDir));
+		var store = new IntegrationStore(records);
 		var tag = advanced.Count > 0 ? await store.CommitAsync(record) : null;
 		var message = errors.Count == 0
 			? $"Advanced {string.Join(", ", advanced)} to integration '{record.IntegrationId}'."
@@ -190,7 +209,7 @@ internal static class IntegrationRunner
 	}
 
 	/// <summary>The state of one executing integration, so the per-component and per-step code shares it.</summary>
-	private sealed class Session(Monorepo monorepo, IntegrationRecord record, IReadOnlyList<RunMetadata> runs, IntegrationContext? context, StructuralMerge? structural)
+	private sealed class Session(MonorepoGraph graph, IntegrationSettings settings, IntegrationRecord record, IReadOnlyList<RunMetadata> runs, IntegrationContext? context, StructuralMerge? structural)
 	{
 		private CancellationToken Cancellation => context?.Cancellation ?? CancellationToken.None;
 
@@ -219,13 +238,11 @@ internal static class IntegrationRunner
 
 			component.Branch = IntegrationRecord.RefBase(record.IntegrationId);
 			component.Path = Path.Combine(record.WorkspacePath, component.Name);
-			var sourceDir = monorepo.SourceRepoDir(component.Name);
+			var sourceDir = graph.Storage.LocationOf(component.Name);
 
 			try
 			{
-				await GitClient.In(record.WorkspacePath).RunOrThrowAsync(["clone", "--quiet", "--no-checkout", sourceDir, component.Path]);
-				var checkout = GitClient.In(component.Path);
-				await checkout.RunOrThrowAsync(["checkout", "--quiet", "-b", component.Branch, component.BaseCommit]);
+				var checkout = await graph.Storage.Open(component.Name).CheckoutAsync(component.BaseCommit, component.Path, component.Branch);
 				Report($"'{component.Name}': integrating onto {component.BaseRef} ({component.BaseCommit[..7]}) in '{component.Path}'.", component.Name);
 
 				// Deterministic steps first; one git or weave cannot merge after all is demoted to the back of the semantic queue.
@@ -313,11 +330,11 @@ internal static class IntegrationRunner
 		/// False when the merge stopped on a conflict after all, or the structural merge warned: the step then goes to the
 		/// resolver.
 		/// </returns>
-		private async Task<bool> MergeSyntacticallyAsync(GitClient checkout, ComponentIntegration component, IntegrationStep step)
+		private async Task<bool> MergeSyntacticallyAsync(IComponentWorkspace checkout, ComponentIntegration component, IntegrationStep step)
 		{
 			var driver = step.Strategy == MergeStrategy.Structural ? structural : null;
-			var head = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
-			if (await MergeProbe.IsAncestorAsync(checkout, step.SourceCommit, head))
+			var head = await checkout.HeadAsync();
+			if (await checkout.ContainsAsync(step.SourceCommit))
 			{
 				step.Outcome = StepOutcome.UpToDate;
 				step.Commit = head;
@@ -338,22 +355,22 @@ internal static class IntegrationRunner
 					? $"'{component.Name}': merging run {Short(step)} with git."
 					: $"'{component.Name}': merging run {Short(step)} with git and the structural merge driver ({driver.Command}).",
 				component.Name, step.RunId);
-			var merge = await checkout.RunAsync([.. driver?.GitOptions ?? [], "merge", "--quiet", "--no-ff", "--no-edit", "-m", MergeCommitMessage(component, step), step.SourceCommit]);
-			if (merge.ExitCode != 0)
+			var merge = await checkout.MergeAsync(step.SourceCommit, new WorkspaceMerge(MergeCommitMessage(component, step), Driver: driver?.Driver));
+			if (merge.Status != MergeStatus.Merged)
 			{
 				// Only a conflict is the resolver's business. Anything else (no git identity, a failing hook, a locked
-				// index) would fail its merge commit just the same, so it fails the step with git's own message.
-				var conflictedFiles = Lines((await checkout.RunAsync(["diff", "--name-only", "--diff-filter=U"])).Output);
-				var conflicted = conflictedFiles.Count > 0;
-				await RestoreAsync(checkout, head);
+				// index) would fail its merge commit just the same, so it fails the step with the store's own message.
+				var conflictedFiles = merge.Conflicts.ToList();
+				var conflicted = merge.Status == MergeStatus.Conflicted && conflictedFiles.Count > 0;
+				await checkout.ResetAsync(head);
 				if (!conflicted)
 				{
-					Fail(component, step, $"git merge failed: {(merge.Error + merge.Output).Trim()}");
+					Fail(component, step, $"the merge failed: {merge.Error}");
 					return true;
 				}
 
 				step.Triage = Triage.Conflict;
-				var policy = monorepo.MergePolicyFor(component.Name);
+				var policy = settings.MergePolicyFor(component.Name);
 				var pathReason = policy.ManualPathReason(conflictedFiles);
 				if (pathReason is not null || policy.ManualSemantic)
 				{
@@ -374,12 +391,12 @@ internal static class IntegrationRunner
 				return false;
 			}
 
-			var warningsPolicy = monorepo.MergePolicyFor(component.Name).Warnings;
-			if (driver is not null && warningsPolicy != WarningsPolicy.Accept && StructuralMerge.Warnings(merge.Error) is { Count: > 0 } warnings)
+			var warningsPolicy = settings.MergePolicyFor(component.Name).Warnings;
+			if (driver is not null && warningsPolicy != WarningsPolicy.Accept && merge.Warnings is { Count: > 0 } warnings)
 			{
 				// Clean, but weave doubts it means what both sides meant: like the triage, leave that to the resolver -
 				// or to a human, when merge.warnings says so.
-				await RestoreAsync(checkout, head);
+				await checkout.ResetAsync(head);
 				if (warningsPolicy == WarningsPolicy.Manual)
 				{
 					step.Strategy = MergeStrategy.Manual;
@@ -402,15 +419,15 @@ internal static class IntegrationRunner
 			}
 
 			step.Outcome = StepOutcome.Merged;
-			step.Commit = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
+			step.Commit = await checkout.HeadAsync();
 			Report($"'{component.Name}': run {Short(step)} merged {(driver is null ? "by git" : "structurally by weave")} as {step.Commit[..7]}.", component.Name, step.RunId);
 			return true;
 		}
 
-		private async Task MergeSemanticallyAsync(GitClient checkout, ComponentIntegration component, IntegrationStep step, IReadOnlyList<IntegrationStep> before)
+		private async Task MergeSemanticallyAsync(IComponentWorkspace checkout, ComponentIntegration component, IntegrationStep step, IReadOnlyList<IntegrationStep> before)
 		{
-			var head = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
-			if (await MergeProbe.IsAncestorAsync(checkout, step.SourceCommit, head))
+			var head = await checkout.HeadAsync();
+			if (await checkout.ContainsAsync(step.SourceCommit))
 			{
 				step.Outcome = StepOutcome.UpToDate;
 				step.Commit = head;
@@ -419,24 +436,27 @@ internal static class IntegrationRunner
 
 			// With the structural merge enabled, the merge starts with weave as the driver, so the resolver only gets what
 			// weave could not merge, in entity-labelled conflicts. What git alone conflicts on is probed first, so the
-			// record and the brief show both.
+			// record and the brief show both: the head may be a merge of this integration that only the working copy has, so
+			// the probe is a merge in the working copy, undone at once.
 			if (structural is not null)
 			{
+				var probe = await checkout.MergeAsync(step.SourceCommit, new WorkspaceMerge("", Commit: false));
+				await checkout.ResetAsync(head);
 				step.Conflicts.Clear();
-				step.Conflicts.AddRange((await MergeProbe.ProbeAsync(checkout, head, step.SourceCommit)).Conflicts);
+				step.Conflicts.AddRange(probe.Conflicts);
 			}
 
-			// diff3 puts the common ancestor into every conflict git's own merge leaves, so the resolver sees what each
-			// side changed, not just where they ended up.
-			var merge = await checkout.RunAsync([.. structural?.GitOptions ?? [], "-c", "merge.conflictStyle=diff3", "merge", "--quiet", "--no-ff", "--no-commit", step.SourceCommit]);
-			if (merge.ExitCode is not (0 or 1) || !await MergeInProgressAsync(checkout))
+			// diff3 puts the common ancestor into every conflict the store's own merge leaves, so the resolver sees what
+			// each side changed, not just where they ended up.
+			var merge = await checkout.MergeAsync(step.SourceCommit, new WorkspaceMerge("", Commit: false, Diff3: true, Driver: structural?.Driver));
+			if (merge.Status == MergeStatus.Failed || !await checkout.MergeInProgressAsync())
 			{
-				await RestoreAsync(checkout, head);
-				Fail(component, step, $"git could not start the merge: {(merge.Error + merge.Output).Trim()}");
+				await checkout.ResetAsync(head);
+				Fail(component, step, $"the merge could not start: {merge.Error}");
 				return;
 			}
 
-			var conflicts = Lines(await checkout.RunOrThrowAsync(["diff", "--name-only", "--diff-filter=U"]));
+			var conflicts = merge.Conflicts.ToList();
 			if (structural is null)
 			{
 				step.Conflicts.Clear();
@@ -445,7 +465,7 @@ internal static class IntegrationRunner
 			else if (step.Conflicts.Count > 0)
 			{
 				// What the structural merge made of git's conflicts, as it is in the working tree now.
-				var warnings = StructuralMerge.Warnings(merge.Error);
+				var warnings = merge.Warnings;
 				step.StructuralConflicts.Clear();
 				step.StructuralConflicts.AddRange(conflicts);
 				step.StructuralWarnings.Clear();
@@ -464,28 +484,28 @@ internal static class IntegrationRunner
 						: $"'{component.Name}': asking the resolver to merge run {Short(step)} ({conflicts.Count} conflicted file(s)).",
 					component.Name, step.RunId);
 
-				exitCode = await ShellCommand.RunAsync(record.Resolver, component.Path!,
+				exitCode = await settings.RunResolver(new ResolverRequest(record.Resolver, component.Path!,
 					new Dictionary<string, string>
 					{
-						["BASSIA_ROOT"] = monorepo.Root,
+						["BASSIA_ROOT"] = settings.Root,
 						["BASSIA_INTEGRATION_ID"] = record.IntegrationId,
 						["BASSIA_COMPONENT"] = component.Name,
 						["BASSIA_RUN_ID"] = step.RunId,
 						["BASSIA_MERGE_BRIEF"] = step.Brief
 					},
-					briefText, context?.OnOutput, Cancellation);
+					briefText, context?.OnOutput, Cancellation));
 			}
 			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
 			{
 				// The brief could not be written or the resolver could not be started: this step fails, the rest go on.
-				await RestoreAsync(checkout, head);
+				await checkout.ResetAsync(head);
 				Fail(component, step, $"the resolver could not be run: {ex.Message}");
 				return;
 			}
 
 			if (exitCode is null)
 			{
-				await RestoreAsync(checkout, head);
+				await checkout.ResetAsync(head);
 				step.Note = "cancelled while the resolver was working";
 				Cancelled = true;
 				return;
@@ -493,16 +513,16 @@ internal static class IntegrationRunner
 
 			if (exitCode != 0)
 			{
-				await RestoreAsync(checkout, head);
+				await checkout.ResetAsync(head);
 				Fail(component, step, $"the resolver exited with code {exitCode}");
 				return;
 			}
 
-			if (!await MergeInProgressAsync(checkout))
+			if (!await checkout.MergeInProgressAsync())
 			{
 				// The resolver committed on its own: fine, as long as the result really is in the history now.
-				var now = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
-				if (now != head && await MergeProbe.IsAncestorAsync(checkout, step.SourceCommit, now))
+				var now = await checkout.HeadAsync();
+				if (now != head && await checkout.ContainsAsync(step.SourceCommit))
 				{
 					step.Outcome = StepOutcome.Resolved;
 					step.Commit = now;
@@ -511,41 +531,37 @@ internal static class IntegrationRunner
 				}
 				else
 				{
-					await RestoreAsync(checkout, head);
+					await checkout.ResetAsync(head);
 					Fail(component, step, "the resolver abandoned the merge");
 				}
 
 				return;
 			}
 
-			await checkout.RunOrThrowAsync(["add", "--all"]);
 			var unresolved = conflicts.Concat(step.Conflicts).Distinct(StringComparer.Ordinal)
 				.Where(file => HasConflictMarkers(Path.Combine(component.Path!, file))).ToList();
-			unresolved.AddRange(Lines(await checkout.RunOrThrowAsync(["diff", "--name-only", "--diff-filter=U"])).Except(unresolved));
 			if (unresolved.Count > 0)
 			{
-				await RestoreAsync(checkout, head);
+				await checkout.ResetAsync(head);
 				Fail(component, step, $"conflicts remain in {string.Join(", ", unresolved)}");
 				return;
 			}
 
-			await checkout.RunOrThrowAsync(["commit", "--quiet", "--no-edit", "-m", MergeCommitMessage(component, step)]);
+			step.Commit = await checkout.CommitAsync(MergeCommitMessage(component, step));
 			step.Outcome = StepOutcome.Resolved;
-			step.Commit = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
 			Report($"'{component.Name}': run {Short(step)} resolved semantically as {step.Commit[..7]}.", component.Name, step.RunId);
 		}
 
-		private async Task<MergeBrief.Input> BriefAsync(GitClient checkout, ComponentIntegration component, IntegrationStep step,
+		private async Task<MergeBrief.Input> BriefAsync(IComponentWorkspace checkout, ComponentIntegration component, IntegrationStep step,
 			IReadOnlyList<IntegrationStep> before, string head, IReadOnlyList<string> conflicts)
 		{
-			var mergeBase = (await checkout.RunAsync(["merge-base", head, step.SourceCommit])).Output.Trim();
-			var range = mergeBase.Length > 0 ? mergeBase : component.BaseCommit;
+			var range = await checkout.MergeBaseAsync(head, step.SourceCommit) ?? component.BaseCommit;
 
 			async Task<MergeBrief.Side> SideAsync(string title, string tip, IReadOnlyList<string> rationales) => new(
 				title,
 				rationales,
-				(await checkout.RunAsync(["log", "--no-color", "--format=commit %h%n%B", $"{range}..{tip}"])).Output,
-				(await checkout.RunAsync(["diff", "--no-color", range, tip])).Output);
+				string.Concat((await checkout.LogAsync(range, tip)).Select(commit => $"commit {commit.Id[..7]}\n{commit.Message.TrimEnd('\n')}\n\n")),
+				await checkout.DiffAsync(range, tip));
 
 			var integrated = before.Where(previous => previous.Outcome is StepOutcome.Merged or StepOutcome.Resolved)
 				.Select(previous => $"run `{previous.RunId}` - {previous.Rationale}").ToList();
@@ -564,9 +580,9 @@ internal static class IntegrationRunner
 				await SideAsync("Theirs", step.SourceCommit, [step.Rationale]));
 		}
 
-		private async Task PublishAsync(GitClient checkout, ComponentIntegration component, string sourceDir)
+		private async Task PublishAsync(IComponentWorkspace checkout, ComponentIntegration component, string sourceDir)
 		{
-			var head = await checkout.RunOrThrowAsync(["rev-parse", "HEAD"]);
+			var head = await checkout.HeadAsync();
 			if (head == component.BaseCommit)
 			{
 				component.ResultStatus = ResultStatus.Unchanged;
@@ -576,13 +592,12 @@ internal static class IntegrationRunner
 
 			component.ResultCommit = head;
 			component.ResultStatus = ResultStatus.Committed;
-			var existing = Lines(await checkout.RunOrThrowAsync(["tag", "--list", $"{component.Branch}/*"]));
+			var existing = await checkout.ListTagsAsync($"{component.Branch}/");
 			var tag = component.ResultTag = $"{component.Branch}/{RunMetadata.HighestIndex(existing) + 1}";
 			var integrated = component.Steps.Count(step => step.Outcome is StepOutcome.Merged or StepOutcome.Resolved);
-			await checkout.RunOrThrowAsync(["tag", "-a", tag, "-m",
-				$"{record.IntegrationId}: {integrated} agentic run result(s) integrated into '{component.Name}' onto {component.BaseRef}", head]);
-			await checkout.RunOrThrowAsync(["push", "--quiet", sourceDir,
-				$"refs/heads/{component.Branch}:refs/heads/{component.Branch}", $"refs/tags/{tag}:refs/tags/{tag}"]);
+			await checkout.TagAsync(tag, head,
+				$"{record.IntegrationId}: {integrated} agentic run result(s) integrated into '{component.Name}' onto {component.BaseRef}");
+			await checkout.PublishAsync(component.Branch, [tag]);
 			component.ResultStatus = ResultStatus.Pushed;
 			Report($"'{component.Name}': integrated as {head[..7]}, tagged {tag}, pushed to '{sourceDir}'.", component.Name);
 		}
@@ -656,31 +671,8 @@ internal static class IntegrationRunner
 		}
 	}
 
-	private static async Task<bool> MergeInProgressAsync(GitClient checkout) =>
-		(await checkout.RunAsync(["rev-parse", "--quiet", "--verify", "MERGE_HEAD"])).ExitCode == 0;
-
-	/// <summary>
-	/// Puts the checkout back exactly at <paramref name="head"/>: no merge in progress, no staged or modified files and
-	/// no untracked ones. <c>git merge --abort</c> alone keeps files a failed resolver created, and the next step's
-	/// <c>git add --all</c> would then commit them into the integration.
-	/// </summary>
-	private static async Task RestoreAsync(GitClient checkout, string head)
-	{
-		if (await MergeInProgressAsync(checkout))
-		{
-			// reset --hard below clears the merge state too; the abort is just the tidy way when it works.
-			await checkout.RunAsync(["merge", "--abort"]);
-		}
-
-		await checkout.RunOrThrowAsync(["reset", "--quiet", "--hard", head]);
-		await checkout.RunOrThrowAsync(["clean", "--quiet", "-d", "--force", "-x"]);
-	}
-
 	/// <summary>Conflict markers left in a file, or the pointer to <c>weave explain</c> the structural merge adds to a conflicted one.</summary>
 	private static bool HasConflictMarkers(string path) =>
 		File.Exists(path) && File.ReadLines(path).Any(line =>
 			line.StartsWith("<<<<<<<", StringComparison.Ordinal) || line.StartsWith(">>>>>>>", StringComparison.Ordinal) || StructuralMerge.IsAnnotation(line));
-
-	private static List<string> Lines(string text) =>
-		text.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 }

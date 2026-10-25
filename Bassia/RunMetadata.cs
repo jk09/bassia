@@ -379,7 +379,7 @@ internal sealed class RunMetadataStore : Storage.IRunRecordStore
 	// ----- record primitives, shared by every kind of record the store keeps (runs, integrations) -----
 
 	/// <summary>Highest <c>&lt;index&gt;</c> among the <c>&lt;refBase&gt;/&lt;index&gt;</c> tags, or -1 when there is none.</summary>
-	internal async Task<int> LatestIndexAsync(string refBase)
+	public async Task<int> LatestIndexAsync(string refBase)
 	{
 		if (!IsInitialized)
 		{
@@ -391,7 +391,7 @@ internal sealed class RunMetadataStore : Storage.IRunRecordStore
 	}
 
 	/// <summary>The distinct <c>&lt;key&gt;</c> parts of every <c>&lt;refPrefix&gt;&lt;key&gt;/&lt;index&gt;</c> tag.</summary>
-	internal async Task<IReadOnlyList<string>> ListKeysAsync(string refPrefix)
+	public async Task<IReadOnlyList<string>> ListKeysAsync(string refPrefix)
 	{
 		if (!IsInitialized)
 		{
@@ -406,7 +406,7 @@ internal sealed class RunMetadataStore : Storage.IRunRecordStore
 	}
 
 	/// <summary>The file of the latest lineage of a record, with that lineage; null when the record is unknown.</summary>
-	internal async Task<(string Content, int Lineage)?> ReadLatestAsync(string refBase, string fileName)
+	public async Task<(string Content, int Lineage)?> ReadLatestAsync(string refBase, string fileName)
 	{
 		var lineage = await LatestIndexAsync(refBase);
 		if (lineage < 0)
@@ -421,7 +421,7 @@ internal sealed class RunMetadataStore : Storage.IRunRecordStore
 	/// Writes <paramref name="content"/> as <paramref name="fileName"/> in a new commit tagged
 	/// <c>&lt;refBase&gt;/&lt;lineage&gt;</c>, parented on the previous lineage's commit when there is one.
 	/// </summary>
-	internal async Task<string> WriteAsync(string refBase, int lineage, string fileName, string content, string message)
+	public async Task<string> WriteAsync(string refBase, int lineage, string fileName, string content, string message)
 	{
 		var blob = await git.RunOrThrowAsync(["hash-object", "-w", "--stdin"], content);
 		var tree = await git.RunOrThrowAsync(["mktree"], $"100644 blob {blob}\t{fileName}\n");
