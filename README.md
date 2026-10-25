@@ -46,6 +46,16 @@ together by a commit DAG in a database - without changing how the monorepo works
 
 ![The component map: each component with what it needs, its live runs, queued results and merges needing attention](docs/images/components.png)
 
+**Boundaries keep the architecture.** Tag components (`type:app`, `scope:billing`), say who may reference them, and
+write nx-style rules over the tags, with wildcards (`scope:*` may reference only `scope:$1`). A change to the graph
+that breaks a rule is refused; violations already there are reported, so you can introduce rules gradually.
+
+```powershell
+bassia component set -name billing-core -tags type:lib,scope:billing -visibility scope:billing
+bassia boundary add -source "scope:*" -allow "scope:$1,scope:shared"
+bassia boundary check -strict
+```
+
 **Tags span components.** One annotated tag of the same name in several components marks a combination that belongs
 together: a release, a baseline for agents, the result of an integration. These tags are how you measure progress.
 

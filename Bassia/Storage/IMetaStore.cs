@@ -14,6 +14,24 @@ internal abstract record RegistryChange
 
 	/// <summary>Replaces the references of the component named <paramref name="Name"/>.</summary>
 	public sealed record SetReferences(string Name, IReadOnlyList<ComponentReference> References) : RegistryChange;
+
+	/// <summary>Replaces the tags of the component named <paramref name="Name"/>.</summary>
+	public sealed record SetTags(string Name, IReadOnlyList<string> Tags) : RegistryChange;
+
+	/// <summary>Replaces the visibility of the component named <paramref name="Name"/>; null makes it public.</summary>
+	public sealed record SetVisibility(string Name, IReadOnlyList<string>? Visibility) : RegistryChange;
+
+	/// <summary>Replaces the owners of the component named <paramref name="Name"/>.</summary>
+	public sealed record SetOwners(string Name, IReadOnlyList<string> Owners) : RegistryChange;
+
+	/// <summary>Appends a boundary rule.</summary>
+	public sealed record AddBoundary(Core.BoundaryRule Rule) : RegistryChange;
+
+	/// <summary>Removes the boundary rule at <paramref name="Index"/> (0-based, in file order).</summary>
+	public sealed record RemoveBoundary(int Index) : RegistryChange;
+
+	/// <summary>Whether the change is to the boundary rules rather than to the graph.</summary>
+	public bool IsRuleChange => this is AddBoundary or RemoveBoundary;
 }
 
 /// <summary>
@@ -27,6 +45,9 @@ internal interface IMetaStore
 
 	/// <summary>The registered components as of the latest revision, in registration order.</summary>
 	Task<IReadOnlyList<ComponentDefinition>> LoadAsync();
+
+	/// <summary>The boundary rules as of the latest revision, in order.</summary>
+	Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync();
 
 	/// <summary>
 	/// Applies <paramref name="changes"/> (already validated) as one revision described by <paramref name="message"/>

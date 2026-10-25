@@ -17,8 +17,13 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 
 	public Task<IReadOnlyList<ComponentDefinition>> LoadAsync() => Task.FromResult(Read(Root));
 
+	public Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync() => Task.FromResult(ReadBoundaries(Root));
+
 	/// <summary>The components registered in <c>components.toml</c> under <paramref name="root"/>, as written.</summary>
 	public static IReadOnlyList<ComponentDefinition> Read(string root) => ReadComponents(ReadToml(ComponentsFile.PathOf(root)));
+
+	/// <summary>The boundary rules (<c>[[boundary]]</c>) of <c>components.toml</c> under <paramref name="root"/>, as written.</summary>
+	public static IReadOnlyList<Core.BoundaryRule> ReadBoundaries(string root) => ReadBoundaries(ReadToml(ComponentsFile.PathOf(root)));
 
 	public async Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message)
 	{
@@ -31,13 +36,28 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 				switch (change)
 				{
 					case RegistryChange.Add add:
-						ComponentsFile.Add(Root, add.Component.Name, add.Component.Url, add.Component.References, add.Component.ForkOf, add.Component.ForkCommit);
+						ComponentsFile.Add(Root, add.Component);
 						break;
 					case RegistryChange.Remove remove:
 						ComponentsFile.Remove(Root, remove.Name);
 						break;
 					case RegistryChange.SetReferences set:
 						ComponentsFile.SetReferences(Root, set.Name, set.References);
+						break;
+					case RegistryChange.SetTags set:
+						ComponentsFile.SetList(Root, set.Name, "tags", set.Tags.Count == 0 ? null : set.Tags);
+						break;
+					case RegistryChange.SetVisibility set:
+						ComponentsFile.SetList(Root, set.Name, "visibility", set.Visibility);
+						break;
+					case RegistryChange.SetOwners set:
+						ComponentsFile.SetList(Root, set.Name, "owners", set.Owners.Count == 0 ? null : set.Owners);
+						break;
+					case RegistryChange.AddBoundary add:
+						ComponentsFile.AddBoundary(Root, add.Rule);
+						break;
+					case RegistryChange.RemoveBoundary remove:
+						ComponentsFile.RemoveBoundary(Root, remove.Index);
 						break;
 				}
 			}
@@ -115,10 +135,61 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 			var url = componentTable.TryGetValue("url", out var urlValue) ? urlValue as string ?? "" : "";
 			var forkOf = componentTable.TryGetValue("fork_of", out var forkOfValue) ? forkOfValue as string : null;
 			var forkCommit = componentTable.TryGetValue("fork_commit", out var forkCommitValue) ? forkCommitValue as string : null;
-			components.Add(new ComponentDefinition(name, url, ReadReferences(name, componentTable), forkOf, forkCommit));
+			components.Add(new ComponentDefinition(name, url, ReadReferences(name, componentTable), forkOf, forkCommit)
+			{
+				Tags = Strings(componentTable, "tags", $"Component '{name}'") ?? [],
+				Visibility = Strings(componentTable, "visibility", $"Component '{name}'"),
+				Owners = Strings(componentTable, "owners", $"Component '{name}'") ?? []
+			});
 		}
 
 		return components;
+	}
+
+	// [[boundary]] source = "type:app", allow = ["type:lib"], deny = [...], description = "..."
+	private static List<Core.BoundaryRule> ReadBoundaries(TomlTable table)
+	{
+		var rules = new List<Core.BoundaryRule>();
+		if (!table.TryGetValue("boundary", out var entries))
+		{
+			return rules;
+		}
+
+		if (entries is not TomlTableArray tables)
+		{
+			throw new MonorepoException("components.toml: 'boundary' must be an array of tables ([[boundary]]).");
+		}
+
+		foreach (var (rule, index) in tables.Select((rule, index) => (rule, index)))
+		{
+			var where = $"components.toml [[boundary]] #{index + 1}";
+			foreach (var key in rule.Keys.Where(key => key is not ("source" or "allow" or "deny" or "description")))
+			{
+				throw new MonorepoException($"{where}: unknown key '{key}'; expected source, allow, deny and description.");
+			}
+
+			var source = rule.TryGetValue("source", out var sourceValue) ? sourceValue as string ?? throw new MonorepoException($"{where}: 'source' must be a string.") : "";
+			var description = rule.TryGetValue("description", out var descriptionValue) ? descriptionValue as string : null;
+			rules.Add(new Core.BoundaryRule(source, Strings(rule, "allow", where) ?? [], Strings(rule, "deny", where) ?? [], description));
+		}
+
+		return rules;
+	}
+
+	/// <summary>An array of strings under <paramref name="key"/>, or null when the key is absent.</summary>
+	private static List<string>? Strings(TomlTable table, string key, string where)
+	{
+		if (!table.TryGetValue(key, out var value) || value is null)
+		{
+			return null;
+		}
+
+		if (value is not TomlArray array || array.Any(item => item is not string))
+		{
+			throw new MonorepoException($"{where}: '{key}' must be an array of strings.");
+		}
+
+		return array.Cast<string>().ToList();
 	}
 
 	// references = ["lib", { name = "other", path = "libs/other" }]

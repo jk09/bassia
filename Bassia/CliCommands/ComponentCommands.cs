@@ -18,6 +18,7 @@ internal static class ComponentCommands
 		var statuses = await ComponentStatus.ReadAllAsync(monorepo, runs);
 		var graph = new ComponentGraph(monorepo.Components);
 		var live = LiveRunsPerComponent(monorepo, runs);
+		var violations = monorepo.Registry.Violations();
 
 		var entries = statuses.Select(status => new Dictionary<string, object?>
 		{
@@ -27,6 +28,9 @@ internal static class ComponentCommands
 			["path"] = monorepo.SourceRepoDir(status.Name),
 			["has_repo"] = status.HasRepo,
 			["references"] = status.Definition.References.Select(Describe).ToList(),
+			["tags"] = status.Definition.Tags,
+			["visibility"] = status.Definition.Visibility,
+			["owners"] = status.Definition.Owners,
 			["referenced_by"] = graph.ReferrersOf(status.Name).Select(referrer => referrer.Name).ToList(),
 			["annotated_tags"] = status.AnnotatedTags,
 			["branches"] = status.Branches,
@@ -35,16 +39,17 @@ internal static class ComponentCommands
 			["live_runs"] = live.GetValueOrDefault(status.Name)
 		}).ToList();
 
-		return ProgramCli.WriteResult(true, invocation.Command, $"{entries.Count} component(s).", new Dictionary<string, object?>
+		return ProgramCli.WriteResult(true, invocation.Command, $"{entries.Count} component(s){ViolationSuffix(violations)}.", new Dictionary<string, object?>
 		{
-			["table"] = new TomlText(AsciiTable.Render(["NAME", "TAGS", "BRANCHES", "RUNS", "LIVE", "NEEDS", "USED BY"],
+			["table"] = new TomlText(AsciiTable.Render(["NAME", "ARCH TAGS", "TAGS", "BRANCHES", "RUNS", "LIVE", "NEEDS", "USED BY"],
 				statuses.Select(status => (IReadOnlyList<string>)
 				[
-					status.Name, status.AnnotatedTags.ToString(), status.Branches.ToString(), status.RecordedRuns.ToString(),
+					status.Name, Join(status.Definition.Tags), status.AnnotatedTags.ToString(), status.Branches.ToString(), status.RecordedRuns.ToString(),
 					live.GetValueOrDefault(status.Name).ToString(),
 					Join(status.Definition.References.Select(Describe)), Join(graph.ReferrersOf(status.Name).Select(referrer => referrer.Name))
 				]))),
-			["component"] = entries
+			["component"] = entries,
+			["warnings"] = Warnings(violations)
 		});
 	}
 
@@ -58,10 +63,16 @@ internal static class ComponentCommands
 		var references = ComponentsFile.ParseReferences(invocation.List("references"));
 		if (invocation.Has("unwind"))
 		{
+			if (invocation.Has("tags") || invocation.Has("visibility") || invocation.Has("owners"))
+			{
+				throw invocation.Usage("-tags, -visibility and -owners cannot be combined with -unwind; set them afterwards with 'bassia component set'.");
+			}
+
 			return await UnwindCommands.AddUnwoundAsync(invocation, monorepo, name, url, references);
 		}
 
-		var added = await monorepo.Graph().ImportAsync(name, url, references);
+		var graph = monorepo.Graph();
+		var added = await graph.ImportAsync(name, url, references, Attributes(invocation, ComponentAttributes.None));
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Added component '{name}' from '{url}'. Tag a baseline for runs with 'bassia component tag -name {name} -tag <tag>'.",
 			new Dictionary<string, object?>
@@ -70,7 +81,11 @@ internal static class ComponentCommands
 				["url"] = url,
 				["path"] = added.Location,
 				["references"] = references.Select(Describe).ToList(),
-				["meta_repo_commit"] = added.Revision
+				["tags"] = added.Component.Tags,
+				["visibility"] = added.Component.Visibility,
+				["owners"] = added.Component.Owners,
+				["meta_repo_commit"] = added.Revision,
+				["warnings"] = Warnings(graph.Registry.Violations())
 			});
 	}
 
@@ -83,7 +98,8 @@ internal static class ComponentCommands
 		var references = ComponentsFile.ParseReferences(invocation.List("references"));
 		var branch = invocation.Get("branch") ?? "main";
 		var url = invocation.Get("url") ?? "";
-		var created = await monorepo.Graph().CreateAsync(name, references, branch, url);
+		var graph = monorepo.Graph();
+		var created = await graph.CreateAsync(name, references, branch, url, Attributes(invocation, ComponentAttributes.None));
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"Created component '{name}' with an empty first commit on '{branch}'; select it for a run with -select {name}.",
 			new Dictionary<string, object?>
@@ -93,7 +109,11 @@ internal static class ComponentCommands
 				["branch"] = branch,
 				["path"] = created.Location,
 				["references"] = references.Select(Describe).ToList(),
-				["meta_repo_commit"] = created.Revision
+				["tags"] = created.Component.Tags,
+				["visibility"] = created.Component.Visibility,
+				["owners"] = created.Component.Owners,
+				["meta_repo_commit"] = created.Revision,
+				["warnings"] = Warnings(graph.Registry.Violations())
 			});
 	}
 
@@ -117,12 +137,13 @@ internal static class ComponentCommands
 		var component = RequireComponent(monorepo, invocation.Require("name"));
 		var graph = new ComponentGraph(monorepo.Components);
 		var state = await monorepo.Graph().StateAsync(component.Name);
+		var violations = monorepo.Registry.Violations().Where(violation => violation.From == component.Name || violation.To == component.Name).ToList();
 		var runs = (await monorepo.RunRecords().ListLatestAsync())
 			.Where(run => run.Components.Any(entry => entry.Name == component.Name))
 			.ToList();
 
 		return ProgramCli.WriteResult(true, invocation.Command,
-			$"Component '{component.Name}': {state.Branches.Count} branch(es), {state.Tags.Count} tag(s), {runs.Count} run(s).",
+			$"Component '{component.Name}': {state.Branches.Count} branch(es), {state.Tags.Count} tag(s), {runs.Count} run(s){ViolationSuffix(violations)}.",
 			new Dictionary<string, object?>
 			{
 				["name"] = component.Name,
@@ -132,8 +153,12 @@ internal static class ComponentCommands
 				["path"] = state.Location,
 				["has_repo"] = state.HasStore,
 				["default_branch"] = state.DefaultBranch,
+				["tags"] = component.Tags,
+				["visibility"] = component.Visibility,
+				["owners"] = component.Owners,
 				["references"] = component.References.Select(Describe).ToList(),
 				["referenced_by"] = graph.ReferrersOf(component.Name).Select(referrer => referrer.Name).ToList(),
+				["warnings"] = Warnings(violations),
 				["closure"] = monorepo.Closure([component.Name]).Select(item => item.Name).ToList(),
 				["graph"] = new TomlText(new ComponentGraph(monorepo.Closure([component.Name])).RenderText(ascii: true)),
 				["branch"] = state.Branches.Select(item => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
@@ -171,28 +196,58 @@ internal static class ComponentCommands
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var component = RequireComponent(monorepo, invocation.Require("name"));
-		if (invocation.Has("references") == invocation.Has("clear-references"))
+		Exclusive(invocation, "references", "clear-references");
+		Exclusive(invocation, "tags", "clear-tags");
+		Exclusive(invocation, "owners", "clear-owners");
+		if (new[] { invocation.Has("visibility"), invocation.Has("public"), invocation.Has("private") }.Count(given => given) > 1)
 		{
-			throw invocation.Usage("Give either -references or -clear-references.");
+			throw invocation.Usage("Give only one of -visibility, -public and -private.");
 		}
 
-		var references = invocation.Has("clear-references") ? [] : ComponentsFile.ParseReferences(invocation.List("references"));
+		string[] changes = ["references", "clear-references", "tags", "clear-tags", "visibility", "public", "private", "owners", "clear-owners"];
+		if (!changes.Any(invocation.Has))
+		{
+			throw invocation.Usage("Give what to change: -references or -clear-references, -tags or -clear-tags, -visibility, -public or -private, -owners or -clear-owners.");
+		}
+
+		var references = invocation.Has("clear-references") ? []
+			: invocation.Has("references") ? ComponentsFile.ParseReferences(invocation.List("references")) : null;
+		var tags = invocation.Has("clear-tags") ? [] : invocation.Has("tags") ? invocation.List("tags") : null;
+		var owners = invocation.Has("clear-owners") ? [] : invocation.Has("owners") ? invocation.List("owners") : null;
+		var setVisibility = invocation.Has("visibility") || invocation.Has("public") || invocation.Has("private");
+		IReadOnlyList<string>? visibility = invocation.Has("private") ? [] : invocation.Has("visibility") ? invocation.List("visibility") : null;
 		var graph = monorepo.Graph();
-		var changed = await graph.SetReferencesAsync(component.Name, references);
-		var described = references.Select(Describe).ToList();
-		var commit = changed.Revision;
+		var changed = await graph.SetAttributesAsync(component.Name, tags, setVisibility, visibility, owners, references);
 		var updated = graph.Registry;
+		var now = updated.Require(component.Name);
+		var described = now.References.Select(Describe).ToList();
 		return ProgramCli.WriteResult(true, invocation.Command,
-			described.Count == 0 ? $"Component '{component.Name}' now references nothing." : $"Component '{component.Name}' now references {string.Join(", ", described)}.",
+			$"Component '{now.Name}' references {(described.Count == 0 ? "nothing" : string.Join(", ", described))}; " +
+			$"tags {(now.Tags.Count == 0 ? "none" : string.Join(", ", now.Tags))}; {DescribeVisibility(now.Visibility)}.",
 			new Dictionary<string, object?>
 			{
-				["name"] = component.Name,
+				["name"] = now.Name,
 				["references"] = described,
-				["closure"] = updated.Closure([component.Name]).Select(item => item.Name).ToList(),
-				["meta_repo_commit"] = commit,
-				["graph"] = new TomlText(new ComponentGraph(updated.Components).RenderText(ascii: true))
+				["tags"] = now.Tags,
+				["visibility"] = now.Visibility,
+				["owners"] = now.Owners,
+				["closure"] = updated.Closure([now.Name]).Select(item => item.Name).ToList(),
+				["meta_repo_commit"] = changed.Revision,
+				["graph"] = new TomlText(new ComponentGraph(updated.Components).RenderText(ascii: true)),
+				["warnings"] = Warnings(updated.Violations())
 			});
 	}
+
+	private static void Exclusive(Invocation invocation, string set, string clear)
+	{
+		if (invocation.Has(set) && invocation.Has(clear))
+		{
+			throw invocation.Usage($"Give either -{set} or -{clear}, not both.");
+		}
+	}
+
+	internal static string DescribeVisibility(IReadOnlyList<string>? visibility) =>
+		visibility is null ? "public" : visibility.Count == 0 ? "private" : $"visible to {string.Join(", ", visibility)}";
 
 	// ----- bassia component remove -----
 
@@ -250,7 +305,8 @@ internal static class ComponentCommands
 		var references = invocation.Has("references") ? ComponentsFile.ParseReferences(invocation.List("references")) : null;
 		var url = invocation.Get("url") ?? "";
 		RequireRepo(monorepo, parent.Name);
-		var fork = await monorepo.Graph().ForkAsync(parent.Name, name, invocation.Get("ref"), references, url);
+		var graph = monorepo.Graph();
+		var fork = await graph.ForkAsync(parent.Name, name, invocation.Get("ref"), references, url, Attributes(invocation, ComponentAttributes.Of(parent)));
 		var (commit, branch, forkDir, tags, meta) = (fork.Commit, fork.Branch, fork.Location, fork.Tags, fork.Revision ?? "");
 		references = fork.Component.References;
 
@@ -266,7 +322,11 @@ internal static class ComponentCommands
 				["path"] = forkDir,
 				["tags"] = tags,
 				["references"] = references.Select(Describe).ToList(),
-				["meta_repo_commit"] = meta.Length > 0 ? meta : null
+				["tags"] = fork.Component.Tags,
+				["visibility"] = fork.Component.Visibility,
+				["owners"] = fork.Component.Owners,
+				["meta_repo_commit"] = meta.Length > 0 ? meta : null,
+				["warnings"] = Warnings(graph.Registry.Violations())
 			});
 	}
 
@@ -309,8 +369,11 @@ internal static class ComponentCommands
 			await File.WriteAllTextAsync(output, rendered);
 		}
 
+		var names = components.Select(component => component.Name).ToHashSet(StringComparer.Ordinal);
+		var violations = monorepo.Registry.Violations().Where(violation => names.Contains(violation.From)).ToList();
 		return ProgramCli.WriteResult(true, invocation.Command,
-			output is null ? $"Dependency graph of {components.Count} component(s) ({format})." : $"Dependency graph of {components.Count} component(s) written to '{output}' ({format}).",
+			(output is null ? $"Dependency graph of {components.Count} component(s) ({format})" : $"Dependency graph of {components.Count} component(s) written to '{output}' ({format})") +
+				ViolationSuffix(violations) + ".",
 			new Dictionary<string, object?>
 			{
 				["format"] = format,
@@ -319,13 +382,29 @@ internal static class ComponentCommands
 				["component"] = components.Select(component => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 				{
 					["name"] = component.Name,
+					["tags"] = component.Tags,
 					["references"] = component.References.Select(Describe).ToList(),
 					["referenced_by"] = graph.ReferrersOf(component.Name).Select(referrer => referrer.Name).ToList()
-				}).ToList()
+				}).ToList(),
+				["violations"] = violations.Count,
+				["warnings"] = Warnings(violations)
 			});
 	}
 
 	// ----- helpers -----
+
+	/// <summary>The <c>-tags</c>, <c>-visibility</c> and <c>-owners</c> given, each falling back to <paramref name="defaults"/>.</summary>
+	internal static ComponentAttributes Attributes(Invocation invocation, ComponentAttributes defaults) => new(
+		invocation.Has("tags") ? invocation.List("tags") : defaults.Tags,
+		invocation.Has("visibility") ? invocation.List("visibility") : defaults.Visibility,
+		invocation.Has("owners") ? invocation.List("owners") : defaults.Owners);
+
+	/// <summary>The boundary violations as the <c>warnings</c> of a result, or null (no key) when there are none.</summary>
+	internal static IReadOnlyList<string>? Warnings(IReadOnlyList<BoundaryViolation> violations) =>
+		violations.Count == 0 ? null : violations.Select(violation => violation.Message).ToList();
+
+	internal static string ViolationSuffix(IReadOnlyList<BoundaryViolation> violations) =>
+		violations.Count == 0 ? "" : $"; {violations.Count} boundary violation(s) - see 'bassia boundary check'";
 
 	internal static ComponentDefinition RequireComponent(Monorepo monorepo, string name) =>
 		monorepo.FindComponent(name)

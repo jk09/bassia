@@ -121,7 +121,8 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version`, `tutorial` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
-| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...]` |
+| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...] [-tags <t>,...] [-visibility <p>,...] [-owners <o>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>] [-tags ...] [-visibility ...] [-owners ...]`, `component show -name <c>`, `component set -name <c> [-references ...\|-clear-references] [-tags ...\|-clear-tags] [-visibility ...\|-public\|-private] [-owners ...\|-clear-owners]`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...] [-tags ...] [-visibility ...] [-owners ...]` |
+| Architectural boundaries | `boundary list`, `boundary add -source <pattern> [-allow <pattern>,...] [-deny <pattern>,...] [-description <text>]`, `boundary remove -index <n>`, `boundary check [-name <c>] [-strict]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
@@ -292,6 +293,58 @@ bassia config unset merge.advance -user
 `component add|set|remove` edit `.bassia/components.toml` the same way and reject a change that would leave a cycle
 or a reference to an unregistered component.
 
+### Architectural boundaries
+
+Components are the monorepo's architecture: a run sees only the components it selected and what they reference, so
+nothing else is there to use. Boundaries say which references the architecture allows, in the spirit of nx's module
+boundaries. Each component can carry **tags**, which place it in the architecture (`type:app`, `type:lib`,
+`scope:billing`), a **visibility**, which says who may reference it, and **owners**. **Boundary rules** over the tags
+say which components may reference which. All of it lives in `.bassia/components.toml`, versioned with the graph:
+
+```toml
+[[component]]
+name = "billing-core"
+tags = ["type:lib", "scope:billing"]
+visibility = ["scope:billing", "component:admin"]   # only these may reference it; [] makes it private
+owners = ["team-billing"]
+
+[[boundary]]
+description = "apps use libraries and UI, never other apps"
+source = "type:app"
+allow = ["type:lib", "type:ui"]
+
+[[boundary]]
+source = "scope:*"
+allow = ["scope:$1", "scope:shared"]                # each scope only itself and the shared one
+```
+
+```powershell
+bassia component set -name billing-core -tags type:lib,scope:billing -visibility scope:billing -owners team-billing
+bassia boundary add -source type:lib -deny type:app -description "libraries never depend on apps"
+bassia boundary list
+bassia boundary check                 # every violation, as warnings; -strict fails on any (for CI)
+```
+
+- **Patterns.** In `source`, `allow`, `deny` and `visibility`, `*` matches any characters and `?` one character.
+  `$1`, `$2`, ... in `allow` and `deny` stand for what the source's wildcards matched, so `scope:*` with
+  `allow = ["scope:$1"]` keeps every scope to itself. Every component also has the implicit tag `component:<name>`,
+  so a rule or a visibility can name a single component.
+- **Rules.** A reference `A -> B` is checked against every rule whose `source` matches a tag of `A`, once per matching
+  tag. With `allow`, some tag of `B` must match an allow pattern. With `deny`, no tag of `B` may match a deny pattern.
+  A component no rule's source matches is unconstrained.
+- **Visibility.** A component with `visibility` may be referenced only by components with a tag matching one of its
+  patterns. Without it, it is public.
+- **Enforcement.** Every change to the graph is checked: `component add`, `create`, `fork`, `set` and `split`. A
+  change that would add a violation not already in the graph is refused with every new violation named, and nothing
+  changes. Violations already there are kept and reported as `warnings` by the commands that change the graph, and
+  counted by `status`, `graph`, `component list` and `component show`. They come from a hand edit, or from a rule added
+  to a monorepo that does not follow it yet: adding or removing a rule is never refused. Unwinding submodules records
+  the structure it finds, so its new violations are warnings too.
+- **Defaults.** A fork takes its parent's tags, visibility and owners unless `-tags`, `-visibility` or `-owners` say
+  otherwise. A split part takes the source's, unless its `[[part]]` sets `tags`, `visibility` or `owners`.
+
+A monorepo without tags and rules behaves as before.
+
 ### Splitting a component
 
 A component is the unit a run clones, so one that has grown too large, or mixes architecturally distinct parts, is
@@ -325,6 +378,7 @@ name = "app-ui"
 paths = ["src/ui", "!src/ui/generated"]
 references = ["app-core", "lib"]
 url = "https://github.com/myrepo/app-ui.git"   # optional: recorded in components.toml and as the repo's origin
+tags = ["type:ui"]                      # optional, like visibility and owners: default is the source's
 
 [[referrer]]                            # optional: by default a referrer of the source references every part
 name = "tool"
@@ -739,8 +793,9 @@ Bassia has three layers; each depends only on the ones below it.
    granularity.
 2. **Component graph** (`Bassia/Core`) - `ComponentRegistry` is the immutable, validated graph of components and
    their references (unique valid names, references to registered components at paths inside the referrer, no
-   cycles; closure and dependency order). `MetaRepo` maintains it: every change is checked against the graph, then
-   persisted as one revision. `MonorepoGraph` is the API over both: create, import, remove, reference, tag, fork,
+   cycles; closure and dependency order), with the components' tags, visibility and owners and the boundary rules
+   (`Core/Boundaries`: tag patterns and the violations of a graph). `MetaRepo` maintains it: every change is checked against the graph and its
+   boundaries (a change to the graph may not add a violation), then persisted as one revision. `MonorepoGraph` is the API over both: create, import, remove, reference, tag, fork,
    split and unwrap components, and `AgentRuns` runs agentic runs on it (selection, working copies with nested
    references, commit/tag/publish, records, retry, abandon), with the agent process and the lock session injected.
    Integration (`Bassia/Integration`: the triage, the merges, the resolver, publishing and advancing, with

@@ -4,6 +4,7 @@ namespace Bassia.Storage.Memory;
 internal sealed class MemoryMetaStore : IMetaStore
 {
 	private readonly List<ComponentDefinition> components = [];
+	private readonly List<Core.BoundaryRule> boundaries = [];
 
 	/// <summary>Every revision committed, oldest first: its id, message and the changes it applied.</summary>
 	public List<(string Id, string Message, IReadOnlyList<RegistryChange> Changes)> Revisions { get; } = [];
@@ -11,6 +12,8 @@ internal sealed class MemoryMetaStore : IMetaStore
 	public string Location => "memory:meta-repo";
 
 	public Task<IReadOnlyList<ComponentDefinition>> LoadAsync() => Task.FromResult<IReadOnlyList<ComponentDefinition>>(components.ToList());
+
+	public Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync() => Task.FromResult<IReadOnlyList<Core.BoundaryRule>>(boundaries.ToList());
 
 	public Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message)
 	{
@@ -30,8 +33,22 @@ internal sealed class MemoryMetaStore : IMetaStore
 					components.RemoveAll(component => component.Name == remove.Name);
 					break;
 				case RegistryChange.SetReferences set:
-					var index = components.FindIndex(component => component.Name == set.Name);
-					components[index] = components[index] with { References = set.References };
+					Change(set.Name, component => component with { References = set.References });
+					break;
+				case RegistryChange.SetTags set:
+					Change(set.Name, component => component with { Tags = set.Tags });
+					break;
+				case RegistryChange.SetVisibility set:
+					Change(set.Name, component => component with { Visibility = set.Visibility });
+					break;
+				case RegistryChange.SetOwners set:
+					Change(set.Name, component => component with { Owners = set.Owners });
+					break;
+				case RegistryChange.AddBoundary add:
+					boundaries.Add(add.Rule);
+					break;
+				case RegistryChange.RemoveBoundary remove:
+					boundaries.RemoveAt(remove.Index);
 					break;
 			}
 		}
@@ -39,6 +56,12 @@ internal sealed class MemoryMetaStore : IMetaStore
 		var id = $"r{Revisions.Count + 1}";
 		Revisions.Add((id, message, changes));
 		return Task.FromResult<string?>(id);
+	}
+
+	private void Change(string name, Func<ComponentDefinition, ComponentDefinition> change)
+	{
+		var index = components.FindIndex(component => component.Name == name);
+		components[index] = change(components[index]);
 	}
 }
 

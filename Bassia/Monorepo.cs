@@ -4,13 +4,27 @@ namespace Bassia;
 /// A component registered in the meta-repo's <c>components.toml</c>. <paramref name="References"/> are the
 /// outgoing edges of the (acyclic) component reference graph: components this one nests as subfolders.
 /// </summary>
-/// <remarks><paramref name="ForkOf"/> and <paramref name="ForkCommit"/> name the component this one was forked from and the commit it forked at.</remarks>
-internal sealed record ComponentDefinition(string Name, string Url, IReadOnlyList<ComponentReference> References, string? ForkOf = null, string? ForkCommit = null);
+/// <remarks>
+/// <paramref name="ForkOf"/> and <paramref name="ForkCommit"/> name the component this one was forked from and the commit it
+/// forked at. <see cref="Tags"/>, <see cref="Visibility"/> and <see cref="Owners"/> place it in the monorepo's architecture:
+/// the boundary rules (<see cref="Core.Boundaries"/>) are written over tags.
+/// </remarks>
+internal sealed record ComponentDefinition(string Name, string Url, IReadOnlyList<ComponentReference> References, string? ForkOf = null, string? ForkCommit = null)
+{
+	/// <summary>Its tags (<c>type:lib</c>, <c>scope:billing</c>), besides the implicit <c>component:&lt;name&gt;</c>.</summary>
+	public IReadOnlyList<string> Tags { get; init; } = [];
+
+	/// <summary>Tag patterns a referrer must match one of; null means anyone may reference it, empty means nobody.</summary>
+	public IReadOnlyList<string>? Visibility { get; init; }
+
+	/// <summary>Who owns it: people or teams, as the monorepo names them.</summary>
+	public IReadOnlyList<string> Owners { get; init; } = [];
+}
 
 /// <summary>A nested component and the subfolder (relative to the referencing component) where it is expected.</summary>
 internal sealed record ComponentReference(string Name, string Path);
 
-internal sealed class MonorepoException(string message) : Exception(message);
+internal class MonorepoException(string message) : Exception(message);
 
 /// <summary>
 /// The Bassia monorepo as laid out on disk: the <c>.bassia</c> meta-repo, its configuration and component registry,
@@ -118,7 +132,7 @@ internal sealed class Monorepo
 		var workspace = config.Resolve(ConfigFile.Find("workspace.path"));
 		var workspaceDir = Path.GetFullPath(workspace.Value, root);
 
-		var registry = Core.ComponentRegistry.FromDefinitions(Storage.Git.GitMetaStore.Read(root));
+		var registry = Core.ComponentRegistry.FromDefinitions(Storage.Git.GitMetaStore.Read(root), Storage.Git.GitMetaStore.ReadBoundaries(root));
 		return new Monorepo(root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
 			config.Value("integration.weave").Trim(), config.Value("agent.command"), registry, config);
 	}

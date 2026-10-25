@@ -34,9 +34,10 @@ internal static class MonorepoCommands
 		var entries = locks.ReadAll();
 		var held = entries.Where(entry => locks.StateOf(entry) == LockState.Live).Sum(entry => entry.Holds.Count);
 		var waiting = entries.Count(entry => entry.Waits.Any(wait => locks.IsWaiting(entry, wait)));
+		var violations = monorepo.Registry.Violations();
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"{monorepo.Components.Count} component(s), {runs.Count} recorded run(s) ({liveRuns.Count} live), {integrations.Count} integration(s)" +
-			(held + waiting > 0 ? $", {held} path(s) held by live runs, {waiting} run(s) waiting." : "."),
+			(held + waiting > 0 ? $", {held} path(s) held by live runs, {waiting} run(s) waiting" : "") + ComponentCommands.ViolationSuffix(violations) + ".",
 			new Dictionary<string, object?>
 			{
 				["root"] = monorepo.Root,
@@ -51,6 +52,8 @@ internal static class MonorepoCommands
 				["live_runs"] = liveRuns,
 				["live_integrations"] = liveIntegrations,
 				["graph"] = new TomlText(graph.RenderText(ascii: true)),
+				["boundaries"] = monorepo.Registry.Boundaries.Count,
+				["boundary_violations"] = violations.Count,
 				["runs"] = CountByStatus(runs.Select(run => run.Status), runs.Count),
 				["integrations"] = CountByStatus(integrations.Select(record => record.Status), integrations.Count),
 				["locks"] = new Dictionary<string, object?>

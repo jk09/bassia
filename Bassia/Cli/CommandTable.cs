@@ -40,6 +40,13 @@ internal static class CommandTable
 		"'lock wait' brings the result in. A run that changes a path another live run holds, or a released path it is behind on, records a lock " +
 		"conflict; the integration treats its result by lock.conflict (resolver, manual or merge).";
 
+	private const string BoundaryDetails = "Rules are [[boundary]] tables in .bassia/components.toml (source, allow, deny, description), tags " +
+		"and visibility are keys of each [[component]] (tags = [...], visibility = [...], owners = [...]). Every component has the implicit " +
+		"tag component:<name>. A reference A -> B is checked against every rule whose source matches a tag of A, once per matching tag: with " +
+		"allow, a tag of B must match an allow pattern; with deny, none may match a deny pattern. A component with a visibility may be " +
+		"referenced only by components with a tag matching one of its patterns (visibility = [] makes it private). Patterns: * any " +
+		"characters, ? one character; $1, $2, ... in allow and deny are what the source's wildcards matched (scope:* allow scope:$1).";
+
 	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
 		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
 		"merge.component.<component>.<setting>, which falls back to merge.<setting>. merge.semantic (resolver|manual): a result git and weave cannot " +
@@ -154,7 +161,10 @@ internal static class CommandTable
 				new("url", "url", "The repository to clone (any URL or path git clone accepts).", Required: true),
 				new("name", "name", "The component's logical name (default: inferred from the URL)."),
 				new("references", "component[:path],...", "Components this one nests, each at a subfolder (default: its name)."),
-				new("unwind", null, "Also unwind its git submodules, recursively, into components it references (see 'bassia help component unwind').")
+				new("unwind", null, "Also unwind its git submodules, recursively, into components it references (see 'bassia help component unwind')."),
+				new("tags", "tag,...", "Its architecture tags (type:lib, scope:billing) that the boundary rules are written over."),
+				new("visibility", "pattern,...", "Only components with a tag matching one of these patterns may reference it (default: public)."),
+				new("owners", "owner,...", "Who owns it: people or teams.")
 			],
 			[
 				"bassia component add -url https://github.com/myrepo/lib.git",
@@ -169,11 +179,15 @@ internal static class CommandTable
 				new("name", "name", "The component's logical name.", Required: true),
 				new("references", "component[:path],...", "Components this one nests, each at a subfolder (default: its name)."),
 				new("branch", "branch", "Its main branch (default: main)."),
-				new("url", "url", "The upstream it will be published to, recorded with it.")
+				new("url", "url", "The upstream it will be published to, recorded with it."),
+				new("tags", "tag,...", "Its architecture tags (type:lib, scope:billing) that the boundary rules are written over."),
+				new("visibility", "pattern,...", "Only components with a tag matching one of these patterns may reference it (default: public)."),
+				new("owners", "owner,...", "Who owns it: people or teams.")
 			],
 			[
 				"bassia component create -name docs",
-				"bassia component create -name app -references lib,ui:vendor/ui"
+				"bassia component create -name app -references lib,ui:vendor/ui",
+				"bassia component create -name billing-api -references billing-core -tags type:app,scope:billing"
 			],
 			ComponentCommands.CreateAsync, Positional: "name",
 			Details: "Its history starts with one commit without files on its main branch, so an agentic run can select it at once with -select <name> " +
@@ -199,14 +213,27 @@ internal static class CommandTable
 			["bassia component show -name app", "bassia component show app"],
 			ComponentCommands.ShowAsync, Positional: "name"),
 
-		new("component", "set", "Replace a component's references (its dependencies); a cycle or an unregistered name is rejected and nothing changes.",
+		new("component", "set", "Change a component's references (its dependencies), tags, visibility or owners; a cycle, an unregistered name or a new boundary violation is rejected and nothing changes.",
 			[
 				new("name", "component", "The component.", Required: true),
 				new("references", "component[:path],...", "The components it nests, each at a subfolder (default: its name)."),
-				new("clear-references", null, "Remove all its references.")
+				new("clear-references", null, "Remove all its references."),
+				new("tags", "tag,...", "Replace its architecture tags (type:lib, scope:billing)."),
+				new("clear-tags", null, "Remove all its tags."),
+				new("visibility", "pattern,...", "Only components with a tag matching one of these patterns may reference it."),
+				new("public", null, "Anyone may reference it (removes its visibility)."),
+				new("private", null, "Nobody may reference it (visibility = [])."),
+				new("owners", "owner,...", "Replace its owners."),
+				new("clear-owners", null, "Remove all its owners.")
 			],
-			["bassia component set -name app -references lib,ui:vendor/ui", "bassia component set -name app -clear-references"],
-			ComponentCommands.SetAsync, Positional: "name"),
+			[
+				"bassia component set -name app -references lib,ui:vendor/ui", "bassia component set -name app -clear-references",
+				"bassia component set -name lib -tags type:lib,scope:shared", "bassia component set billing-core -visibility scope:billing -owners team-billing"
+			],
+			ComponentCommands.SetAsync, Positional: "name",
+			Details: "Every component also has the implicit tag component:<name>. The boundary rules ('bassia help boundary') are checked on every " +
+				"change to the graph: a change that adds a violation not already in the graph is refused, naming each one; violations already " +
+				"there are reported as warnings."),
 
 		new("component", "remove", "Unregister a component nobody references; -purge also deletes its repository.",
 			[
@@ -222,7 +249,10 @@ internal static class CommandTable
 				new("as", "fork", "The name of the new component.", Required: true),
 				new("ref", "commit-ish", "Where to fork: a tag or commit on the parent's main branch (default: its head)."),
 				new("url", "url", "Upstream repository of the fork, set as its origin (default: none)."),
-				new("references", "component[:path],...", "Components the fork nests (default: the parent's references).")
+				new("references", "component[:path],...", "Components the fork nests (default: the parent's references)."),
+				new("tags", "tag,...", "Its architecture tags (default: the parent's)."),
+				new("visibility", "pattern,...", "Who may reference it (default: the parent's visibility)."),
+				new("owners", "owner,...", "Who owns it (default: the parent's owners).")
 			],
 			["bassia component fork -name app -as app-search", "bassia component fork app -as app-hotfix -ref v1"],
 			ComponentCommands.ForkAsync, Positional: "name",
@@ -268,6 +298,44 @@ internal static class CommandTable
 				"excludes. Every file at the tip must go to exactly one part, 'shared' or 'drop'; all problems are reported at once, and nothing changes. " +
 				"Each part is a new repository whose history holds every commit that changed its files (authors, dates and messages kept, a Split-from " +
 				"trailer added), the tags of the branch, and a split record commit tagged split/<id>; the source's repository is kept, tagged split/<id>."),
+
+		// ----- architectural boundaries -----
+
+		new("boundary", "list", "List the boundary rules of components.toml - which tagged components may reference which - and the components' visibility.",
+			[],
+			["bassia boundary list"],
+			BoundaryCommands.ListAsync,
+			Details: BoundaryDetails),
+
+		new("boundary", "add", "Add a boundary rule: components with a tag matching -source may reference only components with a tag matching -allow, and none matching -deny.",
+			[
+				new("source", "pattern", "The tag pattern of the components the rule constrains (* any characters, ? one character).", Required: true),
+				new("allow", "pattern,...", "What they may reference: a tag of the referenced component must match one; $1, $2, ... are what -source's wildcards matched."),
+				new("deny", "pattern,...", "What they may not reference: no tag of the referenced component may match one."),
+				new("description", "text", "Why the rule exists.")
+			],
+			[
+				"bassia boundary add -source type:app -allow type:lib,type:ui",
+				"bassia boundary add -source scope:* -allow scope:$1,scope:shared -description \"scopes stay apart\"",
+				"bassia boundary add -source type:lib -deny type:app"
+			],
+			BoundaryCommands.AddAsync,
+			Details: "Adding a rule is never refused for the violations it finds in the existing graph: they are reported as warnings, and from " +
+				"then on no change may add a new one. " + BoundaryDetails),
+
+		new("boundary", "remove", "Remove a boundary rule by its number in 'bassia boundary list'.",
+			[new("index", "n", "The rule's number (1 is the first).", Required: true)],
+			["bassia boundary remove -index 2", "bassia boundary remove 2"],
+			BoundaryCommands.RemoveAsync, Positional: "index"),
+
+		new("boundary", "check", "Check every reference against the boundary rules and the components' visibility, and list the violations.",
+			[
+				new("name", "component", "Only the references from or to this component."),
+				new("strict", null, "Fail (exit code 1) when there is any violation - for CI.")
+			],
+			["bassia boundary check", "bassia boundary check -strict", "bassia boundary check -name app"],
+			BoundaryCommands.CheckAsync,
+			Details: "Without -strict the violations are warnings and the command succeeds. " + BoundaryDetails),
 
 		// ----- tags across components -----
 

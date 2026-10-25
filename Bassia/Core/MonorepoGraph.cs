@@ -7,6 +7,22 @@ using Bassia.Unwind;
 /// <summary>A registered component and the meta-repo revision that registered or changed it (null when nothing new was recorded).</summary>
 internal sealed record ComponentChange(ComponentDefinition Component, string Location, string? Revision);
 
+/// <summary>
+/// Where a component sits in the architecture, given when it is created, imported or forked: its tags, visibility (null:
+/// public) and owners.
+/// </summary>
+internal sealed record ComponentAttributes(IReadOnlyList<string> Tags, IReadOnlyList<string>? Visibility, IReadOnlyList<string> Owners)
+{
+	public static ComponentAttributes None { get; } = new([], null, []);
+
+	public static ComponentAttributes Of(ComponentDefinition component) => new(component.Tags, component.Visibility, component.Owners);
+
+	public ComponentDefinition ApplyTo(ComponentDefinition component) => component with { Tags = Tags, Visibility = Visibility, Owners = Owners };
+}
+
+/// <summary>A boundary rule change: the rules after it and the revision that recorded it.</summary>
+internal sealed record BoundaryChange(IReadOnlyList<BoundaryRule> Rules, string? Revision);
+
 /// <summary>A component <see cref="MonorepoGraph.RemoveAsync"/> unregistered, and whether its store was deleted.</summary>
 internal sealed record RemovedComponent(string Name, string Location, bool Purged, string? Revision);
 
@@ -56,18 +72,19 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 	/// Creates a new component - its history starts with one commit without files on <paramref name="defaultBranch"/>, so
 	/// a run can select it right away - and registers it.
 	/// </summary>
-	public async Task<ComponentChange> CreateAsync(string name, IReadOnlyList<ComponentReference> references, string defaultBranch = "main", string url = "")
+	public async Task<ComponentChange> CreateAsync(string name, IReadOnlyList<ComponentReference> references, string defaultBranch = "main", string url = "",
+		ComponentAttributes? attributes = null)
 	{
-		var definition = new ComponentDefinition(name, url, references);
+		var definition = (attributes ?? ComponentAttributes.None).ApplyTo(new ComponentDefinition(name, url, references));
 		CheckNew(definition, "-name");
 		var store = await Storage.CreateAsync(name, defaultBranch, url, $"Create component '{name}'");
 		return await RegisterAsync(definition, store, $"Create component '{name}'");
 	}
 
 	/// <summary>Imports the repository at <paramref name="url"/> as the component <paramref name="name"/> and registers it.</summary>
-	public async Task<ComponentChange> ImportAsync(string name, string url, IReadOnlyList<ComponentReference> references)
+	public async Task<ComponentChange> ImportAsync(string name, string url, IReadOnlyList<ComponentReference> references, ComponentAttributes? attributes = null)
 	{
-		var definition = new ComponentDefinition(name, url, references);
+		var definition = (attributes ?? ComponentAttributes.None).ApplyTo(new ComponentDefinition(name, url, references));
 		CheckNew(definition, "-name");
 		var store = await Storage.ImportAsync(name, url);
 		return await RegisterAsync(definition, store, $"Add component '{name}' from '{url}'");
@@ -80,7 +97,7 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 	/// </summary>
 	public async Task<SubmoduleUnwinder> ImportUnwrappedAsync(string name, string url, IReadOnlyList<ComponentReference> references)
 	{
-		CheckNew(new ComponentDefinition(name, url, references), "-name");
+		CheckNew(new ComponentDefinition(name, url, references), "-name", allowNewViolations: true);
 		var store = await Storage.ImportAsync(name, url);
 		try
 		{
@@ -107,7 +124,7 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 		});
 	}
 
-	private void CheckNew(ComponentDefinition definition, string nameSwitch)
+	private void CheckNew(ComponentDefinition definition, string nameSwitch, bool allowNewViolations = false)
 	{
 		ComponentRegistry.ValidateName(definition.Name);
 		if (Registry.Contains(definition.Name))
@@ -120,8 +137,9 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 			throw new MonorepoException($"'{Storage.LocationOf(definition.Name)}' already exists; choose another name with {nameSwitch}.");
 		}
 
-		// The registry checks everything else about the definition; checking before the store exists keeps a failure clean.
-		Registry.Add(definition);
+		// The registry checks everything else about the definition, the boundaries included; checking before the store
+		// exists keeps a failure clean.
+		MetaRepo.Check([new RegistryChange.Add(definition)], allowNewViolations);
 	}
 
 	private async Task<ComponentChange> RegisterAsync(ComponentDefinition definition, IComponentStore store, string message)
@@ -165,6 +183,62 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 		return new ComponentChange(Registry.Require(name), Storage.LocationOf(name), revision);
 	}
 
+	/// <summary>
+	/// Changes a component's references, tags, visibility and owners - each only when given (<paramref name="visibility"/>
+	/// only with <paramref name="setVisibility"/>, null making it public) - in one revision; refused as a whole when the
+	/// result does not fit the graph or adds a boundary violation.
+	/// </summary>
+	public async Task<ComponentChange> SetAttributesAsync(string name, IReadOnlyList<string>? tags = null, bool setVisibility = false,
+		IReadOnlyList<string>? visibility = null, IReadOnlyList<string>? owners = null, IReadOnlyList<ComponentReference>? references = null)
+	{
+		var component = Registry.Require(name);
+		var changes = new List<RegistryChange>();
+		var said = new List<string>();
+		if (references is not null)
+		{
+			changes.Add(new RegistryChange.SetReferences(component.Name, references));
+			said.Add(references.Count == 0 ? "references nothing" : $"references {string.Join(", ", references.Select(Describe))}");
+		}
+
+		if (tags is not null)
+		{
+			changes.Add(new RegistryChange.SetTags(component.Name, tags));
+			said.Add(tags.Count == 0 ? "no tags" : $"tags {string.Join(", ", tags)}");
+		}
+
+		if (setVisibility)
+		{
+			changes.Add(new RegistryChange.SetVisibility(component.Name, visibility));
+			said.Add(visibility is null ? "public" : visibility.Count == 0 ? "private" : $"visible to {string.Join(", ", visibility)}");
+		}
+
+		if (owners is not null)
+		{
+			changes.Add(new RegistryChange.SetOwners(component.Name, owners));
+			said.Add(owners.Count == 0 ? "no owners" : $"owned by {string.Join(", ", owners)}");
+		}
+
+		var revision = changes.Count == 0 ? null
+			: await MetaRepo.CommitAsync(changes, said.Count == 1 && references is not null ? $"Component '{component.Name}' {said[0]}" : $"Component '{component.Name}': {string.Join("; ", said)}");
+		return new ComponentChange(Registry.Require(name), Storage.LocationOf(name), revision);
+	}
+
+	/// <summary>Adds a boundary rule; the violations it reveals in the graph are kept (see <see cref="MetaRepo.Check"/>).</summary>
+	public async Task<BoundaryChange> AddBoundaryAsync(BoundaryRule rule)
+	{
+		var revision = await MetaRepo.CommitAsync(new RegistryChange.AddBoundary(rule), $"Add boundary rule: {rule.Text}");
+		return new BoundaryChange(Registry.Boundaries, revision);
+	}
+
+	/// <summary>Removes the boundary rule at <paramref name="index"/> (0-based).</summary>
+	public async Task<BoundaryChange> RemoveBoundaryAsync(int index)
+	{
+		Registry.RemoveBoundary(index);
+		var rule = Registry.Boundaries[index];
+		var revision = await MetaRepo.CommitAsync(new RegistryChange.RemoveBoundary(index), $"Remove boundary rule #{index + 1}: {rule.Text}");
+		return new BoundaryChange(Registry.Boundaries, revision);
+	}
+
 	/// <summary><c>lib</c>, or <c>lib:vendor/lib</c> when it is nested at another path.</summary>
 	public static string Describe(ComponentReference reference) =>
 		reference.Path == reference.Name ? reference.Name : $"{reference.Name}:{reference.Path}";
@@ -192,7 +266,8 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 	/// <paramref name="target"/> (default: the tip), with the tags on it except run and integration tags. The fork has the
 	/// parent's references unless <paramref name="references"/> are given, and records where it came from.
 	/// </summary>
-	public async Task<ForkResult> ForkAsync(string parent, string name, string? target = null, IReadOnlyList<ComponentReference>? references = null, string url = "")
+	public async Task<ForkResult> ForkAsync(string parent, string name, string? target = null, IReadOnlyList<ComponentReference>? references = null, string url = "",
+		ComponentAttributes? attributes = null)
 	{
 		var source = Registry.Require(parent);
 		ComponentRegistry.ValidateName(name);
@@ -231,8 +306,8 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 			}
 		}
 
-		var definition = new ComponentDefinition(name, url, references, source.Name, commit);
-		Registry.Add(definition);
+		var definition = (attributes ?? ComponentAttributes.Of(source)).ApplyTo(new ComponentDefinition(name, url, references, source.Name, commit));
+		MetaRepo.Check([new RegistryChange.Add(definition)]);
 		var fork = await Storage.ForkAsync(store, name, branch, commit, tags, url);
 		var change = await RegisterAsync(definition, fork, $"Fork component '{source.Name}' as '{name}' at {commit[..10]}");
 		return new ForkResult(definition, branch, commit, tags, fork.Location, change.Revision);

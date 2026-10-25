@@ -5,7 +5,9 @@ using Tomlyn;
 using Tomlyn.Model;
 
 /// <summary>One new component of a split: its name, the patterns of the files it gets, and its registration.</summary>
-internal sealed record SplitPart(string Name, PathPatterns Paths, IReadOnlyList<ComponentReference>? References, string? Url);
+/// <remarks><paramref name="Tags"/>, <paramref name="Visibility"/> and <paramref name="Owners"/> are the source's when null.</remarks>
+internal sealed record SplitPart(string Name, PathPatterns Paths, IReadOnlyList<ComponentReference>? References, string? Url,
+	IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? Visibility = null, IReadOnlyList<string>? Owners = null);
 
 /// <summary>A component that referenced the source, and what it references instead.</summary>
 internal sealed record SplitReferrer(string Name, IReadOnlyList<ComponentReference> References);
@@ -25,6 +27,7 @@ internal sealed record SplitReferrer(string Name, IReadOnlyList<ComponentReferen
 /// paths = ["src/core/**", "tests/core"]
 /// references = ["lib"]                  # optional: default is the source's references
 /// url = "https://example.com/app-core.git"  # optional: recorded in components.toml
+/// tags = ["type:lib"]                   # optional, like visibility and owners: default is the source's
 ///
 /// [[referrer]]                          # optional: a component that referenced the source
 /// name = "tool"
@@ -37,7 +40,7 @@ internal sealed class SplitPlan
 {
 	private static readonly Regex NamePattern = new("^[A-Za-z0-9][A-Za-z0-9._-]*$", RegexOptions.CultureInvariant);
 	private static readonly HashSet<string> TopKeys = ["source", "branch", "shared", "drop", "follow_renames", "part", "referrer"];
-	private static readonly HashSet<string> PartKeys = ["name", "paths", "references", "url"];
+	private static readonly HashSet<string> PartKeys = ["name", "paths", "references", "url", "tags", "visibility", "owners"];
 	private static readonly HashSet<string> ReferrerKeys = ["name", "references"];
 
 	public string? Source { get; private set; }
@@ -110,7 +113,8 @@ internal sealed class SplitPlan
 
 			var paths = Patterns(part, "paths", where, problems, required: true);
 			var references = part.ContainsKey("references") ? References(part, where, problems) : null;
-			plan.Parts.Add(new SplitPart(name, paths, references, OptionalString(part, "url", where, problems)));
+			plan.Parts.Add(new SplitPart(name, paths, references, OptionalString(part, "url", where, problems),
+				OptionalStrings(part, "tags", where, problems), OptionalStrings(part, "visibility", where, problems), OptionalStrings(part, "owners", where, problems)));
 		}
 
 		if (plan.Parts.Count < 2)
@@ -158,6 +162,22 @@ internal sealed class SplitPlan
 		}
 
 		problems.Add($"{Capitalize(where)}: '{key}' must be a non-empty string.");
+		return null;
+	}
+
+	private static List<string>? OptionalStrings(TomlTable table, string key, string where, List<string> problems)
+	{
+		if (!table.TryGetValue(key, out var value))
+		{
+			return null;
+		}
+
+		if (value is TomlArray array && array.All(item => item is string))
+		{
+			return array.Cast<string>().ToList();
+		}
+
+		problems.Add($"{Capitalize(where)}: '{key}' must be an array of strings.");
 		return null;
 	}
 
