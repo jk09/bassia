@@ -98,6 +98,7 @@ internal static class IntegrationPlanner
 			?? throw new IntegrationException($"'{baseRef}' does not exist in component '{name}' ('{store.Location}').");
 
 		var component = new ComponentIntegration { Name = name, BaseRef = baseRef, BaseCommit = baseCommit };
+		component.Owners.AddRange(graph.Registry.Find(name)?.Owners ?? []);
 		var baseScan = await ScanAsync(graph, store, name, baseCommit);
 		var candidates = new List<IntegrationStep>();
 		var caughtUp = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
@@ -181,6 +182,12 @@ internal static class IntegrationPlanner
 			{
 				step.Strategy = MergeStrategy.Manual;
 				step.Note = $"{LockNote(step)}; lock.conflict = manual leaves that for a human";
+				manual.Add(step);
+			}
+			else if (chosen is null && policy.OwnerReview && component.Owners.Count > 0)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = $"merge.owner_review = manual leaves it for its owners to review: {string.Join(", ", component.Owners)}";
 				manual.Add(step);
 			}
 			else if (chosen is null && step.Triage != Triage.UpToDate && step.BoundaryViolations.Count > 0 && policy.ManualBoundaries)

@@ -137,7 +137,8 @@ internal sealed class Monorepo
 		var workspace = config.Resolve(ConfigFile.Find("workspace.path"));
 		var workspaceDir = Path.GetFullPath(workspace.Value, root);
 
-		var registry = Core.ComponentRegistry.FromDefinitions(Storage.Git.GitMetaStore.Read(root), Storage.Git.GitMetaStore.ReadBoundaries(root));
+		var registry = Core.ComponentRegistry.FromDefinitions(Storage.Git.GitMetaStore.Read(root), Storage.Git.GitMetaStore.ReadBoundaries(root),
+			Storage.Git.GitMetaStore.ReadConformance(root));
 		return new Monorepo(root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
 			config.Value("integration.weave").Trim(), config.Value("agent.command"), registry, config);
 	}

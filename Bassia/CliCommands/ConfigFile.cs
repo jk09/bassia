@@ -184,7 +184,7 @@ internal static class ConfigFile
 	public const string UserFileName = "config.user.toml";
 
 	/// <summary>The merge settings a component can override.</summary>
-	public static readonly IReadOnlySet<string> MergeSettings = new HashSet<string>(StringComparer.Ordinal) { "semantic", "warnings", "manual_paths", "advance", "boundaries", "verify" };
+	public static readonly IReadOnlySet<string> MergeSettings = new HashSet<string>(StringComparer.Ordinal) { "semantic", "warnings", "manual_paths", "advance", "boundaries", "verify", "owner_review" };
 
 	/// <summary>The lock settings a component can override.</summary>
 	public static readonly IReadOnlySet<string> LockSettings = new HashSet<string>(StringComparer.Ordinal) { "files", "folders", "conflict" };
@@ -216,6 +216,9 @@ internal static class ConfigFile
 		new("merge.verify", ["merge"], "verify", "",
 			"Tasks (from each component's bassia.toml, e.g. build,test) the integration runs on every component it affects - the ones it changed and the ones referencing them - before it publishes anything; a failure publishes nothing.",
 			IsList: true, PerComponent: true),
+		new("merge.owner_review", ["merge"], "owner_review", "off",
+			"Whether a result in a component with owners is merged like any other (off) or left for a human - its owners - to review (manual).",
+			["off", "manual"], PerComponent: true),
 		new("merge.manual_paths", ["merge"], "manual_paths", "",
 			"Path patterns (as in split plans, e.g. **/*.csproj,db/migrations) whose conflicts always need a human.",
 			IsList: true, PerComponent: true),

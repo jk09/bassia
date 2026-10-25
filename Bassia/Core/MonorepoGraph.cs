@@ -74,13 +74,61 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 	/// Creates a new component - its history starts with one commit without files on <paramref name="defaultBranch"/>, so
 	/// a run can select it right away - and registers it.
 	/// </summary>
+	/// <remarks>
+	/// With <paramref name="files"/> (path -> content), a second commit described by <paramref name="filesMessage"/> adds
+	/// them on top - a component started from a template.
+	/// </remarks>
 	public async Task<ComponentChange> CreateAsync(string name, IReadOnlyList<ComponentReference> references, string defaultBranch = "main", string url = "",
-		ComponentAttributes? attributes = null)
+		ComponentAttributes? attributes = null, IReadOnlyDictionary<string, byte[]>? files = null, string? filesMessage = null)
 	{
 		var definition = (attributes ?? ComponentAttributes.None).ApplyTo(new ComponentDefinition(name, url, references));
 		CheckNew(definition, "-name");
 		var store = await Storage.CreateAsync(name, defaultBranch, url, $"Create component '{name}'");
+		if (files is { Count: > 0 })
+		{
+			try
+			{
+				await AddFilesAsync(store, defaultBranch, files, filesMessage ?? $"Add the first files of '{name}'");
+			}
+			catch
+			{
+				await Storage.DeleteAsync(name);
+				throw;
+			}
+		}
+
 		return await RegisterAsync(definition, store, $"Create component '{name}'");
+	}
+
+	/// <summary>Commits <paramref name="files"/> on top of <paramref name="branch"/> through a working copy, and publishes the branch.</summary>
+	private static async Task AddFilesAsync(IComponentStore store, string branch, IReadOnlyDictionary<string, byte[]> files, string message)
+	{
+		var tip = await store.BranchTipAsync(branch) ?? throw new MonorepoException($"Component '{store.Name}' has no branch '{branch}'.");
+		var folder = Path.Combine(Path.GetTempPath(), $"bassia-files-{Guid.NewGuid():N}");
+		try
+		{
+			var workspace = await store.CheckoutAsync(tip, folder, branch);
+			foreach (var (path, content) in files)
+			{
+				var target = Path.GetFullPath(Path.Combine(folder, path));
+				if (!target.StartsWith(Path.GetFullPath(folder) + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+				{
+					throw new MonorepoException($"'{path}' is not a path inside the component.");
+				}
+
+				Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+				await File.WriteAllBytesAsync(target, content);
+			}
+
+			if (await workspace.CommitAsync(message) is not null)
+			{
+				await workspace.PublishAsync(branch, []);
+			}
+		}
+		finally
+		{
+			Workspaces.Delete(folder);
+		}
 	}
 
 	/// <summary>Imports the repository at <paramref name="url"/> as the component <paramref name="name"/> and registers it.</summary>
@@ -246,6 +294,22 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 		var rule = Registry.Boundaries[index];
 		var revision = await MetaRepo.CommitAsync(new RegistryChange.RemoveBoundary(index), $"Remove boundary rule #{index + 1}: {rule.Text}");
 		return new BoundaryChange(Registry.Boundaries, revision);
+	}
+
+	/// <summary>Adds a conformance rule; it only reports, so nothing is refused for what it finds.</summary>
+	public async Task<IReadOnlyList<ConformanceRule>> AddConformanceAsync(ConformanceRule rule)
+	{
+		await MetaRepo.CommitAsync(new RegistryChange.AddConformance(rule), $"Add conformance rule: {rule.Text}");
+		return Registry.Conformance;
+	}
+
+	/// <summary>Removes the conformance rule at <paramref name="index"/> (0-based).</summary>
+	public async Task<IReadOnlyList<ConformanceRule>> RemoveConformanceAsync(int index)
+	{
+		Registry.RemoveConformance(index);
+		var rule = Registry.Conformance[index];
+		await MetaRepo.CommitAsync(new RegistryChange.RemoveConformance(index), $"Remove conformance rule #{index + 1}: {rule.Text}");
+		return Registry.Conformance;
 	}
 
 	/// <summary><c>lib</c>, or <c>lib:vendor/lib</c> when it is nested at another path.</summary>

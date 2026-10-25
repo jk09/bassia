@@ -97,18 +97,26 @@ internal static class ComponentCommands
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var name = invocation.Require("name");
-		var references = ComponentsFile.ParseReferences(invocation.List("references"));
+		var template = invocation.Get("template") is { } templateName ? ComponentTemplate.Load(monorepo.Root, templateName) : null;
+		var references = invocation.Has("references") || template is null
+			? ComponentsFile.ParseReferences(invocation.List("references"))
+			: template.References;
 		var branch = invocation.Get("branch") ?? "main";
 		var url = invocation.Get("url") ?? "";
 		var graph = monorepo.Graph();
-		var created = await graph.CreateAsync(name, references, branch, url, Attributes(invocation, ComponentAttributes.None));
+		var created = await graph.CreateAsync(name, references, branch, url, Attributes(invocation, template?.Attributes ?? ComponentAttributes.None),
+			template?.FilesFor(name), template is null ? null : $"Apply template '{template.Name}'");
 		return ProgramCli.WriteResult(true, invocation.Command,
-			$"Created component '{name}' with an empty first commit on '{branch}'; select it for a run with -select {name}.",
+			template is null
+				? $"Created component '{name}' with an empty first commit on '{branch}'; select it for a run with -select {name}."
+				: $"Created component '{name}' from template '{template.Name}' ({template.Files.Count} file(s)) on '{branch}'; select it for a run with -select {name}.",
 			new Dictionary<string, object?>
 			{
 				["name"] = name,
 				["url"] = url.Length == 0 ? null : url,
 				["branch"] = branch,
+				["template"] = template?.Name,
+				["files"] = template?.FilesFor(name).Keys.ToList(),
 				["path"] = created.Location,
 				["references"] = references.Select(Describe).ToList(),
 				["tags"] = created.Component.Tags,
@@ -130,6 +138,33 @@ internal static class ComponentCommands
 		}
 
 		return lastSegment.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? lastSegment[..^4] : lastSegment;
+	}
+
+	// ----- bassia template list -----
+
+	public static Task<int> TemplateListAsync(Invocation invocation)
+	{
+		var monorepo = AgentCommand.LoadMonorepo();
+		var templates = ComponentTemplate.List(monorepo.Root);
+		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command,
+			templates.Count == 0
+				? $"No templates; add one as {ComponentTemplate.TemplatesDir(monorepo.Root)}/<name>/{ComponentTemplate.FileName} with its files under files/."
+				: $"{templates.Count} template(s): {string.Join(", ", templates.Select(template => template.Name))}.",
+			new Dictionary<string, object?>
+			{
+				["path"] = ComponentTemplate.TemplatesDir(monorepo.Root),
+				["template"] = templates.Select(template => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+				{
+					["name"] = template.Name,
+					["description"] = template.Description,
+					["tags"] = template.Attributes.Tags,
+					["visibility"] = template.Attributes.Visibility,
+					["exports"] = template.Attributes.Exports,
+					["owners"] = template.Attributes.Owners,
+					["references"] = template.References.Select(Describe).ToList(),
+					["files"] = template.Files
+				}).ToList()
+			}));
 	}
 
 	// ----- bassia component show -----

@@ -72,6 +72,7 @@ internal static class IntegrationSupport
 		["result_tag"] = component.ResultTag,
 		["result_error"] = component.ResultError,
 		["advanced"] = component.Advanced,
+		["owners"] = component.Owners.Count == 0 ? null : component.Owners,
 		["step"] = component.Steps.Select(step => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 		{
 			["run_id"] = step.RunId,

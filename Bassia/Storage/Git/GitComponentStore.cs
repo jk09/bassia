@@ -302,7 +302,8 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 	{
 		Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(directory))!);
 		await GitClient.In(Path.GetDirectoryName(Path.GetFullPath(directory))!).RunOrThrowAsync(["clone", "--quiet", "--no-checkout", Location, directory]);
-		await GitClient.In(directory).RunOrThrowAsync(["checkout", "--quiet", "-b", branch, commit]);
+		// -B: the clone already has the default branch, which a working copy may continue (a component's first files).
+		await GitClient.In(directory).RunOrThrowAsync(["checkout", "--quiet", "-B", branch, commit]);
 		return new GitWorkspace(directory, Location);
 	}
 }

@@ -5,6 +5,7 @@ internal sealed class MemoryMetaStore : IMetaStore
 {
 	private readonly List<ComponentDefinition> components = [];
 	private readonly List<Core.BoundaryRule> boundaries = [];
+	private readonly List<Core.ConformanceRule> conformance = [];
 
 	/// <summary>Every revision committed, oldest first: its id, message and the changes it applied.</summary>
 	public List<(string Id, string Message, IReadOnlyList<RegistryChange> Changes)> Revisions { get; } = [];
@@ -14,6 +15,8 @@ internal sealed class MemoryMetaStore : IMetaStore
 	public Task<IReadOnlyList<ComponentDefinition>> LoadAsync() => Task.FromResult<IReadOnlyList<ComponentDefinition>>(components.ToList());
 
 	public Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync() => Task.FromResult<IReadOnlyList<Core.BoundaryRule>>(boundaries.ToList());
+
+	public Task<IReadOnlyList<Core.ConformanceRule>> LoadConformanceAsync() => Task.FromResult<IReadOnlyList<Core.ConformanceRule>>(conformance.ToList());
 
 	public Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message)
 	{
@@ -52,6 +55,12 @@ internal sealed class MemoryMetaStore : IMetaStore
 					break;
 				case RegistryChange.RemoveBoundary remove:
 					boundaries.RemoveAt(remove.Index);
+					break;
+				case RegistryChange.AddConformance add:
+					conformance.Add(add.Rule);
+					break;
+				case RegistryChange.RemoveConformance remove:
+					conformance.RemoveAt(remove.Index);
 					break;
 			}
 		}

@@ -33,8 +33,14 @@ internal abstract record RegistryChange
 	/// <summary>Removes the boundary rule at <paramref name="Index"/> (0-based, in file order).</summary>
 	public sealed record RemoveBoundary(int Index) : RegistryChange;
 
-	/// <summary>Whether the change is to the boundary rules rather than to the graph.</summary>
-	public bool IsRuleChange => this is AddBoundary or RemoveBoundary;
+	/// <summary>Appends a conformance rule.</summary>
+	public sealed record AddConformance(Core.ConformanceRule Rule) : RegistryChange;
+
+	/// <summary>Removes the conformance rule at <paramref name="Index"/> (0-based, in file order).</summary>
+	public sealed record RemoveConformance(int Index) : RegistryChange;
+
+	/// <summary>Whether the change is to the rules rather than to the graph.</summary>
+	public bool IsRuleChange => this is AddBoundary or RemoveBoundary or AddConformance or RemoveConformance;
 }
 
 /// <summary>
@@ -51,6 +57,9 @@ internal interface IMetaStore
 
 	/// <summary>The boundary rules as of the latest revision, in order.</summary>
 	Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync();
+
+	/// <summary>The conformance rules as of the latest revision, in order.</summary>
+	Task<IReadOnlyList<Core.ConformanceRule>> LoadConformanceAsync();
 
 	/// <summary>
 	/// Applies <paramref name="changes"/> (already validated) as one revision described by <paramref name="message"/>

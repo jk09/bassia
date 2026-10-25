@@ -54,6 +54,10 @@ internal static class CommandTable
 		"a component through another's nested reference such as lib/vendor/core (indirect), or leaves the component's root (outside). " +
 		"References the code never uses are listed as unused_references, for information.";
 
+	private const string ConformanceDetails = "Rules are [[conformance]] tables in .bassia/components.toml: components (a tag pattern, as in " +
+		"boundary rules), and any of files = [paths], tasks = [names], owners = true, exports = true, description. Conformance is reported, " +
+		"never enforced on a change; hold results back with merge.verify, or fail CI with 'conformance check -strict'.";
+
 	private const string TaskDetails = "A component's tasks are [tasks.<name>] tables in bassia.toml at its root: command (a shell line run in the " +
 		"component's folder) and depends_on - 'x' runs the component's own task x first, '^x' runs task x of every component it references, " +
 		"transitively, first (depends_on = [\"^build\"]). A component without bassia.toml has no tasks.";
@@ -192,6 +196,7 @@ internal static class CommandTable
 				new("references", "component[:path],...", "Components this one nests, each at a subfolder (default: its name)."),
 				new("branch", "branch", "Its main branch (default: main)."),
 				new("url", "url", "The upstream it will be published to, recorded with it."),
+				new("template", "template", "Start it from a template in .bassia/templates: its files, tags, visibility, exports, owners and references (switches given win)."),
 				new("tags", "tag,...", "Its architecture tags (type:lib, scope:billing) that the boundary rules are written over."),
 				new("visibility", "pattern,...", "Only components with a tag matching one of these patterns may reference it (default: public)."),
 				new("owners", "owner,...", "Who owns it: people or teams."),
@@ -200,11 +205,21 @@ internal static class CommandTable
 			[
 				"bassia component create -name docs",
 				"bassia component create -name app -references lib,ui:vendor/ui",
-				"bassia component create -name billing-api -references billing-core -tags type:app,scope:billing"
+				"bassia component create -name billing-api -references billing-core -tags type:app,scope:billing",
+				"bassia component create -name parser -template lib"
 			],
 			ComponentCommands.CreateAsync, Positional: "name",
 			Details: "Its history starts with one commit without files on its main branch, so an agentic run can select it at once with -select <name> " +
-				"(the tip of its main branch) and write its first files. Tag a baseline with 'bassia component tag'."),
+				"(the tip of its main branch) and write its first files. Tag a baseline with 'bassia component tag'. With -template, a second commit " +
+				"adds the template's files (see 'bassia help template list')."),
+
+		new("template", "list", "List the templates new components can start from (component create -template), with what each gives a component.",
+			[],
+			["bassia template list"],
+			ComponentCommands.TemplateListAsync,
+			Details: "A template is a folder .bassia/templates/<name>/ in the meta-repo: template.toml (description, tags, visibility, exports, " +
+				"owners, references - each optional) and the starter files under files/. In file contents and paths, {{name}} becomes the new " +
+				"component's name. Commit the folder in the meta-repo to share it."),
 
 		new("component", "unwind", "Turn a component's git submodules, recursively, into components it references at the submodule paths, so runs nest them as junctioned folders.",
 			[
@@ -353,6 +368,41 @@ internal static class CommandTable
 			["bassia boundary check", "bassia boundary check -strict", "bassia boundary check -name app", "bassia boundary check -code -strict"],
 			BoundaryCommands.CheckAsync,
 			Details: "Without -strict the violations are warnings and the command succeeds. " + BoundaryDetails + " " + CodeDetails),
+
+		// ----- conformance -----
+
+		new("conformance", "list", "List the conformance rules of components.toml: what components with given tags must have.",
+			[],
+			["bassia conformance list"],
+			ConformanceCommands.ListAsync,
+			Details: ConformanceDetails),
+
+		new("conformance", "add", "Add a conformance rule: every component with a tag matching -components must have the files, tasks, owners or exports given.",
+			[
+				new("components", "pattern", "The tag pattern of the components the rule applies to (* any characters, ? one character; component:<name> for one).", Required: true),
+				new("files", "path,...", "Paths that must exist at the tip of its default branch (a folder is met by any file below it)."),
+				new("tasks", "task,...", "Tasks its bassia.toml must define."),
+				new("owners", null, "It must have owners."),
+				new("exports", null, "It must declare exports."),
+				new("description", "text", "Why the rule exists.")
+			],
+			["bassia conformance add -components type:lib -files README.md -tasks test -owners", "bassia conformance add -components * -files LICENSE"],
+			ConformanceCommands.AddAsync,
+			Details: ConformanceDetails),
+
+		new("conformance", "remove", "Remove a conformance rule by its number in 'bassia conformance list'.",
+			[new("index", "n", "The rule's number (1 is the first).", Required: true)],
+			["bassia conformance remove -index 1", "bassia conformance remove 1"],
+			ConformanceCommands.RemoveAsync, Positional: "index"),
+
+		new("conformance", "check", "Check every component against the conformance rules that apply to it, at the tip of its default branch.",
+			[
+				new("name", "component", "Only this component."),
+				new("strict", null, "Fail (exit code 1) when anything is missing - for CI.")
+			],
+			["bassia conformance check", "bassia conformance check -strict", "bassia conformance check -name app"],
+			ConformanceCommands.CheckAsync,
+			Details: "Without -strict the findings are warnings and the command succeeds. " + ConformanceDetails),
 
 		// ----- tasks -----
 

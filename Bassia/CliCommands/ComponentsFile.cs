@@ -137,15 +137,48 @@ internal static class ComponentsFile
 		Edit(root, text => text + builder);
 	}
 
-	/// <summary>Removes the <paramref name="index"/>-th (0-based) <c>[[boundary]]</c> block, with the blank line before it.</summary>
-	public static void RemoveBoundary(string root, int index) =>
+	/// <summary>Appends a <c>[[conformance]]</c> block.</summary>
+	public static void AddConformance(string root, Core.ConformanceRule rule)
+	{
+		var builder = new StringBuilder("\n[[conformance]]\n");
+		if (rule.Description is not null)
+		{
+			builder.Append($"description = {ConfigFile.Quote(rule.Description)}\n");
+		}
+
+		builder.Append($"components = {ConfigFile.Quote(rule.Components)}\n");
+		if (rule.Files.Count > 0)
+		{
+			builder.Append(ListLine("files", rule.Files)).Append('\n');
+		}
+
+		if (rule.Tasks.Count > 0)
+		{
+			builder.Append(ListLine("tasks", rule.Tasks)).Append('\n');
+		}
+
+		if (rule.Owners)
+		{
+			builder.Append("owners = true\n");
+		}
+
+		if (rule.Exports)
+		{
+			builder.Append("exports = true\n");
+		}
+
+		Edit(root, text => text + builder);
+	}
+
+	/// <summary>Removes the <paramref name="index"/>-th (0-based) <c>[[<paramref name="table"/>]]</c> block, with the blank line before it.</summary>
+	public static void RemoveTable(string root, string table, int index) =>
 		Edit(root, text =>
 		{
 			var lines = Lines(text);
-			var headers = Enumerable.Range(0, lines.Count).Where(i => lines[i].Trim() == "[[boundary]]").ToList();
+			var headers = Enumerable.Range(0, lines.Count).Where(i => lines[i].Trim() == $"[[{table}]]").ToList();
 			if (index < 0 || index >= headers.Count)
 			{
-				throw new MonorepoException($"components.toml has no [[boundary]] #{index + 1}.");
+				throw new MonorepoException($"components.toml has no [[{table}]] #{index + 1}.");
 			}
 
 			var start = headers[index];

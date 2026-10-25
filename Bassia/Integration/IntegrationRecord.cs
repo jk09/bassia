@@ -142,6 +142,9 @@ internal sealed class ComponentIntegration
 	/// <summary>The steps in execution order: every syntactic and structural step before every semantic one, then the manual ones, skipped steps last.</summary>
 	public List<IntegrationStep> Steps { get; } = [];
 
+	/// <summary>The component's owners when it was planned: who to ask about a result left for owner review.</summary>
+	public List<string> Owners { get; } = [];
+
 	public string? Branch { get; set; }
 	public string? Path { get; set; }
 	public ResultStatus ResultStatus { get; set; } = ResultStatus.Pending;
@@ -231,6 +234,10 @@ internal sealed class IntegrationRecord
 			Optional(componentTable, "result_commit", component.ResultCommit);
 			Optional(componentTable, "result_tag", component.ResultTag);
 			Optional(componentTable, "result_error", component.ResultError);
+			if (component.Owners.Count > 0)
+			{
+				componentTable["owners"] = Array(component.Owners);
+			}
 
 			var steps = new TomlTableArray();
 			foreach (var step in component.Steps)
@@ -332,6 +339,7 @@ internal sealed class IntegrationRecord
 					ResultError = OptStr(componentTable, "result_error"),
 					Advanced = componentTable.TryGetValue("advanced", out var advanced) && advanced is true
 				};
+				component.Owners.AddRange(Strings(componentTable, "owners"));
 
 				if (componentTable.TryGetValue("step", out var steps) && steps is TomlTableArray stepTables)
 				{
