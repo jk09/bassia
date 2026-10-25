@@ -1,4 +1,3 @@
-using Bassia.Prompt;
 using Bassia.Tutorial;
 
 namespace Bassia.Tests;
@@ -38,32 +37,15 @@ public class TutorialTests
 		}
 	}
 
-	private sealed class CannedBackend(string reply) : ILlmBackend
-	{
-		public List<LlmRequest> Requests { get; } = [];
-
-		public string Name => "canned";
-
-		public string Description => "canned";
-
-		public Task<string> CompleteAsync(LlmRequest request, CancellationToken cancellation)
-		{
-			Requests.Add(request);
-			return Task.FromResult(reply);
-		}
-	}
-
-	/// <summary>Runs a command line with <paramref name="answers"/> on stdin, commands in-process and an LLM that is not there.</summary>
+	/// <summary>Runs a command line with <paramref name="answers"/> on stdin and commands in-process.</summary>
 	private static async Task<(int ExitCode, string Output, string Error, InProcessExecutor Executor)> RunAsync(string directory, string answers,
-		bool interactive = false, ILlmBackend? llm = null, params string[] args)
+		bool interactive = false, params string[] args)
 	{
 		var executor = new InProcessExecutor();
 		var originalIn = Console.In;
 		var originalExecutor = TutorialCommand.ExecutorFactory;
-		var originalLlm = TutorialCommand.LlmFactory;
 		Console.SetIn(new StringReader(answers));
 		TutorialCommand.ExecutorFactory = _ => executor;
-		TutorialCommand.LlmFactory = _ => llm ?? throw new PromptException("no LLM in the tests");
 		ProgramCli.Interactive = () => interactive;
 		try
 		{
@@ -74,7 +56,6 @@ public class TutorialTests
 		{
 			Console.SetIn(originalIn);
 			TutorialCommand.ExecutorFactory = originalExecutor;
-			TutorialCommand.LlmFactory = originalLlm;
 			ProgramCli.Interactive = () => false;
 		}
 	}
@@ -103,7 +84,7 @@ public class TutorialTests
 
 		Assert.Equal(0, exitCode);
 		Assert.StartsWith(TomlResult.Marker, output);
-		Assert.Contains("COMMAND", output);
+		Assert.Contains("[[commands]]", output);
 		Assert.Empty(error);
 		Assert.Empty(executor.Executed);
 		Assert.Empty(Directory.EnumerateFileSystemEntries(temp.Path));
@@ -132,7 +113,7 @@ public class TutorialTests
 		var (_, help, helpError, _) = await RunAsync(temp.Path, "y\n", interactive: true, args: "help");
 		var (_, human, humanError, _) = await RunAsync(temp.Path, "y\n", interactive: true, args: "-human");
 
-		Assert.Contains("COMMAND", help);
+		Assert.Contains("[[commands]]", help);
 		Assert.Contains("COMMAND", human);
 		Assert.Empty(helpError + humanError);
 	}
@@ -205,18 +186,15 @@ public class TutorialTests
 	}
 
 	[Fact]
-	public async Task Tutorial_QuestionMark_ExplainsTheStep_AndAsksTheLlmWhenThereIsOne()
+	public async Task Tutorial_QuestionMark_ExplainsTheStepFromTheBuiltInHelp_AndAQuestionPointsToBassiaHelp()
 	{
 		using var temp = new TempDirectory();
 
-		var (_, _, withoutLlm, _) = await RunAsync(temp.Path, Lines("?", "? what is a component"), args: "tutorial");
-		var llm = new CannedBackend("A component is one of your repositories.");
-		var (exitCode, output, withLlm, _) = await RunAsync(temp.Path, Lines("? what is a component"), llm: llm, args: "tutorial");
+		var (exitCode, output, error, _) = await RunAsync(temp.Path, Lines("?", "? what is a component"), args: "tutorial");
 
-		Assert.Contains("Components: Give each repository", withoutLlm);
-		Assert.Contains("The LLM could not answer (no LLM in the tests)", withoutLlm);
-		Assert.Contains("A component is one of your repositories.", withLlm);
-		Assert.Contains("what is a component", Assert.Single(llm.Requests).Prompt);
+		Assert.Equal(2, error.Split("Components: Give each repository").Length - 1);
+		Assert.Contains("run 'bassia help'", error);
+		Assert.DoesNotContain("LLM", error);
 		Assert.Equal(0, exitCode);
 		Assert.Contains("Stopped; nothing was changed.", output);
 		Assert.Empty(Directory.EnumerateFileSystemEntries(temp.Path));
@@ -250,8 +228,7 @@ public class TutorialTests
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		var output = new StringWriter();
-		var session = new TutorialSession(new StringReader(Lines("6")), output, new InProcessExecutor(),
-			() => throw new PromptException("no LLM"), monorepo.Root);
+		var session = new TutorialSession(new StringReader(Lines("5")), output, new InProcessExecutor(), monorepo.Root);
 
 		var outcome = await session.RunAsync(offer: true, CancellationToken.None);
 

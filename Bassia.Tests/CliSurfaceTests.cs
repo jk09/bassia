@@ -55,15 +55,64 @@ public class CliSurfaceTests
 	}
 
 	[Fact]
-	public async Task Help_Overview_ListsEveryCommand()
+	public async Task Help_Overview_ExplainsTheConceptsAndWorkflowAndListsEveryCommandInFull()
 	{
 		var (exitCode, output, _) = await TestEnvironment.RunAsync("help");
 
 		Assert.Equal(0, exitCode);
-		var table = (string)Result(output)["table"];
-		Assert.Contains("COMMAND", table);
-		Assert.All(CommandTable.Commands, command => Assert.Contains(command.FullName, table));
-		Assert.Empty(Tables(Result(output), "entry"));
+		var help = Result(output);
+		Assert.Contains("bassia help -all", (string)help["message"]);
+		Assert.Single(output.Split('\n'), line => line == TomlResult.Marker);
+		Assert.Contains(Tables(help, "concept"), concept => (string)concept["name"] == "component");
+		Assert.Contains(Strings(help, "workflow"), step => step.StartsWith("bassia integration start"));
+		Assert.Contains(Strings(help, "discover"), line => line.StartsWith("bassia help -all"));
+		var commands = Tables(help, "commands").ToList();
+		Assert.Equal(CommandTable.Commands.Select(command => command.FullName), commands.Select(command => (string)command["name"]));
+		Assert.All(commands, command => Assert.Equal(CommandTable.Commands.Single(spec => spec.FullName == (string)command["name"]).Summary, command["summary"]));
+		Assert.False(help.ContainsKey("table"));
+		Assert.Empty(Tables(help, "entry"));
+	}
+
+	[Fact]
+	public async Task Help_All_DescribesEveryCommandInFullInOneResult()
+	{
+		var (exitCode, output, error) = await TestEnvironment.RunAsync("help", "-all");
+
+		Assert.True(exitCode == 0, error);
+		var commands = Tables(Result(output), "commands").ToList();
+		Assert.Equal(CommandTable.Commands.Count, commands.Count);
+		foreach (var (spec, command) in CommandTable.Commands.Zip(commands))
+		{
+			Assert.Equal(spec.FullName, command["name"]);
+			Assert.Equal(spec.UsageLine, command["usage"]);
+			Assert.Equal(spec.ReadOnly, command["read_only"]);
+			Assert.Equal(spec.Switches.Count(option => !option.Hidden), Tables(command, "switch").Count());
+		}
+	}
+
+	[Theory]
+	[InlineData("status", true, false)]
+	[InlineData("agent show", true, false)]
+	[InlineData("integration plan", true, false)]
+	[InlineData("agent start", false, false)]
+	[InlineData("config set", false, false)]
+	[InlineData("tutorial", false, true)]
+	[InlineData("web", true, true)]
+	public async Task Help_ForACommand_SaysWhetherItOnlyReadsAndWhetherItIsForAPerson(string command, bool readOnly, bool interactive)
+	{
+		var (_, output, _) = await TestEnvironment.RunAsync(["help", .. command.Split(' ')]);
+
+		var help = Result(output);
+		Assert.Equal(readOnly, help["read_only"]);
+		Assert.Equal(interactive, help["interactive"]);
+	}
+
+	[Fact]
+	public void ReadOnlyAndInteractiveCommands_AreAllInTheCommandTable()
+	{
+		var names = CommandTable.Commands.Select(command => command.FullName).ToHashSet();
+
+		Assert.All(CommandCatalog.ReadOnlyCommands.Concat(CommandCatalog.InteractiveCommands), name => Assert.Contains(name, names));
 	}
 
 	[Theory]
@@ -284,6 +333,23 @@ public class CliSurfaceTests
 
 		Assert.Equal(1, exitCode);
 		Assert.Contains("Unknown configuration key 'agent.colour'", error);
+	}
+
+	[Fact]
+	public async Task Config_TheRemovedLlmTable_IsIgnoredAndItsKeysAreUnknown()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		var configPath = Path.Combine(monorepo.MetaRepo, "config.toml");
+		Assert.DoesNotContain("[llm]", await File.ReadAllTextAsync(configPath));
+		await File.AppendAllTextAsync(configPath, "\n[llm]\nbackend = \"claude\"\ncommand = \"claude -p\"\n");
+
+		var (listExit, listOutput, listError) = await monorepo.BassiaAsync("config", "list");
+		var (setExit, _, setError) = await monorepo.BassiaAsync("config", "set", "-key", "llm.command", "-value", "x");
+
+		Assert.True(listExit == 0, listError);
+		Assert.DoesNotContain("llm.", listOutput);
+		Assert.Equal(1, setExit);
+		Assert.Contains("Unknown configuration key 'llm.command'", setError);
 	}
 
 	// ----- components -----

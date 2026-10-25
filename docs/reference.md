@@ -85,18 +85,19 @@ scripted. It ends with a TOML result whose `commands` lists every command it ran
   dependency order) and runs them once confirmed, showing each with its result. Nothing changes before that. If a
   command fails, it says what was done and which commands remain.
 - **Inside a monorepo**, it prints the root, the status and the dependency tree, then a menu: add components, set a
-  component's dependencies, show the status, start a detached run, ask in plain English (hands over to
-  `bassia prompt`), and open the dashboard (hands over to `bassia web`). Each command that changes something is shown
+  component's dependencies, show the status, start a detached run, and open the dashboard (hands over to
+  `bassia web`). Each command that changes something is shown
   and confirmed first.
 
-At any question, `?` explains the step, and `? <question>` asks the LLM of `bassia prompt` (`llm.backend`,
-`llm.command`). Without one, the built-in explanation is shown. Closing the input (Ctrl+D, Ctrl+Z) ends the guide.
-`bassia prompt` never runs `tutorial`.
+At any question, `?` explains the step from the built-in help (with a question after it, the same help and a pointer
+to `bassia help`). Closing the input (Ctrl+D, Ctrl+Z) ends the guide.
 
 ### Help
 
-`bassia help` lists every command, `bassia help <command> [<subcommand>]` (or `-help` on any command) explains one:
-its usage, every switch and examples. Help is TOML too.
+`bassia help` explains the concepts (`[[concept]]`), the usual `workflow`, how to learn more (`discover`) and lists
+every command (`[[commands]]`: name, full summary, usage, `read_only`, `interactive`). `bassia help -all` describes every
+command in full in one result, `bassia help <command> [<subcommand>]` (or `-help` on any command) explains one: its
+usage, details, whether it only reads, every switch and examples. Help is TOML too.
 
 Results are TOML by default. Add `-human` to any command (`bassia -help -human`, `bassia component -help -human`,
 `bassia status -human`) to print it for a person instead, as Markdown: the message (or `**error:** ...`), `- **key:** value`
@@ -128,12 +129,12 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | Agentic runs | `agent start -select <c[@tag\|hash]>,... [-detach] [-lock-files <[c:]pattern,...>] [-lock-folders <[c:]pattern,...>] (-prompt <text> [-agent] [-model] [-effort] [-context] \| -run <command...>)`, `agent list [-status <s>] [-component <c>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent retry`, `agent abandon`, `agent diff [-component <c>] [-patch]` |
 | Locks | `lock list [-component <c>] [-run <id>]`, `lock check -path <p>,...`, `lock claim -path <p>,...`, `lock wait -path <p>,... [-timeout <s>] [-no-refresh]`, `lock release -path <p>,...\|-all [-run <id>] [-force]` |
 | Integration (merging) | `integration plan -runs <ids>\|all [-onto] [-semantic] [-skip] [-manual] [-weave <command>\|off]`, `integration start ... [-detach] [-resolve <command...>]`, `integration list`, `integration show`, `integration logs`, `integration wait`, `integration stop`, `integration advance` |
-| Natural language and skills | `prompt [-backend <name>] [-llm <command>] [-model <m>] [-skill <s>,...] [-yes] [-dry-run] [-max-rounds <n>] <ask...>`, `skill list`, `skill show -name <s>` |
+| Skills | `skill list`, `skill show -name <s>` |
 | Web dashboard | `web [-port <n>] [-no-open]` |
 | Feedback and crash reports | `feedback send [-kind bug\|idea\|question] [-yes] <message...>`, `feedback reports [-mode off\|ask\|auto]`, `feedback pending [-send]` |
 
-The commands this replaced - `run` (now `agent`), `add-component`, `integrate`, `commit`, `branch` and `ui` - fail
-with exit code 2 and name their successor.
+The commands this replaced - `run` (now `agent`), `add-component`, `integrate`, `commit`, `branch`, `ui` and
+`prompt` - fail with exit code 2 and name their successor.
 
 A typical agent session over a fresh monorepo:
 
@@ -257,8 +258,7 @@ Settings come in layers. The highest layer that sets a key wins:
 each layer). `bassia config set -key <k> -value <v>` writes the monorepo layer, keeping its comments, and commits the
 change. With `-user` it writes the user layer instead. `bassia config unset -key <k> [-user]` removes a key from a
 layer, so the next layer down applies again. A value outside a key's choices, or a key naming an unregistered
-component, is rejected and nothing changes. `bassia prompt` hands the LLM the effective configuration with each
-value's layer, and it reads and changes settings through the same commands.
+component, is rejected and nothing changes.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -275,8 +275,6 @@ value's layer, and it reads and changes settings through the same commands.
 | `lock.folders` | (none) | Path patterns of folders a run holds as a whole while its agent changes a file in them: `src/*` is each folder directly under `src`, `**` the folder of every file |
 | `lock.conflict` | `resolver` | A result that changed a path another run held: reviewed by the `resolver` even when git merges it, left for a human (`manual`), or merged like any other (`merge`) |
 | `lock.ttl` | `120` | Seconds a hold lasts without its run renewing it, so the holds of a crashed or suspended run expire |
-| `llm.backend` | `claude` | LLM backend of `bassia prompt`: `claude` (Claude Code) or `command` |
-| `llm.command` | `claude -p` | Command that backend runs; the prompt goes to its stdin |
 
 Each `merge.*` key can be overridden for one component as `merge.component.<component>.<setting>` (a
 `[merge.component.<component>]` table). It falls back to the global key, layer by layer:
@@ -591,46 +589,32 @@ Parallel agentic runs often add or change *different* functions, methods or keys
 - A merge weave completes with warnings (`weave-warning:` on its stderr, e.g. an entity depends on another entity the other side changed, or the merged file no longer parses) goes to the resolver for review, with the warnings in its brief.
 - What weave still conflicts on goes to the resolver as before, but the resolver starts from weave's entity-labelled conflicts (``<<<<<<< ours — function `process` ...`` with a `refused_by:` line) instead of git's.
 
-### Natural-language prompts
+### Driving Bassia from an agent
 
-```powershell
-bassia prompt initialize the monorepo at folder C:\mono
-bassia -C C:\mono prompt -dry-run add https://github.com/myrepo/lib.git as a component and tag it v1
-bassia -C C:\mono prompt which runs failed this week and why?
-bassia -C C:\mono prompt -yes /release cut release 3 of app and lib
-```
+Bassia has no LLM of its own and never asks one about itself. An agent - Claude Code, Codex, or a script around any
+model - stays outside and drives Bassia like a person would, through the command line. Because every command has
+the same shape and answers in TOML, the agent needs no per-command glue and no documentation beyond what the CLI
+prints:
 
-`prompt` is a thin LLM layer over the command line. Everything after its switches is the ask. Because every command
-has the same shape and answers in TOML, there is no per-command glue:
+1. `bassia` (without a terminal) or `bassia help`: the concepts (`[[concept]]`: monorepo, component, reference,
+   meta-repo, tag, agentic run, agent command, lock, integration, configuration, skill), the usual `workflow`, how
+   to learn more (`discover`), the grammar, the result format, the exit codes and every command (`[[commands]]`).
+2. `bassia help -all`: every command in full - usage, details, switches (with `required` and `rest_of_line`) and
+   examples - in one result; or `bassia help <command>` for one.
+3. `read_only = true` marks the commands that change nothing in the monorepo (`status`, `config list|get`,
+   `component list|show|survey`, `tag list|show`, `graph`, `log`, `agent list|show|logs|wait|diff`,
+   `lock list|check`, `integration plan|list|show|logs|wait`, `skill list|show`, `help`, `version`, `web`): the agent
+   may run them freely to explore, except `web`, which is interactive. Any other command changes something and is run only when that change is what the
+   agent was asked for. `interactive = true` marks the commands meant for a person: `tutorial` reads answers from
+   stdin, `feedback send` asks before anything leaves the machine (unless `-yes`), and `web` serves until Ctrl-C.
+4. `bassia status`, `bassia config list` and `bassia skill list` describe the monorepo at hand.
 
-1. The LLM gets the ask, the context (working directory, platform, the monorepo and its components), a catalog of
-   every command generated from the command table (usage, switches, details, examples) and the skills' names and
-   descriptions.
-2. It answers in TOML: `[[command]]` entries with `args` (the words after `bassia`, as an array, so Windows paths
-   need no shell quoting), `done`, `answer`, and optionally `load_skills`.
-3. Bassia checks each command with the same parser the command line uses and runs it as its own `bassia` process -
-   never through a shell. Its output is shown, and its TOML result goes back to the LLM for the next round until the
-   LLM is done (at most `-max-rounds`, default 8). The LLM's `answer` becomes the result's `message`.
+An instruction such as "you can use the `bassia` CLI; start with `bassia help`" is all an agent needs. `bassia
+prompt`, which planned commands with an LLM Bassia started itself (`llm.backend`, `llm.command`), was removed; an
+`[llm]` table left in an older `config.toml` is ignored.
 
-Read-only commands (`status`, `config list|get`, `component list|show|survey`, `tag list|show`, `graph` without
-`-out`, `log`, `agent list|show|logs|wait|diff`, `lock list|check`, `integration plan|list|show|logs|wait`,
-`skill list|show`, `help`, `version`) run at once. Any other command is confirmed first (`y`es, `n`o, `a`ll); when stdin is not a terminal it
-needs `-yes`. `-dry-run` changes nothing: it runs the read-only commands and stops with the plan at the first command
-that would change something. `prompt`, `web` and `tutorial` are never run from a prompt. The result lists every
-proposed command as a `[[step]]` with its `command_line`, `status` (`ok`, `failed`, `rejected`, `declined`, `planned`,
-`skipped`) and the command's own `message`.
-
-**Backends.** The LLM is only asked for text, so any model fits. `llm.backend` (or `-backend`) picks one:
-
-- `claude` (default) runs `llm.command` (default `claude -p`, i.e. [Claude Code](https://code.claude.com)) with its
-  tools off (`--tools ""`; it plans, Bassia executes), text output and no saved session; `-model` becomes `--model`.
-- `command` runs `llm.command` as it is - any command that reads the prompt on stdin and prints the reply, such as
-  `ollama run {model}` or `llm -m {model}`; `{model}` is replaced by `-model`.
-
-Another kind of backend (an HTTP API, say) is one class implementing `ILlmBackend` registered in `LlmBackends`.
-
-**Skills** are reusable instructions for recurring asks, versioned in the meta-repo like `config.toml`, in the shape
-Claude Code uses: `.bassia/skills/<name>/SKILL.md`, with optional front matter.
+**Skills** are reusable instructions for recurring tasks, versioned in the meta-repo like `config.toml`, in the
+shape Claude Code uses: `.bassia/skills/<name>/SKILL.md`, with optional front matter.
 
 ```markdown
 ---
@@ -641,9 +625,8 @@ description: Cut a release - tag every component release-<n> and integrate the p
 2. ...
 ```
 
-The LLM always sees every skill's name and description and loads the instructions of those it needs, so many skills
-cost little prompt. `-skill <name>,...`, or a `/<name>` word in the ask, hands it a skill up front. `skill list` and
-`skill show -name <skill>` show them; they are added and changed as files and committed with `git -C .bassia commit`.
+`skill list` shows every skill's name and description, `skill show -name <skill>` its instructions, so an agent
+reads only those it needs. They are added and changed as files and committed with `git -C .bassia commit`.
 
 ### Web dashboard
 
@@ -653,7 +636,7 @@ bassia -C R:\ web -port 9000 -no-open
 ```
 
 `web` serves a read-only dashboard over the monorepo, in the spirit of [Fossil](https://fossil-scm.org)'s built-in
-web interface: a place to look at the monorepo, while the command line and `bassia prompt` change it. Every page
+web interface: a place to look at the monorepo, while the command line changes it. Every page
 shows the `bassia` commands for what it describes (click one to copy it). It listens on 127.0.0.1 only and answers
 only GET requests. If the port is taken it uses the next free one, and it prints the URL. It runs until Ctrl-C.
 Pages and their pictures are drawn on the server (inline SVG and CSS, nothing loaded from elsewhere) and work

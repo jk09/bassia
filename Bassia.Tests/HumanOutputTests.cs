@@ -108,7 +108,7 @@ public class HumanOutputTests
 		var (exitCode, output, error) = await TestEnvironment.RunAsync(args);
 
 		Assert.True(exitCode == 0, error);
-		// The overview explains the marker in prose, so only a result that opens with it is TOML.
+		// Markdown has no result marker line, and no TOML.
 		Assert.DoesNotContain(TomlResult.Marker + "\n", output);
 		Assert.DoesNotContain("ok = ", output);
 		Assert.Contains("bassia", output);

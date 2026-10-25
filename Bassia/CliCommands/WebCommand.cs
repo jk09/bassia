@@ -9,7 +9,7 @@ using Microsoft.Extensions.Hosting;
 
 /// <summary>
 /// <c>bassia web</c>: serves the read-only web dashboard over the monorepo the current directory belongs to, on the
-/// loopback interface only, until Ctrl-C. Everything it shows is changed with the command line or <c>bassia prompt</c>.
+/// loopback interface only, until Ctrl-C. Everything it shows is changed with the command line.
 /// </summary>
 internal static class WebCommand
 {

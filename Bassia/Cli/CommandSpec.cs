@@ -34,6 +34,12 @@ internal sealed record CommandSpec(
 {
 	public string FullName => Sub is null ? Name : $"{Name} {Sub}";
 
+	/// <summary>Whether the command only reads (<see cref="CommandCatalog.ReadOnlyCommands"/>).</summary>
+	public bool ReadOnly => CommandCatalog.ReadOnlyCommands.Contains(FullName);
+
+	/// <summary>Whether the command is meant for a person (<see cref="CommandCatalog.InteractiveCommands"/>).</summary>
+	public bool Interactive => CommandCatalog.InteractiveCommands.Contains(FullName);
+
 	public SwitchSpec? FindSwitch(string name) =>
 		Switches.FirstOrDefault(candidate => string.Equals(candidate.Name, name, StringComparison.OrdinalIgnoreCase));
 

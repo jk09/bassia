@@ -111,7 +111,7 @@ internal static class ProgramCli
 
 	/// <summary>The failures a command reports as its TOML error rather than as a crash.</summary>
 	internal static bool IsReportable(Exception ex) =>
-		ex is AgentException or MonorepoException or Storage.StorageException or IntegrationException or Prompt.PromptException or Feedback.FeedbackException or IOException or UnauthorizedAccessException;
+		ex is AgentException or MonorepoException or Storage.StorageException or IntegrationException or Feedback.FeedbackException or IOException or UnauthorizedAccessException;
 
 	/// <summary>A command line that does not parse: a TOML error on stderr, exit code 2.</summary>
 	internal static int UsageError(string command, string message)
@@ -192,7 +192,7 @@ internal static class ProgramCli
 	/// <summary>
 	/// Takes <c>-human</c>/<c>--human</c> (print for a person, not as TOML) out of the command line and records it for
 	/// this run. It may appear anywhere except inside a rest-of-line switch's text (the agent command of <c>-run</c>,
-	/// the resolver of <c>-resolve</c>, the ask of <c>prompt</c>), which is the command's own and stays verbatim.
+	/// the resolver of <c>-resolve</c>, the message of <c>feedback send</c>), which is the command's own and stays verbatim.
 	/// </summary>
 	private static string[] ExtractHuman(string[] args)
 	{
@@ -232,7 +232,7 @@ internal static class ProgramCli
 				return i + 1;
 			}
 
-			// 'bassia prompt <ask...>': everything from the first bare word on is the ask.
+			// 'bassia feedback send <message...>': everything from the first bare word on is the message.
 			if (i >= firstArgument && !token.StartsWith('-') && group.Any(command => command.Positional is not null && command.FindSwitch(command.Positional) is { Rest: true }))
 			{
 				return i;

@@ -20,8 +20,8 @@ structural merge, and an LLM that knows *why* each side changed. A local web das
   sides' prompts. You decide what always needs a human.
 - **[A dashboard you look at](#a-dashboard-you-look-at)**: components, tags, runs and the merge queue, drawn as
   pictures and updated live.
-- **[A CLI made for agents](#a-cli-made-for-agents)**: every command answers in TOML, and `bassia prompt` takes
-  plain English.
+- **[A CLI made for agents](#a-cli-made-for-agents)**: every command answers in TOML, and `bassia help` teaches
+  any agent the whole CLI.
 - **[Bring your existing repositories](#bring-your-existing-repositories)**: add them as they are; submodules become
   components, and an overgrown repository can be split.
 
@@ -133,7 +133,7 @@ bassia config set merge.component.storage.semantic -value manual
 - **Configuration**: every setting, layer by layer.
 
 Every page shows the `bassia` command that does what it describes, one click to copy. Changes go through the
-command line or `bassia prompt`. Pages render on the server, need no JavaScript and load nothing from the internet.
+command line. Pages render on the server, need no JavaScript and load nothing from the internet.
 
 | Where a tag came from and where it went | Commits in one lane per component |
 | --- | --- |
@@ -145,20 +145,20 @@ Bassia is operated mostly by AI agents, so the command line comes first:
 
 - **Every command answers in TOML**, both success and failure, in one predictable shape, with tables meant for
   people and fields meant for programs.
-- **One command table** drives the parser, `help`, error messages and the catalog given to LLMs. They can't drift
-  apart.
-- **`bassia prompt`** takes plain English. An LLM plans `bassia` commands from it, and Bassia checks each one
-  against the command table before it runs. Read-only commands run at once; anything that changes the monorepo is
-  confirmed first.
+- **One command table** drives the parser, `help` and error messages. They can't drift apart.
+- **Your agent, not ours**: Bassia has no LLM of its own. Claude Code, Codex or any other agent learns it from the
+  CLI itself: `bassia help` explains the concepts and the usual workflow and lists every command, `bassia help -all`
+  describes every command in full in one result, and each command says whether it only reads (`read_only`), so the
+  agent can explore freely and change things only when asked to.
 - **Skills**: put reusable instructions in `.bassia/skills/<name>/SKILL.md` ("cut a release", "land everything
-  that's green") and invoke them with `/<name>`.
+  that's green"); agents find them with `bassia skill list` and read them with `bassia skill show`.
 - **Layered configuration**: `.bassia/config.toml` is shared and committed; your own `.bassia/config.user.toml`
-  overrides it and is never committed. Both can be changed from the CLI and from `bassia prompt`.
+  overrides it and is never committed. Both can be changed from the CLI.
 
 ```powershell
-bassia prompt which components depend on sortlib?
-bassia prompt -dry-run start a run on api and its dependencies that adds rate limiting
-bassia prompt /release cut release 1.2 of everything that changed since v1.1
+bassia help                     # concepts, workflow, every command
+bassia help -all                # every command in full, for an agent to learn bassia in one call
+bassia help agent start         # one command: usage, switches, examples, read_only
 ```
 
 ## Bring your existing repositories

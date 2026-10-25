@@ -1,15 +1,15 @@
-namespace Bassia.Prompt;
+namespace Bassia.Skills;
 
 /// <summary>
-/// A skill: reusable instructions for a kind of ask, stored in the meta-repo as <c>.bassia/skills/&lt;name&gt;/SKILL.md</c>.
+/// A skill: reusable instructions for a recurring task, stored in the meta-repo as <c>.bassia/skills/&lt;name&gt;/SKILL.md</c>.
 /// <see cref="Body"/> is the Markdown after the front matter.
 /// </summary>
 internal sealed record Skill(string Name, string Description, string Body, string Path);
 
 /// <summary>
 /// The skills of a monorepo, in the shape Claude Code uses: a folder per skill holding <c>SKILL.md</c>, whose optional
-/// front matter (between <c>---</c> lines) gives <c>name</c> and <c>description</c>. The LLM is shown every skill's
-/// name and description and asks for the bodies it needs, so many skills cost little prompt.
+/// front matter (between <c>---</c> lines) gives <c>name</c> and <c>description</c>. An agent lists them with
+/// <c>bassia skill list</c> and reads the instructions it needs with <c>bassia skill show</c>.
 /// </summary>
 internal static class SkillStore
 {

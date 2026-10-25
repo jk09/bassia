@@ -1,7 +1,6 @@
 namespace Bassia;
 
 using Bassia.Cli;
-using Bassia.Prompt;
 using Bassia.Tutorial;
 
 /// <summary>
@@ -12,11 +11,6 @@ internal static class TutorialCommand
 {
 	/// <summary>How the guide runs commands; tests run them in-process instead of starting bassia again.</summary>
 	internal static Func<string, ICommandExecutor> ExecutorFactory { get; set; } = directory => new SelfExecutor(directory, relay: false);
-
-	/// <summary>The LLM behind <c>? &lt;question&gt;</c>: the monorepo's (or the default) <c>llm.backend</c> and <c>llm.command</c>.</summary>
-	internal static Func<string?, ILlmBackend> LlmFactory { get; set; } = root =>
-		LlmBackends.Create(PromptCommands.Setting(root, ConfigFile.Find("llm.backend")),
-			new LlmSettings(PromptCommands.Setting(root, ConfigFile.Find("llm.command")), null, Environment.CurrentDirectory));
 
 	// ----- bassia tutorial -----
 
@@ -59,7 +53,6 @@ internal static class TutorialCommand
 	private static TutorialSession Session()
 	{
 		var directory = Environment.CurrentDirectory;
-		var root = Monorepo.FindRoot(directory);
-		return new TutorialSession(Console.In, Console.Error, ExecutorFactory(directory), () => LlmFactory(root), directory);
+		return new TutorialSession(Console.In, Console.Error, ExecutorFactory(directory), directory);
 	}
 }
