@@ -1,4 +1,4 @@
-namespace Bassia.Prompt;
+namespace Bassia.Tutorial;
 
 using System.Diagnostics;
 using System.Text;
@@ -65,9 +65,9 @@ internal interface ICommandExecutor
 
 /// <summary>
 /// Runs a command by starting this same <c>bassia</c> again with an argument list - no shell, so no quoting rules to
-/// get wrong and nothing outside the command table can run. Its output is shown as it comes and captured for the LLM.
+/// get wrong and nothing outside the command table can run. Its output is shown as it comes and captured for the caller.
 /// A child process rather than an in-process call: commands change the current directory (<c>-C</c>), stream
-/// agents' output and may run for a long time, none of which should leak into the prompt's own process. Without
+/// agents' output and may run for a long time, none of which should leak into the guide's own process. Without
 /// <paramref name="relay"/> the output is only captured, for a caller that shows the result in its own words.
 /// </summary>
 internal sealed class SelfExecutor(string workingDirectory, bool relay = true) : ICommandExecutor
@@ -90,7 +90,7 @@ internal sealed class SelfExecutor(string workingDirectory, bool relay = true) :
 			startInfo.ArgumentList.Add(arg);
 		}
 
-		using var process = Process.Start(startInfo) ?? throw new PromptException($"Could not start '{fileName}'.");
+		using var process = Process.Start(startInfo) ?? throw new IOException($"Could not start '{fileName}'.");
 		process.StandardInput.Close();
 
 		var output = new StringBuilder();
@@ -146,7 +146,7 @@ internal sealed class SelfExecutor(string workingDirectory, bool relay = true) :
 	/// </summary>
 	internal static (string FileName, IReadOnlyList<string> Prefix) SelfCommand()
 	{
-		var processPath = Environment.ProcessPath ?? throw new PromptException("Cannot tell which executable this bassia is.");
+		var processPath = Environment.ProcessPath ?? throw new IOException("Cannot tell which executable this bassia is.");
 		var name = Path.GetFileNameWithoutExtension(processPath);
 		if (name.Equals("dotnet", StringComparison.OrdinalIgnoreCase))
 		{

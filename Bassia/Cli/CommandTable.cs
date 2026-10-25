@@ -14,7 +14,8 @@ internal static class CommandTable
 		["integrate"] = "'bassia integrate' was replaced by 'bassia integration plan|start|advance'.",
 		["commit"] = "'bassia commit' was removed: 'bassia config set' and the 'bassia component' commands commit the meta-repo themselves; use 'git -C .bassia commit' for hand edits.",
 		["branch"] = "'bassia branch' was removed: a component has a single main branch; use 'bassia component fork -name <component> -as <fork>' to work in parallel ('bassia component show -name <component>' lists its tags).",
-		["ui"] = "'bassia ui' was removed: use the command line, or 'bassia web' for the web dashboard."
+		["ui"] = "'bassia ui' was removed: use the command line, or 'bassia web' for the web dashboard.",
+		["prompt"] = "'bassia prompt' was removed: bassia has no LLM of its own. Drive it from your agent (Claude Code, Codex, ...): the agent learns every command from 'bassia help' and 'bassia help -all' and runs them itself."
 	};
 
 	private static readonly SwitchSpec Id = new("id", "run-id", "The run: its full id, its <key> part (the short id), or a prefix of at least 4 characters of the key.", Required: true);
@@ -70,13 +71,13 @@ internal static class CommandTable
 			Details: ConfigDetails),
 
 		new("config", "get", "Show one setting: its effective value, where it comes from, and its value in each layer.",
-			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl, lock.component.<component>.<files|folders|conflict>, llm.backend or llm.command.", Required: true)],
+			[new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl or lock.component.<component>.<files|folders|conflict>.", Required: true)],
 			["bassia config get -key integration.resolver", "bassia config get merge.component.app.semantic"],
 			MonorepoCommands.ConfigGetAsync, Positional: "key", Details: ConfigDetails),
 
 		new("config", "set", "Change one setting: in .bassia/config.toml (comments are kept, committed to the meta-repo), or with -user in your own .bassia/config.user.toml (never committed).",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl, lock.component.<component>.<files|folders|conflict>, llm.backend or llm.command.", Required: true),
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl or lock.component.<component>.<files|folders|conflict>.", Required: true),
 				new("value", "value", "The new value; a choice setting accepts only its choices, a list setting takes comma-separated values.", Required: true),
 				new("user", null, "Write the user layer (.bassia/config.user.toml) instead of the monorepo's.")
 			],
@@ -90,7 +91,7 @@ internal static class CommandTable
 
 		new("config", "unset", "Remove one setting from a layer, so the next layer down (or the default) applies again.",
 			[
-				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl, lock.component.<component>.<files|folders|conflict>, llm.backend or llm.command.", Required: true),
+				new("key", "key", "workspace.path, agent.command, agent.commit.subject, integration.resolver, integration.weave, merge.semantic, merge.warnings, merge.manual_paths, merge.advance, merge.component.<component>.<semantic|warnings|manual_paths|advance>, lock.files, lock.folders, lock.conflict, lock.ttl or lock.component.<component>.<files|folders|conflict>.", Required: true),
 				new("user", null, "Remove it from the user layer instead of the monorepo's.")
 			],
 			["bassia config unset -key merge.semantic", "bassia config unset merge.advance -user"],
@@ -102,8 +103,8 @@ internal static class CommandTable
 			TutorialCommand.RunAsync,
 			Details: "Outside a monorepo it asks for the repositories that become components, which component needs which, and the root folder, " +
 				"shows the plan as the bassia commands it will run (init, component add) and runs them once confirmed. Inside one it shows the " +
-				"status and a menu: add components, set dependencies, show the status, start a run, ask in plain English, open the dashboard. " +
-				"At any question, ? explains the step and ? <question> asks the LLM of 'bassia prompt' (llm.backend, llm.command). A bare " +
+				"status and a menu: add components, set dependencies, show the status, start a run, open the dashboard. " +
+				"At any question, ? explains the step. A bare " +
 				"'bassia' at a terminal starts it after a short help."),
 
 		new("version", null, "Show the bassia version.",
@@ -341,7 +342,7 @@ internal static class CommandTable
 				new("lock-folders", "[component:]pattern,...", "Also hold these folders as a whole while the agent changes a file in them, on top of lock.folders."),
 				new("id", "run-id", "The run's id (set by -detach).", Hidden: true),
 				Log,
-				new("run", "command", "The agent command, verbatim: the rest of the command line (put it last).", Rest: true)
+				new("run", "command", "The agent command: the rest of the command line (put it last). It runs through the platform shell (/bin/sh -c, cmd /c) in the run folder; give it as one quoted argument to keep its own quotes and operators intact.", Rest: true)
 			],
 			[
 				"bassia agent start -select app@v1,lib@v1 -prompt \"add a changelog\" -model opus",
@@ -452,7 +453,7 @@ internal static class CommandTable
 				new("detach", null, "Return at once and continue in the background; follow with integration show/logs/wait, stop with integration stop."),
 				new("id", "integration-id", "The integration's id (set by -detach).", Hidden: true),
 				Log,
-				new("resolve", "command", "The resolver command instead of integration.resolver: the rest of the command line (put it last).", Rest: true)
+				new("resolve", "command", "The resolver command instead of integration.resolver: the rest of the command line (put it last). It runs through the platform shell; give it as one quoted argument to keep its own quotes intact.", Rest: true)
 			],
 			[
 				"bassia integration start -runs all",
@@ -491,44 +492,17 @@ internal static class CommandTable
 			["bassia integration advance steady-heron-5e11aa"],
 			IntegrationCommands.AdvanceAsync, Positional: "id"),
 
-		// ----- skills and natural language -----
+		// ----- skills -----
 
-		new("skill", "list", "List the meta-repo's skills (.bassia/skills/<name>/SKILL.md): reusable instructions 'bassia prompt' offers the LLM.",
+		new("skill", "list", "List the meta-repo's skills (.bassia/skills/<name>/SKILL.md): reusable instructions for recurring tasks, for the agent that drives bassia.",
 			[],
 			["bassia skill list"],
-			PromptCommands.SkillListAsync),
+			SkillCommands.SkillListAsync),
 
 		new("skill", "show", "Show one skill: its description and instructions.",
 			[new("name", "skill", "The skill.", Required: true)],
 			["bassia skill show -name release", "bassia skill show release"],
-			PromptCommands.SkillShowAsync, Positional: "name"),
-
-		new("prompt", null, "Do what an ask in natural language says: an LLM plans bassia commands from it, bassia checks and runs them, and answers.",
-			[
-				new("backend", "name", "The LLM backend instead of llm.backend: claude (Claude Code, the default) or command."),
-				new("llm", "command", "The command the backend runs instead of llm.command."),
-				new("model", "model", "The model the backend uses (claude: --model; command: replaces {model})."),
-				new("skill", "skill,...", "Hand the LLM these skills' instructions up front (a /<skill> word in the ask does the same)."),
-				new("yes", null, "Run commands that change something without asking."),
-				new("dry-run", null, "Change nothing: run only read-only commands and show the plan up to the first command that would change something."),
-				new("max-rounds", "n", "Give up after this many LLM rounds (default: 8)."),
-				new("ask", "text", "The ask: the rest of the command line (put it last); may be given without -ask.", Required: true, Rest: true)
-			],
-			[
-				"bassia prompt initialize the monorepo at folder C:\\mono",
-				"bassia prompt -dry-run add https://github.com/myrepo/lib.git as a component and tag it v1",
-				"bassia -C R:\\ prompt which components depend on lib?",
-				"bassia prompt -yes /release cut release 3 of app and lib",
-				"bassia prompt -backend command -llm \"ollama run llama3\" show the status"
-			],
-			PromptCommands.PromptAsync, Positional: "ask",
-			Usage: "bassia prompt [-backend <name>] [-llm <command>] [-model <model>] [-skill <skill,...>] [-yes] [-dry-run] [-max-rounds <n>] <ask...>",
-			Details: "The LLM gets the ask, the working directory and monorepo, this command catalog and the skills' descriptions, and answers with " +
-				"commands as TOML argument lists. Each is checked against the command table, then run as its own bassia process; its output is shown " +
-				"and its TOML result goes back to the LLM for the next round until it is done. Read-only commands run at once; a command that changes " +
-				"something is confirmed (y/n/a), or needs -yes when stdin is not a terminal. 'prompt' and 'web' are never run. Every [[step]] has the " +
-				"command_line, status (ok, failed, rejected, declined, planned, skipped) and the command's message. Skills are " +
-				".bassia/skills/<name>/SKILL.md files with 'name' and 'description' front matter; the LLM loads the ones it needs."),
+			SkillCommands.SkillShowAsync, Positional: "name"),
 
 		// ----- frontends -----
 
@@ -537,9 +511,12 @@ internal static class CommandTable
 			["bassia web", "bassia web -port 9000 -no-open"],
 			WebCommand.RunAsync),
 
-		new("help", null, "Show help: every command, the subcommands of a command, or one command's switches and examples.",
-			[new("command", "command [subcommand]", "The command to explain; may be given without -command.")],
-			["bassia help", "bassia help agent", "bassia help agent start", "bassia agent start -help"],
+		new("help", null, "Show help: the concepts, the usual workflow and every command; every command in full (-all); the subcommands of a command; or one command's switches and examples.",
+			[
+				new("command", "command [subcommand]", "The command to explain; may be given without -command."),
+				new("all", null, "Every command in full - usage, details, switches and examples - in one result.")
+			],
+			["bassia help", "bassia help -all", "bassia help agent", "bassia help agent start", "bassia agent start -help"],
 			Help.RunAsync, Positional: "command")
 	];
 

@@ -1,13 +1,13 @@
 namespace Bassia.Tutorial;
 
+using Bassia.Cli;
 using Bassia.Git;
 using Bassia.Graph;
-using Bassia.Prompt;
 using Bassia.Split;
 
 /// <summary>
 /// What a guide did: whether it ended well, its closing words, the monorepo it worked on, the commands it ran, and a
-/// command line to hand over to (<c>prompt</c>, <c>web</c>) when the user picked one.
+/// command line to hand over to (<c>web</c>) when the user picked one.
 /// </summary>
 internal sealed record TutorialOutcome(bool Ok, string Message, string? Root, IReadOnlyList<string> Commands, IReadOnlyList<string>? Then = null);
 
@@ -19,10 +19,9 @@ internal sealed class TutorialStopped() : Exception("The input ended.");
 /// newcomer through setting one up: the repositories that become components, which needs which, and the root folder.
 /// Nothing is changed before the plan - the same <c>bassia</c> commands a person would type - is confirmed. Inside a
 /// monorepo it shows where the user is and offers a menu of next steps. Every change is made by a <c>bassia</c>
-/// command run through <paramref name="executor"/>. At any question, <c>?</c> explains the step, and
-/// <c>? &lt;question&gt;</c> asks the LLM.
+/// command run through <paramref name="executor"/>. At any question, <c>?</c> explains the step.
 /// </summary>
-internal sealed class TutorialSession(TextReader input, TextWriter output, ICommandExecutor executor, Func<ILlmBackend> llm, string workingDirectory)
+internal sealed class TutorialSession(TextReader input, TextWriter output, ICommandExecutor executor, string workingDirectory)
 {
 	private sealed record Step(string Name, string Help);
 
@@ -108,7 +107,7 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 		}
 
 		output.WriteLine("Three questions: which repositories, which needs which, and where the monorepo goes. Nothing changes until");
-		output.WriteLine("you confirm the plan at the end. Type ? at any question for help, or ? followed by a question to ask the LLM.");
+		output.WriteLine("you confirm the plan at the end. Type ? at any question for help.");
 
 		Heading("Step 1 of 3: components");
 		output.WriteLine(Wrap("A component is one of your git repositories: a URL like https://github.com/you/lib.git or a folder on this " +
@@ -188,7 +187,6 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 		output.WriteLine($"  bassia agent start -select {main} -prompt \"<what to do>\"");
 		output.WriteLine($"                                        let an AI agent work on {main} and what it needs");
 		output.WriteLine("  bassia web                            a dashboard of the monorepo in your browser");
-		output.WriteLine("  bassia prompt <what you want>         say what you want in plain English");
 		output.WriteLine("  bassia                                this guide again, with options for the monorepo");
 		return new TutorialOutcome(true, $"Set up the monorepo at '{root}' with {monorepo.Components.Count} component(s).", root, ran);
 	}
@@ -501,7 +499,7 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 			}
 		}
 
-		output.WriteLine("Type ? at any question for help, or ? followed by a question to ask the LLM.");
+		output.WriteLine("Type ? at any question for help.");
 		while (true)
 		{
 			var monorepo = Monorepo.Load(root);
@@ -515,8 +513,7 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 			output.WriteLine("  2. Set what a component needs (its dependencies)");
 			output.WriteLine("  3. Show the status");
 			output.WriteLine("  4. Start an agentic run");
-			output.WriteLine("  5. Ask in plain English (bassia prompt)");
-			output.WriteLine("  6. Open the web dashboard (bassia web)");
+			output.WriteLine("  5. Open the web dashboard (bassia web)");
 			output.WriteLine("  q. Quit");
 			var choice = (await ReadAsync("Choice: ", Menu, cancellation)).ToLowerInvariant();
 			switch (choice)
@@ -536,14 +533,6 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 					await StartRunAsync(monorepo, cancellation);
 					break;
 				case "5":
-					var ask = await ReadAsync("What do you want to do? ", Menu, cancellation);
-					if (ask.Length > 0)
-					{
-						return HandOff(root, ["-C", root, "prompt", ask]);
-					}
-
-					break;
-				case "6":
 					return HandOff(root, ["-C", root, "web"]);
 				case "q" or "quit" or "exit":
 					var bye = ran.Count == 0 ? "Nothing was changed." : $"Ran {ran.Count} command(s).";
@@ -776,44 +765,25 @@ internal sealed class TutorialSession(TextReader input, TextWriter output, IComm
 				return line;
 			}
 
-			await ExplainAsync(step, line[1..].Trim(), cancellation);
+			Explain(step, line[1..].Trim());
 		}
 	}
 
-	private async Task ExplainAsync(Step step, string question, CancellationToken cancellation)
+	/// <summary>
+	/// <c>?</c> explains the step from the built-in help. Bassia has no LLM of its own, so a question after the <c>?</c>
+	/// gets the same explanation and a pointer to <c>bassia help</c>, which any agent can read.
+	/// </summary>
+	private void Explain(Step step, string question)
 	{
 		output.WriteLine();
+		output.WriteLine(Wrap($"{step.Name}: {step.Help}"));
 		if (question.Length > 0)
 		{
-			try
-			{
-				var backend = llm();
-				output.WriteLine($"(asking {backend.Name}...)");
-				var reply = await backend.CompleteAsync(new LlmRequest(ExplainSystemPrompt, $"# Where they are\n\n{step.Name}: {step.Help}\n\n# Their question\n\n{question}\n"), cancellation);
-				output.WriteLine(reply.Trim());
-				output.WriteLine();
-				return;
-			}
-			catch (PromptException ex)
-			{
-				output.WriteLine($"The LLM could not answer ({ex.Message}). Set it up with 'bassia config set llm.command <command>'. Here is the built-in help:");
-				output.WriteLine();
-			}
-		}
-
-		output.WriteLine(Wrap($"{step.Name}: {step.Help}"));
-		if (question.Length == 0)
-		{
-			output.WriteLine("Ask your own question with '? <question>'; the LLM bassia prompt uses answers it.");
+			output.WriteLine("For more, run 'bassia help' (every command) or ask your AI agent: it can read 'bassia help -all'.");
 		}
 
 		output.WriteLine();
 	}
-
-	private static string ExplainSystemPrompt =>
-		"You help a person who is new to Bassia and is being guided through it on the command line. " + Concepts +
-		"\n\nAnswer their question about the step they are at, in plain text without Markdown, in at most 8 short lines. When a bassia " +
-		"command helps, show it. Do not ask questions back; the guide continues after your answer.\n\n# Commands\n\n" + CommandCatalog.Render();
 
 	private void Heading(string title)
 	{

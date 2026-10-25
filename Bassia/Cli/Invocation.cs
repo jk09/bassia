@@ -29,7 +29,7 @@ internal sealed class Invocation
 			var token = args[i];
 			if (SwitchName(token) is not { } name)
 			{
-				// A rest-of-line positional (the ask of 'bassia prompt') starts at the first bare word.
+				// A rest-of-line positional (the message of 'bassia feedback send') starts at the first bare word.
 				if (spec.Positional is not null && spec.FindSwitch(spec.Positional) is { Rest: true } restPositional
 					&& !invocation.values.ContainsKey(restPositional.Name))
 				{

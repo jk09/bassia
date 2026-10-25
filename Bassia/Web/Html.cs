@@ -41,7 +41,7 @@ internal static class Html
 		<script src="/app.js" defer></script>
 		</head>
 		<body>
-		<header><span class="logo">Bassia</span> <span class="root">{{E(root)}}</span><span class="ro">read-only · change things with bassia or bassia prompt</span></header>
+		<header><span class="logo">Bassia</span> <span class="root">{{E(root)}}</span><span class="ro">read-only · change things with the bassia command line</span></header>
 		<nav>{{string.Concat(Menu.Select(item => $"<a href=\"{item.Path}\"{(item.Path == active ? " class=\"active\"" : "")}>{E(item.Label)}</a>"))}}</nav>
 		<main>
 		<h1>{{E(title)}}</h1>
@@ -103,7 +103,7 @@ internal static class Html
 	public static string Rationale(string command) => E(AgentCommand.SummarizeCommand(command));
 
 	/// <summary>
-	/// A command to run in a terminal (or to ask <c>bassia prompt</c> for): the dashboard shows what to do instead of
+	/// A command to run in a terminal (or to hand to an agent): the dashboard shows what to do instead of
 	/// doing it. Clicking it copies it.
 	/// </summary>
 	public static string Cmd(string command) => $"<code class=\"cmd\" title=\"click to copy\">{E(command)}</code>";

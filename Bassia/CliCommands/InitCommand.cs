@@ -51,13 +51,7 @@ internal static class InitCommand
 		"# (left for a human) | merge (merged like any other).\n" +
 		"conflict = \"resolver\"\n" +
 		"# ttl: seconds a hold lasts without its run renewing it, so a crashed or suspended run's holds expire.\n" +
-		"ttl = 120\n" +
-		"\n" +
-		"[llm]\n" +
-		"# LLM behind 'bassia prompt <ask>': 'claude' (Claude Code, run as the command below with its tools off) or 'command' (the\n" +
-		"# command below as it is, reading the prompt on stdin, with {model} replaced by -model). Skills live in skills/<name>/SKILL.md.\n" +
-		"backend = \"" + Prompt.LlmBackends.DefaultName + "\"\n" +
-		"command = \"" + Prompt.LlmBackends.DefaultCommand + "\"\n";
+		"ttl = 120\n";
 
 	private const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +

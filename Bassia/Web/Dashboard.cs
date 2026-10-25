@@ -16,7 +16,7 @@ using static Bassia.Web.Html;
 /// components and how they relate, tags as units of progress, agentic runs as they happen, and the merge queue with
 /// its triage and the merges that need a human. Pages are rendered on the server, pictures included, and work without
 /// JavaScript; the script animates and refreshes the live parts. Nothing is changed from here: every page shows the
-/// <c>bassia</c> command that does what it describes, for the command line or <c>bassia prompt</c>.
+/// <c>bassia</c> command that does what it describes, for a person or an agent to run.
 /// </summary>
 internal sealed partial class Dashboard
 {
@@ -53,7 +53,7 @@ internal sealed partial class Dashboard
 		if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
 		{
 			context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
-			await context.Response.WriteAsync("The Bassia dashboard is read-only; change the monorepo with the bassia command line or 'bassia prompt'.");
+			await context.Response.WriteAsync("The Bassia dashboard is read-only; change the monorepo with the bassia command line.");
 			return;
 		}
 
