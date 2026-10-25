@@ -104,6 +104,17 @@ internal static class MergeBrief
 			}
 		}
 
+		if (incoming.BoundaryViolations.Count > 0)
+		{
+			brief.AppendLine("- Boundary violations: this run's result uses code it should not reach (non-exported paths of a referenced " +
+				"component, a component through another's nested reference, or paths outside the component). Keep the merge from " +
+				"spreading them, and prefer the referenced component's exported API:");
+			foreach (var violation in incoming.BoundaryViolations)
+			{
+				brief.AppendLine($"  - {violation}");
+			}
+		}
+
 		AppendSide(brief, input.Theirs);
 
 		brief.AppendLine("## What is already integrated (ours)");

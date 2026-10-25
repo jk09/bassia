@@ -81,6 +81,7 @@ internal static class IntegrationSupport
 			["conflicts"] = step.Conflicts,
 			["conflicts_with"] = step.ConflictsWith,
 			["lock_conflicts"] = step.LockConflicts,
+			["boundary_violations"] = step.BoundaryViolations.Count == 0 ? null : step.BoundaryViolations,
 			["structural"] = step.Structural is { } structural ? IntegrationRecord.Snake(structural) : null,
 			["structural_conflicts"] = step.StructuralConflicts,
 			["structural_warnings"] = step.StructuralWarnings,

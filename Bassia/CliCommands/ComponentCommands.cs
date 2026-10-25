@@ -31,6 +31,7 @@ internal static class ComponentCommands
 			["tags"] = status.Definition.Tags,
 			["visibility"] = status.Definition.Visibility,
 			["owners"] = status.Definition.Owners,
+			["exports"] = status.Definition.Exports,
 			["referenced_by"] = graph.ReferrersOf(status.Name).Select(referrer => referrer.Name).ToList(),
 			["annotated_tags"] = status.AnnotatedTags,
 			["branches"] = status.Branches,
@@ -84,6 +85,7 @@ internal static class ComponentCommands
 				["tags"] = added.Component.Tags,
 				["visibility"] = added.Component.Visibility,
 				["owners"] = added.Component.Owners,
+				["exports"] = added.Component.Exports,
 				["meta_repo_commit"] = added.Revision,
 				["warnings"] = Warnings(graph.Registry.Violations())
 			});
@@ -112,6 +114,7 @@ internal static class ComponentCommands
 				["tags"] = created.Component.Tags,
 				["visibility"] = created.Component.Visibility,
 				["owners"] = created.Component.Owners,
+				["exports"] = created.Component.Exports,
 				["meta_repo_commit"] = created.Revision,
 				["warnings"] = Warnings(graph.Registry.Violations())
 			});
@@ -156,6 +159,7 @@ internal static class ComponentCommands
 				["tags"] = component.Tags,
 				["visibility"] = component.Visibility,
 				["owners"] = component.Owners,
+				["exports"] = component.Exports,
 				["references"] = component.References.Select(Describe).ToList(),
 				["referenced_by"] = graph.ReferrersOf(component.Name).Select(referrer => referrer.Name).ToList(),
 				["warnings"] = Warnings(violations),
@@ -199,15 +203,17 @@ internal static class ComponentCommands
 		Exclusive(invocation, "references", "clear-references");
 		Exclusive(invocation, "tags", "clear-tags");
 		Exclusive(invocation, "owners", "clear-owners");
+		Exclusive(invocation, "exports", "clear-exports");
 		if (new[] { invocation.Has("visibility"), invocation.Has("public"), invocation.Has("private") }.Count(given => given) > 1)
 		{
 			throw invocation.Usage("Give only one of -visibility, -public and -private.");
 		}
 
-		string[] changes = ["references", "clear-references", "tags", "clear-tags", "visibility", "public", "private", "owners", "clear-owners"];
+		string[] changes = ["references", "clear-references", "tags", "clear-tags", "visibility", "public", "private", "owners", "clear-owners", "exports", "clear-exports"];
 		if (!changes.Any(invocation.Has))
 		{
-			throw invocation.Usage("Give what to change: -references or -clear-references, -tags or -clear-tags, -visibility, -public or -private, -owners or -clear-owners.");
+			throw invocation.Usage("Give what to change: -references or -clear-references, -tags or -clear-tags, -visibility, -public or -private, " +
+				"-owners or -clear-owners, -exports or -clear-exports.");
 		}
 
 		var references = invocation.Has("clear-references") ? []
@@ -217,7 +223,9 @@ internal static class ComponentCommands
 		var setVisibility = invocation.Has("visibility") || invocation.Has("public") || invocation.Has("private");
 		IReadOnlyList<string>? visibility = invocation.Has("private") ? [] : invocation.Has("visibility") ? invocation.List("visibility") : null;
 		var graph = monorepo.Graph();
-		var changed = await graph.SetAttributesAsync(component.Name, tags, setVisibility, visibility, owners, references);
+		var setExports = invocation.Has("exports") || invocation.Has("clear-exports");
+		var exports = invocation.Has("exports") ? invocation.List("exports") : null;
+		var changed = await graph.SetAttributesAsync(component.Name, tags, setVisibility, visibility, owners, references, setExports, exports);
 		var updated = graph.Registry;
 		var now = updated.Require(component.Name);
 		var described = now.References.Select(Describe).ToList();
@@ -231,6 +239,7 @@ internal static class ComponentCommands
 				["tags"] = now.Tags,
 				["visibility"] = now.Visibility,
 				["owners"] = now.Owners,
+				["exports"] = now.Exports,
 				["closure"] = updated.Closure([now.Name]).Select(item => item.Name).ToList(),
 				["meta_repo_commit"] = changed.Revision,
 				["graph"] = new TomlText(new ComponentGraph(updated.Components).RenderText(ascii: true)),
@@ -325,6 +334,7 @@ internal static class ComponentCommands
 				["tags"] = fork.Component.Tags,
 				["visibility"] = fork.Component.Visibility,
 				["owners"] = fork.Component.Owners,
+				["exports"] = fork.Component.Exports,
 				["meta_repo_commit"] = meta.Length > 0 ? meta : null,
 				["warnings"] = Warnings(graph.Registry.Violations())
 			});
@@ -397,7 +407,8 @@ internal static class ComponentCommands
 	internal static ComponentAttributes Attributes(Invocation invocation, ComponentAttributes defaults) => new(
 		invocation.Has("tags") ? invocation.List("tags") : defaults.Tags,
 		invocation.Has("visibility") ? invocation.List("visibility") : defaults.Visibility,
-		invocation.Has("owners") ? invocation.List("owners") : defaults.Owners);
+		invocation.Has("owners") ? invocation.List("owners") : defaults.Owners,
+		invocation.Has("exports") ? invocation.List("exports") : defaults.Exports);
 
 	/// <summary>The boundary violations as the <c>warnings</c> of a result, or null (no key) when there are none.</summary>
 	internal static IReadOnlyList<string>? Warnings(IReadOnlyList<BoundaryViolation> violations) =>

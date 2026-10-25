@@ -7,7 +7,8 @@ using Tomlyn.Model;
 /// <summary>One new component of a split: its name, the patterns of the files it gets, and its registration.</summary>
 /// <remarks><paramref name="Tags"/>, <paramref name="Visibility"/> and <paramref name="Owners"/> are the source's when null.</remarks>
 internal sealed record SplitPart(string Name, PathPatterns Paths, IReadOnlyList<ComponentReference>? References, string? Url,
-	IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? Visibility = null, IReadOnlyList<string>? Owners = null);
+	IReadOnlyList<string>? Tags = null, IReadOnlyList<string>? Visibility = null, IReadOnlyList<string>? Owners = null,
+	IReadOnlyList<string>? Exports = null);
 
 /// <summary>A component that referenced the source, and what it references instead.</summary>
 internal sealed record SplitReferrer(string Name, IReadOnlyList<ComponentReference> References);
@@ -28,6 +29,7 @@ internal sealed record SplitReferrer(string Name, IReadOnlyList<ComponentReferen
 /// references = ["lib"]                  # optional: default is the source's references
 /// url = "https://example.com/app-core.git"  # optional: recorded in components.toml
 /// tags = ["type:lib"]                   # optional, like visibility and owners: default is the source's
+/// exports = ["src/api"]                 # optional: the part's public API (default: everything)
 ///
 /// [[referrer]]                          # optional: a component that referenced the source
 /// name = "tool"
@@ -40,7 +42,7 @@ internal sealed class SplitPlan
 {
 	private static readonly Regex NamePattern = new("^[A-Za-z0-9][A-Za-z0-9._-]*$", RegexOptions.CultureInvariant);
 	private static readonly HashSet<string> TopKeys = ["source", "branch", "shared", "drop", "follow_renames", "part", "referrer"];
-	private static readonly HashSet<string> PartKeys = ["name", "paths", "references", "url", "tags", "visibility", "owners"];
+	private static readonly HashSet<string> PartKeys = ["name", "paths", "references", "url", "tags", "visibility", "owners", "exports"];
 	private static readonly HashSet<string> ReferrerKeys = ["name", "references"];
 
 	public string? Source { get; private set; }
@@ -114,7 +116,8 @@ internal sealed class SplitPlan
 			var paths = Patterns(part, "paths", where, problems, required: true);
 			var references = part.ContainsKey("references") ? References(part, where, problems) : null;
 			plan.Parts.Add(new SplitPart(name, paths, references, OptionalString(part, "url", where, problems),
-				OptionalStrings(part, "tags", where, problems), OptionalStrings(part, "visibility", where, problems), OptionalStrings(part, "owners", where, problems)));
+				OptionalStrings(part, "tags", where, problems), OptionalStrings(part, "visibility", where, problems), OptionalStrings(part, "owners", where, problems),
+				OptionalStrings(part, "exports", where, problems)));
 		}
 
 		if (plan.Parts.Count < 2)

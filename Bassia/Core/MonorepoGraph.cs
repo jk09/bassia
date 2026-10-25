@@ -11,13 +11,15 @@ internal sealed record ComponentChange(ComponentDefinition Component, string Loc
 /// Where a component sits in the architecture, given when it is created, imported or forked: its tags, visibility (null:
 /// public) and owners.
 /// </summary>
-internal sealed record ComponentAttributes(IReadOnlyList<string> Tags, IReadOnlyList<string>? Visibility, IReadOnlyList<string> Owners)
+internal sealed record ComponentAttributes(IReadOnlyList<string> Tags, IReadOnlyList<string>? Visibility, IReadOnlyList<string> Owners,
+	IReadOnlyList<string>? Exports = null)
 {
 	public static ComponentAttributes None { get; } = new([], null, []);
 
-	public static ComponentAttributes Of(ComponentDefinition component) => new(component.Tags, component.Visibility, component.Owners);
+	public static ComponentAttributes Of(ComponentDefinition component) => new(component.Tags, component.Visibility, component.Owners, component.Exports);
 
-	public ComponentDefinition ApplyTo(ComponentDefinition component) => component with { Tags = Tags, Visibility = Visibility, Owners = Owners };
+	public ComponentDefinition ApplyTo(ComponentDefinition component) =>
+		component with { Tags = Tags, Visibility = Visibility, Owners = Owners, Exports = Exports };
 }
 
 /// <summary>A boundary rule change: the rules after it and the revision that recorded it.</summary>
@@ -189,7 +191,8 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 	/// result does not fit the graph or adds a boundary violation.
 	/// </summary>
 	public async Task<ComponentChange> SetAttributesAsync(string name, IReadOnlyList<string>? tags = null, bool setVisibility = false,
-		IReadOnlyList<string>? visibility = null, IReadOnlyList<string>? owners = null, IReadOnlyList<ComponentReference>? references = null)
+		IReadOnlyList<string>? visibility = null, IReadOnlyList<string>? owners = null, IReadOnlyList<ComponentReference>? references = null,
+		bool setExports = false, IReadOnlyList<string>? exports = null)
 	{
 		var component = Registry.Require(name);
 		var changes = new List<RegistryChange>();
@@ -216,6 +219,12 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 		{
 			changes.Add(new RegistryChange.SetOwners(component.Name, owners));
 			said.Add(owners.Count == 0 ? "no owners" : $"owned by {string.Join(", ", owners)}");
+		}
+
+		if (setExports)
+		{
+			changes.Add(new RegistryChange.SetExports(component.Name, exports));
+			said.Add(exports is null ? "exports everything" : $"exports {string.Join(", ", exports)}");
 		}
 
 		var revision = changes.Count == 0 ? null

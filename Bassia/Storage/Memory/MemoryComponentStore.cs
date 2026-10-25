@@ -308,6 +308,9 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 	public Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit) =>
 		Task.FromResult<IReadOnlyList<StoredFile>>(Get(commit).Files.Select(file => new StoredFile(file.Key, file.Value.Mode, file.Value.Object, file.Value.Content.LongLength)).ToList());
 
+	public Task<byte[]?> ReadFileAsync(string commit, string path) =>
+		Task.FromResult(Get(commit).Files.TryGetValue(path, out var file) ? file.Content : null);
+
 	public Task<IReadOnlyList<NestedUnit>> ListNestedAsync(string commit) =>
 		Task.FromResult<IReadOnlyList<NestedUnit>>(Get(commit).Nested.Values.ToList());
 

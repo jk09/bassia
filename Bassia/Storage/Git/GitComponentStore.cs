@@ -150,6 +150,18 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 
 	// ----- content -----
 
+	public async Task<byte[]?> ReadFileAsync(string commit, string path)
+	{
+		try
+		{
+			return await Split.GitBinary.RunAsync(Location, ["cat-file", "blob", $"{commit}:{path}"]);
+		}
+		catch (GitException)
+		{
+			return null;
+		}
+	}
+
 	public async Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit)
 	{
 		var files = new List<StoredFile>();

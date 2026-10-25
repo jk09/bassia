@@ -45,6 +45,11 @@ internal static class ComponentsFile
 			builder.Append(ListLine("owners", component.Owners)).Append('\n');
 		}
 
+		if (component.Exports is not null)
+		{
+			builder.Append(ListLine("exports", component.Exports)).Append('\n');
+		}
+
 		if (component.ForkOf is not null)
 		{
 			builder.Append($"fork_of = {ConfigFile.Quote(component.ForkOf)}\n");

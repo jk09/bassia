@@ -179,4 +179,62 @@ public class BoundaryCommandTests
 		Assert.Contains("either -tags or -clear-tags", bothError);
 		Assert.Contains("only one of -visibility, -public and -private", visibilityError);
 	}
+
+	// ----- code boundaries -----
+
+	/// <summary>lib (api.ts exported, secret.ts not) and app nesting lib, whose main.ts uses the API.</summary>
+	private static async Task<MonorepoFixture> CodeMonorepoAsync()
+	{
+		var monorepo = await MonorepoFixture.CreateAsync();
+		await monorepo.AddComponentAsync("lib", files: new Dictionary<string, string> { ["api.ts"] = "export const a = 1;\n", ["secret.ts"] = "export const s = 1;\n" });
+		await monorepo.AddComponentAsync("app", files: new Dictionary<string, string> { ["main.ts"] = "import { a } from './lib/api';\n" });
+		Assert.Equal(0, (await monorepo.BassiaAsync("component", "set", "app", "-references", "lib")).ExitCode);
+		var (exit, _, error) = await monorepo.BassiaAsync("component", "set", "lib", "-exports", "api.ts");
+		Assert.True(exit == 0, error);
+		return monorepo;
+	}
+
+	[Fact]
+	public async Task CheckCode_ScansTheTips_AndStrictFailsOnAPrivateUse()
+	{
+		await using var monorepo = await CodeMonorepoAsync();
+		Assert.Contains("exports = [\"api.ts\"]", ComponentsToml(monorepo));
+
+		var (cleanExit, cleanOutput, cleanError) = await monorepo.BassiaAsync("boundary", "check", "-code", "-strict");
+		Assert.True(cleanExit == 0, cleanError);
+		Assert.Contains("code_violations = 0", cleanOutput);
+		Assert.Contains("used_references = [\"lib\"]", cleanOutput);
+
+		await monorepo.AddComponentAsync("tool", files: new Dictionary<string, string> { ["tool.ts"] = "import { s } from './lib/secret';\n" });
+		Assert.Equal(0, (await monorepo.BassiaAsync("component", "set", "tool", "-references", "lib")).ExitCode);
+		var (exit, _, error) = await monorepo.BassiaAsync("boundary", "check", "-code", "-strict");
+
+		Assert.Equal(1, exit);
+		Assert.Contains("kind = \"private\"", error);
+		Assert.Contains("tool/tool.ts:1: './lib/secret' uses 'secret' of lib, which exports only api.ts", error);
+	}
+
+	[Fact]
+	public async Task Run_RecordsTheViolationsItAdds_GuidesTheAgent_AndManualBoundariesHoldsItInTheIntegration()
+	{
+		await using var monorepo = await CodeMonorepoAsync();
+
+		var (exit, output, error) = await monorepo.RunStartAsync("-select", "app@v0,lib@v0", "-run", TestEnvironment.WriteFileCommand("app/main.ts", "import { s } from \"./lib/secret\";"));
+
+		Assert.True(exit == 0, error);
+		Assert.Contains("adds 1 boundary violation(s)", output);
+		var runId = TestEnvironment.RunIdOf(output);
+		var guide = await File.ReadAllTextAsync(Path.Combine(monorepo.RunDir(runId), "AGENTS.md"));
+		Assert.Contains("# Architectural boundaries in this agentic run", guide);
+		Assert.Contains("`lib/`: references nothing; exports only `api.ts`", guide);
+		var (showExit, showOutput, _) = await monorepo.BassiaAsync("agent", "show", runId);
+		Assert.Equal(0, showExit);
+		Assert.Contains("boundary_violations = 1", showOutput);
+
+		Assert.Equal(0, (await monorepo.BassiaAsync("config", "set", "-key", "merge.boundaries", "-value", "manual")).ExitCode);
+		var (planExit, planOutput, planError) = await monorepo.BassiaAsync("integration", "plan", "-runs", runId);
+		Assert.True(planExit == 0, planError);
+		Assert.Contains("strategy = \"manual\"", planOutput);
+		Assert.Contains("merge.boundaries = manual", planOutput);
+	}
 }

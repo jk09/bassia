@@ -142,6 +142,7 @@ internal sealed class ComponentRegistry
 		RegistryChange.SetTags set => Replace(set.Name, component => component with { Tags = set.Tags }),
 		RegistryChange.SetVisibility set => Replace(set.Name, component => component with { Visibility = set.Visibility }),
 		RegistryChange.SetOwners set => Replace(set.Name, component => component with { Owners = set.Owners }),
+		RegistryChange.SetExports set => Replace(set.Name, component => component with { Exports = set.Exports }),
 		RegistryChange.AddBoundary add => AddBoundary(add.Rule),
 		RegistryChange.RemoveBoundary remove => RemoveBoundary(remove.Index),
 		_ => throw new ArgumentOutOfRangeException(nameof(change), change, "Unknown registry change.")
@@ -254,6 +255,18 @@ internal sealed class ComponentRegistry
 	{
 		Core.Boundaries.ValidateTags(component.Name, component.Tags);
 		Core.Boundaries.ValidateVisibility(component.Name, component.Visibility);
+		if (component.Exports is { } exports)
+		{
+			try
+			{
+				_ = new Split.PathPatterns(exports);
+			}
+			catch (ArgumentException ex)
+			{
+				throw new MonorepoException($"Component '{component.Name}' exports: {ex.Message}");
+			}
+		}
+
 		if (component.Owners.Any(owner => string.IsNullOrWhiteSpace(owner) || owner.Any(c => char.IsWhiteSpace(c) || c == ',')))
 		{
 			throw new MonorepoException($"Component '{component.Name}': an owner must not be empty or contain whitespace or commas.");

@@ -230,7 +230,8 @@ internal static class ComponentSplitter
 			{
 				Tags = part.Tags ?? source.Tags,
 				Visibility = part.Visibility ?? source.Visibility,
-				Owners = part.Owners ?? source.Owners
+				Owners = part.Owners ?? source.Owners,
+				Exports = part.Exports
 			});
 		}
 

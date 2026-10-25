@@ -96,37 +96,88 @@ internal static class BoundaryCommands
 
 	// ----- bassia boundary check -----
 
-	public static Task<int> CheckAsync(Invocation invocation)
+	public static async Task<int> CheckAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var violations = monorepo.Registry.Violations();
+		var components = monorepo.Components.ToList();
 		if (invocation.Get("name") is { } name)
 		{
 			var component = ComponentCommands.RequireComponent(monorepo, name);
 			violations = violations.Where(violation => violation.From == component.Name || violation.To == component.Name).ToList();
+			components = [component];
 		}
 
+		var scans = invocation.Has("code") ? await ScanTipsAsync(monorepo, components) : [];
+		var code = scans.SelectMany(scan => scan.Violations).ToList();
 		var strict = invocation.Has("strict");
-		var ok = !strict || violations.Count == 0;
+		var total = violations.Count + code.Count;
+		var ok = !strict || total == 0;
 		var references = monorepo.Components.Sum(component => component.References.Count);
-		var message = violations.Count == 0
-			? $"No boundary violations: {references} reference(s) checked against {monorepo.Registry.Boundaries.Count} rule(s) and the components' visibility."
-			: $"{violations.Count} boundary violation(s) in {references} reference(s); the first: {violations[0].Message}";
-		return Task.FromResult(ProgramCli.WriteResult(ok, invocation.Command, message, new Dictionary<string, object?>
+		var checkedWhat = $"{references} reference(s) checked against {monorepo.Registry.Boundaries.Count} rule(s) and the components' visibility" +
+			(invocation.Has("code") ? $", and {scans.Sum(scan => scan.Dependencies)} dependencies in the code of {scans.Count} component(s)" : "");
+		var messages = violations.Select(violation => violation.Message).Concat(code.Select(violation => violation.Message)).ToList();
+		var message = total == 0
+			? $"No boundary violations: {checkedWhat}."
+			: $"{total} boundary violation(s) ({checkedWhat}); the first: {messages[0]}";
+		return ProgramCli.WriteResult(ok, invocation.Command, message, new Dictionary<string, object?>
 		{
 			["strict"] = strict,
 			["rules"] = monorepo.Registry.Boundaries.Count,
 			["references"] = references,
 			["violations"] = violations.Count,
-			["table"] = violations.Count == 0 ? null : new TomlText(AsciiTable.Render(["FROM", "TO", "KIND", "BREAKS"],
+			["code_violations"] = invocation.Has("code") ? code.Count : null,
+			["table"] = total == 0 ? null : new TomlText(AsciiTable.Render(["FROM", "TO", "KIND", "BREAKS"],
 				violations.Select(violation => (IReadOnlyList<string>)
 				[
 					violation.From, violation.To, violation.Kind.ToString().ToLowerInvariant(), violation.Constraint
-				]), 72)),
+				]).Concat(code.Select(violation => (IReadOnlyList<string>)
+				[
+					violation.Component, violation.Target ?? "-", violation.KindName, $"{violation.File}:{violation.Line} {violation.Specifier}"
+				])), 72)),
 			["violation"] = violations.Count == 0 ? null : Describe(violations),
-			["warnings"] = ok ? ComponentCommands.Warnings(violations) : null
-		}));
+			["code_violation"] = code.Count == 0 ? null : Describe(code),
+			["component"] = scans.Count == 0 ? null : scans.Select(scan => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+			{
+				["name"] = scan.Component,
+				["commit"] = scan.Commit,
+				["files"] = scan.Files,
+				["dependencies"] = scan.Dependencies,
+				["used_references"] = scan.UsedReferences,
+				["unused_references"] = scan.UnusedReferences
+			}).ToList(),
+			["warnings"] = ok && total > 0 ? messages : null
+		});
 	}
+
+	/// <summary>Each component with a store scanned at the tip of its default branch; one without a branch is left out.</summary>
+	private static async Task<IReadOnlyList<CodeScan>> ScanTipsAsync(Monorepo monorepo, IReadOnlyList<ComponentDefinition> components)
+	{
+		var graph = monorepo.Graph();
+		var scans = new List<CodeScan>();
+		foreach (var component in components.Where(component => graph.Storage.Exists(component.Name)))
+		{
+			var store = graph.Storage.Open(component.Name);
+			if (await store.DefaultBranchAsync() is { } branch && await store.BranchTipAsync(branch) is { } tip)
+			{
+				scans.Add(await CodeBoundaries.ScanAsync(graph.Registry, store, component.Name, tip));
+			}
+		}
+
+		return scans;
+	}
+
+	internal static IReadOnlyList<IReadOnlyDictionary<string, object?>> Describe(IReadOnlyList<CodeViolation> violations) =>
+		violations.Select(violation => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+		{
+			["component"] = violation.Component,
+			["file"] = violation.File,
+			["line"] = violation.Line,
+			["specifier"] = violation.Specifier,
+			["kind"] = violation.KindName,
+			["target"] = violation.Target,
+			["message"] = violation.Message
+		}).ToList();
 
 	internal static IReadOnlyList<IReadOnlyDictionary<string, object?>> Describe(IReadOnlyList<BoundaryViolation> violations) =>
 		violations.Select(violation => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>

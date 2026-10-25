@@ -184,7 +184,7 @@ internal static class ConfigFile
 	public const string UserFileName = "config.user.toml";
 
 	/// <summary>The merge settings a component can override.</summary>
-	public static readonly IReadOnlySet<string> MergeSettings = new HashSet<string>(StringComparer.Ordinal) { "semantic", "warnings", "manual_paths", "advance" };
+	public static readonly IReadOnlySet<string> MergeSettings = new HashSet<string>(StringComparer.Ordinal) { "semantic", "warnings", "manual_paths", "advance", "boundaries" };
 
 	/// <summary>The lock settings a component can override.</summary>
 	public static readonly IReadOnlySet<string> LockSettings = new HashSet<string>(StringComparer.Ordinal) { "files", "folders", "conflict" };
@@ -210,6 +210,9 @@ internal static class ConfigFile
 		new("merge.warnings", ["merge"], "warnings", "resolver",
 			"What happens to a result weave merged with warnings: the resolver reviews it, it is left for a human (manual), or weave's merge is accepted.",
 			["resolver", "manual", "accept"], PerComponent: true),
+		new("merge.boundaries", ["merge"], "boundaries", "warn",
+			"What happens to a result that adds code boundary violations (non-exported paths, indirect use, paths outside the component): they are recorded (warn), or the result is left for a human (manual).",
+			["warn", "manual"], PerComponent: true),
 		new("merge.manual_paths", ["merge"], "manual_paths", "",
 			"Path patterns (as in split plans, e.g. **/*.csproj,db/migrations) whose conflicts always need a human.",
 			IsList: true, PerComponent: true),

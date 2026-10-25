@@ -24,6 +24,9 @@ internal abstract record RegistryChange
 	/// <summary>Replaces the owners of the component named <paramref name="Name"/>.</summary>
 	public sealed record SetOwners(string Name, IReadOnlyList<string> Owners) : RegistryChange;
 
+	/// <summary>Replaces the exports of the component named <paramref name="Name"/>; null exports everything.</summary>
+	public sealed record SetExports(string Name, IReadOnlyList<string>? Exports) : RegistryChange;
+
 	/// <summary>Appends a boundary rule.</summary>
 	public sealed record AddBoundary(Core.BoundaryRule Rule) : RegistryChange;
 

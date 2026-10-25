@@ -47,6 +47,13 @@ internal static class CommandTable
 		"referenced only by components with a tag matching one of its patterns (visibility = [] makes it private). Patterns: * any " +
 		"characters, ? one character; $1, $2, ... in allow and deny are what the source's wildcards matched (scope:* allow scope:$1).";
 
+	private const string CodeDetails = "-code reads path-like dependencies from the code: relative JS/TS imports, quoted C/C++ includes, " +
+		"MSBuild items and imports, file:/link: packages in package.json and CMake add_subdirectory/include (namespace imports such as C# " +
+		"using or Python import name no folder and are not seen). Each is resolved where the run nests the references, and is a violation " +
+		"when it uses a path of a referenced component its exports (exports = [patterns] on the component) do not cover (private), reaches " +
+		"a component through another's nested reference such as lib/vendor/core (indirect), or leaves the component's root (outside). " +
+		"References the code never uses are listed as unused_references, for information.";
+
 	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
 		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
 		"merge.component.<component>.<setting>, which falls back to merge.<setting>. merge.semantic (resolver|manual): a result git and weave cannot " +
@@ -164,7 +171,8 @@ internal static class CommandTable
 				new("unwind", null, "Also unwind its git submodules, recursively, into components it references (see 'bassia help component unwind')."),
 				new("tags", "tag,...", "Its architecture tags (type:lib, scope:billing) that the boundary rules are written over."),
 				new("visibility", "pattern,...", "Only components with a tag matching one of these patterns may reference it (default: public)."),
-				new("owners", "owner,...", "Who owns it: people or teams.")
+				new("owners", "owner,...", "Who owns it: people or teams."),
+				new("exports", "pattern,...", "Its public API: path patterns (as in split plans) a referrer's code may use (default: everything).")
 			],
 			[
 				"bassia component add -url https://github.com/myrepo/lib.git",
@@ -182,7 +190,8 @@ internal static class CommandTable
 				new("url", "url", "The upstream it will be published to, recorded with it."),
 				new("tags", "tag,...", "Its architecture tags (type:lib, scope:billing) that the boundary rules are written over."),
 				new("visibility", "pattern,...", "Only components with a tag matching one of these patterns may reference it (default: public)."),
-				new("owners", "owner,...", "Who owns it: people or teams.")
+				new("owners", "owner,...", "Who owns it: people or teams."),
+				new("exports", "pattern,...", "Its public API: path patterns (as in split plans) a referrer's code may use (default: everything).")
 			],
 			[
 				"bassia component create -name docs",
@@ -224,7 +233,9 @@ internal static class CommandTable
 				new("public", null, "Anyone may reference it (removes its visibility)."),
 				new("private", null, "Nobody may reference it (visibility = [])."),
 				new("owners", "owner,...", "Replace its owners."),
-				new("clear-owners", null, "Remove all its owners.")
+				new("clear-owners", null, "Remove all its owners."),
+				new("exports", "pattern,...", "Its public API: path patterns (as in split plans) a referrer's code may use."),
+				new("clear-exports", null, "Export every path again.")
 			],
 			[
 				"bassia component set -name app -references lib,ui:vendor/ui", "bassia component set -name app -clear-references",
@@ -252,7 +263,8 @@ internal static class CommandTable
 				new("references", "component[:path],...", "Components the fork nests (default: the parent's references)."),
 				new("tags", "tag,...", "Its architecture tags (default: the parent's)."),
 				new("visibility", "pattern,...", "Who may reference it (default: the parent's visibility)."),
-				new("owners", "owner,...", "Who owns it (default: the parent's owners).")
+				new("owners", "owner,...", "Who owns it (default: the parent's owners)."),
+				new("exports", "pattern,...", "Its public API (default: the parent's exports).")
 			],
 			["bassia component fork -name app -as app-search", "bassia component fork app -as app-hotfix -ref v1"],
 			ComponentCommands.ForkAsync, Positional: "name",
@@ -331,11 +343,12 @@ internal static class CommandTable
 		new("boundary", "check", "Check every reference against the boundary rules and the components' visibility, and list the violations.",
 			[
 				new("name", "component", "Only the references from or to this component."),
+				new("code", null, "Also scan each component's code at the tip of its default branch: exports, indirect use and paths that leave the component."),
 				new("strict", null, "Fail (exit code 1) when there is any violation - for CI.")
 			],
-			["bassia boundary check", "bassia boundary check -strict", "bassia boundary check -name app"],
+			["bassia boundary check", "bassia boundary check -strict", "bassia boundary check -name app", "bassia boundary check -code -strict"],
 			BoundaryCommands.CheckAsync,
-			Details: "Without -strict the violations are warnings and the command succeeds. " + BoundaryDetails),
+			Details: "Without -strict the violations are warnings and the command succeeds. " + BoundaryDetails + " " + CodeDetails),
 
 		// ----- tags across components -----
 

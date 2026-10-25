@@ -163,6 +163,8 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 			await FinalizeComponentAsync(metadata, component, context);
 		}
 
+		await CheckBoundariesAsync(metadata, context);
+
 		// Released once the results are published, so a run waiting for these paths can bring them in at once.
 		await locks.FinishAsync();
 		metadata.Status = OverallStatus(metadata);
@@ -455,6 +457,34 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 	}
 
 	/// <summary>
+	/// Scans each published result for code boundary violations and records those the commit the run started from did not
+	/// have. It only records: the result stays published, and the integration decides what the violations mean
+	/// (<c>merge.boundaries</c>). A scan that fails is reported and leaves the component without a record.
+	/// </summary>
+	private async Task CheckBoundariesAsync(RunMetadata metadata, AgentRunContext? context = null)
+	{
+		foreach (var component in metadata.Components.Where(component => component.ResultStatus == ResultStatus.Pushed && component.ResultCommit is not null))
+		{
+			try
+			{
+				var store = graph.Storage.Open(component.Name);
+				var before = await CodeBoundaries.ScanAsync(graph.Registry, store, component.Name, component.Commit);
+				var after = await CodeBoundaries.ScanAsync(graph.Registry, store, component.Name, component.ResultCommit!);
+				component.BoundaryViolations.Clear();
+				component.BoundaryViolations.AddRange(after.AddedOver(before));
+				foreach (var violation in component.BoundaryViolations)
+				{
+					Report(context, metadata.RunId, AgentRunPhase.Finalizing, $"{metadata.RunId}: boundary violation ({violation.KindName}): {violation.Message}");
+				}
+			}
+			catch (Exception ex) when (ex is StorageException or MonorepoException)
+			{
+				Report(context, metadata.RunId, AgentRunPhase.Finalizing, $"{metadata.RunId}: '{component.Name}' could not be checked against its boundaries: {ex.Message}");
+			}
+		}
+	}
+
+	/// <summary>
 	/// <c>agent-run/&lt;key&gt;/&lt;counter&gt;</c> with the next unused counter. Every result tag of the run sits on the run
 	/// branch of this working copy (taken from the store, so earlier published results are visible too), which makes the
 	/// working copy's own tag list the complete sequence.
@@ -494,10 +524,14 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 		if (metadata.Components.Any(component => component.ResultStatus == ResultStatus.Pushed))
 		{
 			var conflicts = metadata.Components.SelectMany(component => component.LockConflicts).ToList();
-			return conflicts.Count == 0
+			var violations = metadata.Components.SelectMany(component => component.BoundaryViolations).ToList();
+			return (conflicts.Count == 0
 				? $"Agentic run '{metadata.RunId}' completed."
 				: $"Agentic run '{metadata.RunId}' completed with {conflicts.Count} lock conflict(s): {string.Join("; ", conflicts.Take(3).Select(conflict => conflict.Describe()))}" +
-					$"{(conflicts.Count > 3 ? "; ..." : "")}. The integration treats its result by lock.conflict.";
+					$"{(conflicts.Count > 3 ? "; ..." : "")}. The integration treats its result by lock.conflict.") +
+				(violations.Count == 0 ? ""
+					: $" Its result adds {violations.Count} boundary violation(s): {string.Join(" ", violations.Take(3).Select(violation => violation.Message))}" +
+						$"{(violations.Count > 3 ? " ..." : "")} The integration treats them by merge.boundaries.");
 		}
 
 		// A clean run with nothing to commit usually means the agent answered inline instead of editing files
@@ -526,6 +560,7 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 			await FinalizeComponentAsync(metadata, component);
 		}
 
+		await CheckBoundariesAsync(metadata);
 		metadata.Status = OverallStatus(metadata);
 		metadata.Finished = RunMetadata.Timestamp();
 		var tag = await Records.CommitAsync(metadata);

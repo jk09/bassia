@@ -33,7 +33,7 @@ internal static class AgentCommand
 			CommitSubject = monorepo.CommitSubject,
 			RunAgent = (metadata, context) => RunAgentProcessAsync(monorepo, metadata, context),
 			StartLocks = (metadata, report) => RunLocks.Start(monorepo, graph.Storage, metadata, report),
-			Prepared = metadata => WriteLockGuide(metadata, RunLocks.Filters(monorepo, metadata))
+			Prepared = metadata => WriteRunGuide(metadata, RunLocks.Filters(monorepo, metadata), graph.Registry)
 		});
 	}
 
@@ -66,16 +66,30 @@ internal static class AgentCommand
 	}
 
 	/// <summary>
-	/// Tells the agent how locking works in this run when its filter locks anything: <c>AGENTS.md</c> and
-	/// <c>CLAUDE.md</c> at the root of the run folder (its working directory), outside every component checkout, so
-	/// they are read by agents that look for them and never committed.
+	/// Tells the agent how locking works in this run when its filter locks anything, and what the boundaries of the
+	/// selected components are when the monorepo has any: <c>AGENTS.md</c> and <c>CLAUDE.md</c> at the root of the run
+	/// folder (its working directory), outside every component checkout, so they are read by agents that look for them
+	/// and never committed.
 	/// </summary>
-	internal static void WriteLockGuide(RunMetadata metadata, IReadOnlyDictionary<string, LockFilter> filters)
+	internal static void WriteRunGuide(RunMetadata metadata, IReadOnlyDictionary<string, LockFilter> filters, ComponentRegistry registry)
+	{
+		var sections = new[] { LockGuide(filters), BoundaryGuide(metadata, registry) }.OfType<string>().ToList();
+		if (sections.Count == 0)
+		{
+			return;
+		}
+
+		var text = string.Join("\n", sections);
+		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "AGENTS.md"), text);
+		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "CLAUDE.md"), text);
+	}
+
+	private static string? LockGuide(IReadOnlyDictionary<string, LockFilter> filters)
 	{
 		var locked = filters.Where(pair => !pair.Value.IsEmpty).ToList();
 		if (locked.Count == 0)
 		{
-			return;
+			return null;
 		}
 
 		var text = new StringBuilder()
@@ -106,8 +120,49 @@ internal static class AgentCommand
 			.Append("Paths are relative to your working directory (`<component>/<path>` from this folder; a folder ends with `/`).\n")
 			.Append("`bassia lock list` shows who holds what. Changing a path another run holds is recorded as a lock conflict, and\n")
 			.Append("your result is then reviewed before it is merged. Every command answers in TOML.\n");
-		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "AGENTS.md"), text.ToString());
-		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "CLAUDE.md"), text.ToString());
+		return text.ToString();
+	}
+
+	/// <summary>
+	/// The boundaries of the run's components - what each may reference and what each exports - when the monorepo has
+	/// rules or any selected component has tags, a visibility or exports; otherwise null.
+	/// </summary>
+	private static string? BoundaryGuide(RunMetadata metadata, ComponentRegistry registry)
+	{
+		var components = metadata.Components.Select(component => registry.Find(component.Name)).OfType<ComponentDefinition>().ToList();
+		if (registry.Boundaries.Count == 0 && components.All(component => component.Tags.Count == 0 && component.Visibility is null && component.Exports is null))
+		{
+			return null;
+		}
+
+		var text = new StringBuilder()
+			.Append("# Architectural boundaries in this agentic run\n\n")
+			.Append("Each folder here is a component; a component sees the components it references nested inside it (e.g. `app/lib/`).\n")
+			.Append("Keep to these boundaries - Bassia checks your result against them and records what breaks them:\n\n")
+			.Append("- Use a referenced component only through the folder it is nested at, and only its exported paths.\n")
+			.Append("- Never reach a component through another component's nested folder (`app/lib/vendor/core/...`): reference it directly.\n")
+			.Append("- Never use paths outside your component's folder (`../other/...`), and add no reference the rules below forbid.\n\n");
+		foreach (var component in components)
+		{
+			text.Append($"- `{component.Name}/`")
+				.Append(component.Tags.Count == 0 ? "" : $" (tags {string.Join(", ", component.Tags.Select(tag => $"`{tag}`"))})")
+				.Append(component.References.Count == 0 ? ": references nothing" : $": references {string.Join(", ", component.References.Select(reference => $"`{reference.Name}` at `{component.Name}/{reference.Path}/`"))}")
+				.Append(component.Exports is null ? "; exports everything" : $"; exports only {string.Join(", ", component.Exports.Select(pattern => $"`{pattern}`"))}")
+				.Append(component.Visibility is null ? "" : $"; may be referenced only by {string.Join(", ", component.Visibility.Select(pattern => $"`{pattern}`"))}")
+				.Append('\n');
+		}
+
+		if (registry.Boundaries.Count > 0)
+		{
+			text.Append("\nBoundary rules (a component with a tag matching the source may reference only what is allowed, nothing denied):\n\n");
+			foreach (var rule in registry.Boundaries)
+			{
+				text.Append($"- `{rule.Text}`{(rule.Description is null ? "" : $" - {rule.Description}")}\n");
+			}
+		}
+
+		text.Append("\n`bassia help boundary` and `bassia help boundary check` explain the rules.\n");
+		return text.ToString();
 	}
 
 	// ----- agent process -----
@@ -174,6 +229,7 @@ internal static class AgentCommand
 			["result_error"] = component.ResultError,
 			["held"] = component.Held.Select(key => key.Display).ToList(),
 			["lock_conflict"] = LockConflictData(component.LockConflicts),
+			["boundary_violation"] = component.BoundaryViolations.Count == 0 ? null : BoundaryCommands.Describe(component.BoundaryViolations),
 			["caught_up"] = component.CaughtUp.Select(catchUp => new Dictionary<string, object?>
 			{
 				["run_id"] = catchUp.Run,
@@ -182,7 +238,8 @@ internal static class AgentCommand
 				["files"] = catchUp.Files
 			}).ToList()
 		}).ToList(),
-		["lock_conflicts"] = metadata.Components.Sum(component => component.LockConflicts.Count)
+		["lock_conflicts"] = metadata.Components.Sum(component => component.LockConflicts.Count),
+		["boundary_violations"] = metadata.Components.Sum(component => component.BoundaryViolations.Count)
 	};
 
 	/// <summary>Lock conflicts as result entries, named as in the run record.</summary>

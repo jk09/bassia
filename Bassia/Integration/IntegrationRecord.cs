@@ -106,6 +106,12 @@ internal sealed class IntegrationStep
 	/// </summary>
 	public List<string> LockConflicts { get; } = [];
 
+	/// <summary>
+	/// The code boundary violations the run's result adds over the base, described. <c>merge.boundaries</c> decides what
+	/// that means for the step.
+	/// </summary>
+	public List<string> BoundaryViolations { get; } = [];
+
 	public StepOutcome Outcome { get; set; } = StepOutcome.Pending;
 
 	/// <summary>The integration head after this step: the merge commit, or the head it left unchanged.</summary>
@@ -244,6 +250,11 @@ internal sealed class IntegrationRecord
 					stepTable["lock_conflicts"] = Array(step.LockConflicts);
 				}
 
+				if (step.BoundaryViolations.Count > 0)
+				{
+					stepTable["boundary_violations"] = Array(step.BoundaryViolations);
+				}
+
 				if (step.Structural is { } structural)
 				{
 					stepTable["structural"] = Snake(structural);
@@ -321,6 +332,7 @@ internal sealed class IntegrationRecord
 						step.Conflicts.AddRange(Strings(stepTable, "conflicts"));
 						step.ConflictsWith.AddRange(Strings(stepTable, "conflicts_with"));
 						step.LockConflicts.AddRange(Strings(stepTable, "lock_conflicts"));
+						step.BoundaryViolations.AddRange(Strings(stepTable, "boundary_violations"));
 						step.StructuralConflicts.AddRange(Strings(stepTable, "structural_conflicts"));
 						step.StructuralWarnings.AddRange(Strings(stepTable, "structural_warnings"));
 						component.Steps.Add(step);

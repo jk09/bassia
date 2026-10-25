@@ -19,6 +19,11 @@ internal sealed record ComponentDefinition(string Name, string Url, IReadOnlyLis
 
 	/// <summary>Who owns it: people or teams, as the monorepo names them.</summary>
 	public IReadOnlyList<string> Owners { get; init; } = [];
+
+	/// <summary>
+	/// Its public API: path patterns (as in split plans) a referrer's code may use; null means every path is exported.
+	/// </summary>
+	public IReadOnlyList<string>? Exports { get; init; }
 }
 
 /// <summary>A nested component and the subfolder (relative to the referencing component) where it is expected.</summary>

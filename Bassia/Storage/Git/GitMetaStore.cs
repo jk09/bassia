@@ -53,6 +53,9 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 					case RegistryChange.SetOwners set:
 						ComponentsFile.SetList(Root, set.Name, "owners", set.Owners.Count == 0 ? null : set.Owners);
 						break;
+					case RegistryChange.SetExports set:
+						ComponentsFile.SetList(Root, set.Name, "exports", set.Exports);
+						break;
 					case RegistryChange.AddBoundary add:
 						ComponentsFile.AddBoundary(Root, add.Rule);
 						break;
@@ -139,7 +142,8 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 			{
 				Tags = Strings(componentTable, "tags", $"Component '{name}'") ?? [],
 				Visibility = Strings(componentTable, "visibility", $"Component '{name}'"),
-				Owners = Strings(componentTable, "owners", $"Component '{name}'") ?? []
+				Owners = Strings(componentTable, "owners", $"Component '{name}'") ?? [],
+				Exports = Strings(componentTable, "exports", $"Component '{name}'")
 			});
 		}
 

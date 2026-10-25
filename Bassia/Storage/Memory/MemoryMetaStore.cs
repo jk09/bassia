@@ -44,6 +44,9 @@ internal sealed class MemoryMetaStore : IMetaStore
 				case RegistryChange.SetOwners set:
 					Change(set.Name, component => component with { Owners = set.Owners });
 					break;
+				case RegistryChange.SetExports set:
+					Change(set.Name, component => component with { Exports = set.Exports });
+					break;
 				case RegistryChange.AddBoundary add:
 					boundaries.Add(add.Rule);
 					break;
