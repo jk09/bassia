@@ -61,10 +61,16 @@ internal interface IComponentStore
 
 	// ----- content -----
 
-	/// <summary>The files of <paramref name="commit"/>, nested units excluded, in path order.</summary>
+	/// <summary>
+	/// The files of <paramref name="commit"/>, nested units excluded, in path order. Listing fetches no content: the size of
+	/// a file whose content the store does not hold is -1.
+	/// </summary>
 	Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit);
 
-	/// <summary>The content of the file <paramref name="path"/> at <paramref name="commit"/>, or null when it has none.</summary>
+	/// <summary>
+	/// The content of the file <paramref name="path"/> at <paramref name="commit"/>, or null when it has none. Content the
+	/// store does not hold is fetched from its upstream first.
+	/// </summary>
 	Task<byte[]?> ReadFileAsync(string commit, string path);
 
 	/// <summary>The units nested in <paramref name="commit"/> (git submodules), in path order.</summary>
@@ -84,6 +90,29 @@ internal interface IComponentStore
 
 	/// <summary>The upstream the store was imported from (git's <c>origin</c>), or null.</summary>
 	Task<string?> UpstreamAsync();
+
+	// ----- content held locally (a store imported with its history only) -----
+
+	/// <summary>
+	/// The files of <paramref name="commit"/> (all of them, or those among <paramref name="paths"/>) whose content the
+	/// store does not hold, in path order. A store with all its content has none.
+	/// </summary>
+	Task<IReadOnlyList<string>> MissingContentAsync(string commit, IReadOnlyList<string>? paths = null);
+
+	/// <summary>
+	/// Fetches the content of the files <paramref name="paths"/> of <paramref name="commit"/> from the upstream, where the
+	/// store does not hold it yet; throws <see cref="StorageException"/> when the upstream cannot provide it.
+	/// </summary>
+	Task HydrateAsync(string commit, IReadOnlyList<string> paths);
+
+	/// <summary>
+	/// Brings the upstream's branches and tags, with their history, into the store; the upstream wins where they differ.
+	/// A store imported with its history only fetches no content.
+	/// </summary>
+	Task FetchUpstreamAsync();
+
+	/// <summary>Publishes <paramref name="branch"/> and the named <paramref name="tags"/> to the upstream.</summary>
+	Task PushUpstreamAsync(string branch, IReadOnlyList<string> tags);
 
 	// ----- merging and comparing -----
 
@@ -112,7 +141,11 @@ internal interface IComponentStore
 	/// on the new branch <paramref name="branch"/>: an agent edits it, and the working copy commits, tags and publishes what
 	/// it changed back to this store.
 	/// </summary>
-	Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch);
+	/// <remarks>
+	/// With <paramref name="load"/> (path patterns, as in split plans) the working copy is sparse: only the files matching
+	/// them are materialized, their content hydrated first; <see cref="IComponentWorkspace.LoadAsync"/> adds more.
+	/// </remarks>
+	Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch, IReadOnlyList<string>? load = null);
 }
 
 /// <summary>
@@ -125,6 +158,14 @@ internal interface IComponentWorkspace
 
 	/// <summary>Leaves the file or folder at <paramref name="path"/> (relative, with <c>/</c>) out of every commit: a nested component lives there.</summary>
 	Task HideAsync(string path);
+
+	/// <summary>
+	/// Materializes the files of the head that match <paramref name="patterns"/> (path patterns, as in split plans) in a
+	/// sparse working copy, hydrating their content in the store first, and returns those it materialized now. A file a
+	/// sparse working copy never materialized stays as the head has it in every commit; one it has, it commits as any
+	/// working copy does. A working copy with all its files materializes nothing.
+	/// </summary>
+	Task<IReadOnlyList<string>> LoadAsync(IReadOnlyList<string> patterns);
 
 	/// <summary>
 	/// Commits every change in the working copy on its branch and returns the commit, or null when nothing changed.

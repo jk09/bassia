@@ -30,14 +30,19 @@ internal static class RunCommands
 		{
 			// A detached run's own process: from here on everything it prints belongs in its log.
 			output = log is null ? null : JobOutput.Redirect(log);
+			if (!invocation.Has("select") && !invocation.Has("spec"))
+			{
+				throw invocation.Usage("-select or -spec is required.");
+			}
+
 			var monorepo = AgentCommand.LoadMonorepo();
-			var select = string.Join(",", invocation.List("select"));
+			var (select, load) = await SelectionAsync(invocation, monorepo);
 			var command = ComposeCommand(invocation, monorepo);
 			var lockFiles = invocation.List("lock-files") is { Count: > 0 } files ? string.Join(",", files) : null;
 			var lockFolders = invocation.List("lock-folders") is { Count: > 0 } folders ? string.Join(",", folders) : null;
 			if (invocation.Has("detach") && log is null)
 			{
-				return await DetachAsync(invocation, monorepo, select, command, lockFiles, lockFolders);
+				return await DetachAsync(invocation, monorepo, select, command, lockFiles, lockFolders, load);
 			}
 
 			var runId = invocation.Get("id") is { } id ? RunMetadata.NormalizeRunId(id) : RunMetadata.NewRunId();
@@ -69,7 +74,7 @@ internal static class RunCommands
 				AgentRunOutcome outcome;
 				try
 				{
-					outcome = await AgentCommand.StartRunAsync(new GitClient(monorepo.Root), monorepo, select, command, context, runId, lockFiles, lockFolders);
+					outcome = await AgentCommand.StartRunAsync(new GitClient(monorepo.Root), monorepo, select, command, context, runId, lockFiles, lockFolders, load);
 				}
 				catch (OperationCanceledException)
 				{
@@ -147,9 +152,41 @@ internal static class RunCommands
 	/// <c>-detach</c>: checks the selection here, so a mistake is reported straight away, then hands the run to a
 	/// background bassia process under a pre-generated id and returns as soon as that process has registered.
 	/// </summary>
-	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, string select, string command, string? lockFiles, string? lockFolders)
+	/// <summary>A sparse run without any load rule: one that loads nothing in every component, as <c>-load</c> can say it.</summary>
+	private const string LoadNothing = "!*/**";
+
+	/// <summary>
+	/// The run's selection and load rules: <c>-select</c> with <c>-load</c>, or a config spec (<c>-spec</c>) resolved to its
+	/// mapping pinned at the resolved commits, with its load rules and any <c>-load</c> given besides.
+	/// </summary>
+	private static async Task<(string Select, IReadOnlyList<string>? Load)> SelectionAsync(Invocation invocation, Monorepo monorepo)
+	{
+		var select = string.Join(",", invocation.List("select"));
+		IReadOnlyList<string>? load = invocation.List("load") is { Count: > 0 } rules ? rules : null;
+		if (invocation.Get("spec") is not { } source)
+		{
+			return select.Length > 0 ? (select, load) : throw invocation.Usage("-select or -spec is required.");
+		}
+
+		if (select.Length > 0)
+		{
+			throw invocation.Usage("-select and -spec exclude each other: a config spec selects the components itself.");
+		}
+
+		var resolved = await Views.ResolveAsync(ConfigSpec.Parse(await ViewCommands.ReadSpecAsync(source)), monorepo.Graph(), monorepo.Depot);
+		List<string> all = [.. resolved.LoadRules, .. load ?? []];
+		return (resolved.PinnedSelect, all.Count > 0 ? all : [LoadNothing]);
+	}
+
+	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, string select, string command, string? lockFiles, string? lockFolders,
+		IReadOnlyList<string>? load)
 	{
 		var (closure, _) = await AgentCommand.ResolveSelectionAsync(monorepo, select);
+		if (load is not null)
+		{
+			AgentRuns.LoadPatterns(load, closure);
+		}
+
 		AgentCommand.CheckLockPatterns(monorepo, closure, lockFiles, lockFolders);
 		var runId = RunMetadata.NewRunId();
 		var jobs = new JobRegistry(monorepo);
@@ -166,6 +203,11 @@ internal static class RunCommands
 		if (lockFolders is not null)
 		{
 			arguments.AddRange(["-lock-folders", lockFolders]);
+		}
+
+		if (load is not null)
+		{
+			arguments.AddRange(["-load", string.Join(",", load)]);
 		}
 
 		using var process = DetachedProcess.Start(monorepo.Root, [.. arguments, "-run", command]);
@@ -193,7 +235,8 @@ internal static class RunCommands
 				["select"] = select,
 				["agent_command"] = command,
 				["lock_files"] = lockFiles,
-				["lock_folders"] = lockFolders
+				["lock_folders"] = lockFolders,
+				["load"] = load
 			});
 	}
 

@@ -20,7 +20,8 @@ internal static class CommandCatalog
 		"agent list", "agent show", "agent logs", "agent wait", "agent diff",
 		"lock list", "lock check",
 		"integration plan", "integration list", "integration show", "integration logs", "integration wait",
-		"skill list", "skill show", "help", "web"
+		"skill list", "skill show", "help", "web",
+		"view list", "view show", "view ls"
 	};
 
 	/// <summary>

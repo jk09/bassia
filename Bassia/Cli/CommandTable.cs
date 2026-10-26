@@ -80,6 +80,15 @@ internal static class CommandTable
 		"(resolver|manual|merge): a result that changed a path another run held; both per component as lock.component.<component>.<setting>; " +
 		"lock.ttl (seconds): how long a hold lasts without its run renewing it.";
 
+	private const string ViewDetails = "A config spec is line rules, # starting a comment: 'map <component>[,...]' maps the components and, transitively, " +
+		"what they reference; 'select <component-pattern> <version>' picks a version - a branch (followed by 'view update'), a tag or a commit hash - " +
+		"the first matching rule winning, a component no rule matches at its default branch's tip; 'load [!]<component-pattern>[/<path-pattern>]' " +
+		"names the files to download and write (path patterns as in split plans: ** any folders, * within one segment, a folder is everything below " +
+		"it; ! leaves files out). A mapped component nothing loads is there without files, its whole tree listed by 'view ls' and loaded on " +
+		"request by 'view load'. In a clone (bassia clone, depot.url) a component without a local repository is imported from the depot, history " +
+		"only, when a view first maps it, and content is downloaded file by file as it is loaded. The view folder holds .bassia-view.toml, so view " +
+		"commands work from anywhere inside it.";
+
 	public static readonly IReadOnlyList<CommandSpec> Commands =
 	[
 		// ----- the monorepo -----
@@ -392,6 +401,78 @@ internal static class CommandTable
 			UserCommands.UseAsync, Positional: "id",
 			Details: UserDetails),
 
+		// ----- clones and views -----
+
+		new("clone", null, "Clone a monorepo (the depot) as a cache: its meta-repo and each component's history without file content, which views and sparse runs download as they load files.",
+			[
+				new("from", "depot", "The monorepo to clone: its root folder, or a URL under which .bassia and each component are repositories.", Required: true),
+				new("path", "directory", "Where to clone it (default: a folder named after the depot); empty or new."),
+				new("lazy", null, "Import no component's history yet: a view imports the components it maps.")
+			],
+			["bassia clone -from /srv/monorepo -path work", "bassia clone -from https://git.example.com/mono -lazy"],
+			DepotCommands.CloneAsync, Positional: "from",
+			Details: ViewDetails),
+
+		new("fetch", null, "Bring a clone up to its depot: the meta-repo (fast-forward) and every component's history, without file content.",
+			[],
+			["bassia fetch"],
+			DepotCommands.FetchAsync,
+			Details: "Components the depot registered since are imported (history only) unless the clone is lazy (depot.lazy). Views move to new " +
+				"versions with 'bassia view update'."),
+
+		new("view", "create", "Map the components of a config spec onto a folder: each mapped component and what it references, side by side, with only the files the spec loads downloaded and written.",
+			[
+				new("name", "view", "The view's name.", Required: true),
+				new("spec", "file|-", "The config spec (map, select and load rules), or - to read it from stdin.", Required: true),
+				new("path", "directory", "Where to map it (default: <workspace>/view-<name>); empty or new, anywhere on this machine.")
+			],
+			["bassia view create -name parser -spec parser.spec", "bassia view create -name docs -spec - -path /tmp/docs"],
+			ViewCommands.CreateAsync,
+			Details: ViewDetails),
+
+		new("view", "list", "List the views of this monorepo with their components and folders, as a table and as [[view]] entries.",
+			[],
+			["bassia view list"],
+			ViewCommands.ListAsync),
+
+		new("view", "show", "Show a view: its config spec and, per component, the version, commit, load rules and how many of its files are loaded.",
+			[new("name", "view", "The view (default: the one the working directory is in).")],
+			["bassia view show -name parser", "bassia view show"],
+			ViewCommands.ShowAsync, Positional: "name"),
+
+		new("view", "ls", "List every file a view maps - read from the history, downloading nothing - with whether it is loaded and its size when known.",
+			[
+				new("name", "view", "The view (default: the one the working directory is in)."),
+				new("path", "component[/pattern]", "Only these files: a component (or a pattern of them) and a path pattern in it."),
+				new("loaded", null, "Only the loaded files."),
+				new("unloaded", null, "Only the files not loaded yet.")
+			],
+			["bassia view ls", "bassia view ls -path app/src -unloaded", "bassia view ls -name parser -path \"*/README.md\""],
+			ViewCommands.LsAsync),
+
+		new("view", "load", "Download and write more of a view: files, folders or path patterns, each relative to the working directory inside the view (or to the view's folder), as <component>/<path>.",
+			[
+				new("path", "path,...", "What to load: app/src/main.c, app/src (a folder), app/**/*.h; a path through a nested component (app/lib/x.h) loads it from that component.", Required: true),
+				new("name", "view", "The view (default: the one the working directory is in - a view or a sparse run folder).")
+			],
+			["bassia view load -path app/src/parser.c", "bassia view load -path \"app/include/**/*.h,lib\"", "bassia view load lib/README.md"],
+			ViewCommands.LoadAsync, Positional: "path",
+			Details: "Every path must match a mapped file, or nothing is loaded. The load rule is recorded in the view, so 'view update' keeps it. " + ViewDetails),
+
+		new("view", "update", "Move a view to what its config spec names now: fetch the mapped components from the depot, resolve the versions again and check out every component whose commit changed, keeping its load rules.",
+			[new("name", "view", "The view (default: the one the working directory is in).")],
+			["bassia view update -name parser", "bassia view update"],
+			ViewCommands.UpdateAsync, Positional: "name",
+			Details: "A component with uncommitted changes in the view stays where it is and is reported. A component that now maps differently (its references changed) needs the view made again."),
+
+		new("view", "remove", "Remove a view: its folder and its registration.",
+			[
+				new("name", "view", "The view.", Required: true),
+				new("force", null, "Remove it even though files in it were changed (the changes are lost).")
+			],
+			["bassia view remove -name parser"],
+			ViewCommands.RemoveAsync, Positional: "name"),
+
 		// ----- architectural boundaries -----
 
 		new("boundary", "list", "List the boundary rules of components.toml - which tagged components may reference which - and the components' visibility.",
@@ -569,7 +650,9 @@ internal static class CommandTable
 
 		new("agent", "start", "Start an agentic run: materialize the selected components at their tags, hashes or default-branch tips in an isolated run folder, run the agent there, then commit, tag and push each changed component.",
 			[
-				new("select", "component[@tag|hash],...", "Every component of the run: a bare name starts from the tip of its default branch (resolved and recorded when the run starts), or add an annotated tag or a commit hash (6 to 40 lowercase hex digits, unambiguous in the component); must cover the components they reference.", Required: true),
+				new("select", "component[@tag|hash],...", "Every component of the run: a bare name starts from the tip of its default branch (resolved and recorded when the run starts), or add an annotated tag or a commit hash (6 to 40 lowercase hex digits, unambiguous in the component); must cover the components they reference. Required unless -spec is given."),
+				new("spec", "file|-", "Run on a config spec's mapping instead of -select (see 'bassia help view create'): its components pinned at the commits their versions name, only the files its load rules match on disk."),
+				new("load", "[!]component/pattern,...", "Make the run sparse: only these files are materialized (path patterns as in split plans; component/ alone is all of it); the agent loads more with 'bassia view load'."),
 				new("detach", null, "Return at once and continue in the background; follow with agent show/logs/wait, stop with agent stop."),
 				new("prompt", "text", "Compose the agent command from this prompt and the configured agent.command."),
 				new("agent", "command", "With -prompt: the agent command to use instead of agent.command."),
@@ -588,14 +671,18 @@ internal static class CommandTable
 				"bassia agent start -select lib@v1 -run claude -p \"refactor the parser\" --permission-mode acceptEdits",
 				"bassia agent start -select app@3f9c2e1,lib@v1 -prompt \"bisect the regression\"",
 				"bassia agent start -select app,lib -prompt \"update the docs\"",
-				"bassia agent start -select app,lib -lock-folders \"app:src/*\" -prompt \"rewrite the parser\""
+				"bassia agent start -select app,lib -lock-folders \"app:src/*\" -prompt \"rewrite the parser\"",
+				"bassia agent start -spec parser.spec -prompt \"fix the parser's error messages\"",
+				"bassia agent start -select app,lib -load app/src/parser,lib/include -prompt \"rename Token to Lexeme\""
 			],
 			RunCommands.StartAsync,
-			Usage: "bassia agent start -select <component[@tag|hash],...> [-detach] [-lock-files <[component:]pattern,...>] [-lock-folders <[component:]pattern,...>] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
+			Usage: "bassia agent start (-select <component[@tag|hash],...> [-load <[!]component/pattern,...>] | -spec <file|->) [-detach] [-lock-files <[component:]pattern,...>] [-lock-folders <[component:]pattern,...>] (-prompt <text> [-agent <command>] [-model <model>] [-effort <level>] [-context <text>] | -run <command...>)",
 			Details: "Without -detach the agent's output streams to the terminal and the result follows when the run ends; Ctrl-C stops the run and records it as cancelled. " +
 				"With -detach the selection is checked first, then the run continues in a background bassia process and the result (run_id, pid, log) is printed at once. " +
 				"The agent runs in the run folder with BASSIA_ROOT, BASSIA_RUN_ID and BASSIA_RUN_DIR set. What it changes is held for the run as the lock " +
-				"filter says (see 'bassia help lock list'); when the filter locks anything, the run folder gets an AGENTS.md and a CLAUDE.md explaining it."),
+				"filter says (see 'bassia help lock list'); when the filter locks anything, the run folder gets an AGENTS.md and a CLAUDE.md explaining it. " +
+				"A run with -spec or -load is sparse: the run folder is a view (see 'bassia help view'), its guide tells the agent how to load more, and in a " +
+				"clone (depot.url) every result is pushed on to the depot as well."),
 
 		new("agent", "list", "List runs newest first - recorded ones and those still preparing - as a table and as [[run]] entries.",
 			[

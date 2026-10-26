@@ -29,6 +29,13 @@ internal interface IComponentStorage
 	Task<IComponentStore> ImportAsync(string name, string url);
 
 	/// <summary>
+	/// A new store with the history of the repository at <paramref name="url"/> - commits, branches, tags and file
+	/// listings - but none of the files' content: a cache that fetches content from <paramref name="url"/>, its upstream,
+	/// when it is needed (see <see cref="IComponentStore.HydrateAsync"/>).
+	/// </summary>
+	Task<IComponentStore> ImportHistoryAsync(string name, string url);
+
+	/// <summary>
 	/// A new store holding <paramref name="source"/>'s history up to <paramref name="commit"/> on the single branch
 	/// <paramref name="branch"/> (pointing at <paramref name="commit"/>), the named <paramref name="tags"/> and nothing else.
 	/// Commit ids are preserved. <paramref name="url"/>, when not empty, is its upstream.

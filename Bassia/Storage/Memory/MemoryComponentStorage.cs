@@ -60,6 +60,13 @@ internal sealed class MemoryComponentStorage(MemoryUpstreams? upstreams = null) 
 
 	public Task<IComponentStore> ImportAsync(string name, string url) => Task.FromResult<IComponentStore>(Put(Clone(name, url)));
 
+	public Task<IComponentStore> ImportHistoryAsync(string name, string url)
+	{
+		var store = Clone(name, url);
+		store.DropContent();
+		return Task.FromResult<IComponentStore>(Put(store));
+	}
+
 	public Task<IComponentStore> ForkAsync(IComponentStore source, string name, string branch, string commit, IReadOnlyList<string> tags, string url)
 	{
 		var parent = (MemoryComponentStore)source;

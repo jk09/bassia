@@ -17,7 +17,8 @@ internal static class UserCommands
 	/// <summary>Commands that change the monorepo without a known user: becoming known, setting a monorepo up, the guide, feedback.</summary>
 	private static readonly IReadOnlySet<string> Unattributed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
 	{
-		"user add", "user use", "init", "tutorial", "feedback send", "feedback reports", "feedback pending"
+		"user add", "user use", "init", "tutorial", "feedback send", "feedback reports", "feedback pending",
+		"clone", "fetch", "view create", "view load", "view update", "view remove"
 	};
 
 	/// <summary>

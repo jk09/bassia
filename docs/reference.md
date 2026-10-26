@@ -267,6 +267,8 @@ component, is rejected and nothing changes.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `workspace.path` | `.workspace` | Folder of the run and integration checkouts (and of `.jobs`) |
+| `depot.url` | (none) | The monorepo this one is a clone of (set by `bassia clone` in the user layer): views import missing components from it, and runs push their results to it |
+| `depot.lazy` | `false` | `true`: the clone imports a component's history only when a view maps it (`bassia clone -lazy`) |
 | `agent.command` | `claude -p --permission-mode acceptEdits` | Agent command of a run started from `-prompt` |
 | `agent.commit.subject` | `agent({short_id}): {summary}` | Subject of a run's result commits |
 | `integration.resolver` | `claude -p --permission-mode acceptEdits` | Command that resolves a semantic merge |
@@ -648,6 +650,87 @@ path = 'D:\bassia-workspace'
 
 `Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
 
+### Clones and views: a virtual monorepo
+
+Bassia can work like a client-server VCS with a virtual filesystem (ClearCase, Perforce) without a filesystem driver.
+A *clone* is a monorepo that caches another one, its *depot*; a *view* maps the components a *config spec* names onto
+any folder, and downloads a file's content only when it is loaded. That suits an agent working in an ad-hoc place - a
+cloud worker - on a part of a large monorepo.
+
+```sh
+bassia clone -from /srv/monorepo -path work        # meta-repo + every component's history, no file content
+bassia clone -from https://git.example.com/mono -lazy   # meta-repo only; a view imports what it maps
+cd work
+bassia view create -name parser -spec parser.spec  # map and load what the spec says
+bassia view ls -path app/src -unloaded             # the whole mapped tree, from history only
+bassia view load -path app/docs,lib/README.md      # download and write more
+bassia agent start -spec parser.spec -prompt "fix the parser's error messages"
+bassia fetch                                       # meta-repo and histories from the depot
+bassia view update -name parser                    # move the view to what its spec names now
+```
+
+**Clones.** `bassia clone -from <depot> [-path <dir>] [-lazy]` clones the depot's meta-repo and imports every
+registered component's history - commits, branches, tags, file listings - without any file content (git: a bare
+partial clone, `--filter=blob:none`). A depot is a monorepo root: a folder, or a URL under which `.bassia` and each
+component are repositories. The clone records it as `depot.url` (and `-lazy` as `depot.lazy`) in its own
+`config.user.toml`. With `-lazy` no component is imported until a view maps it. `bassia fetch` fast-forwards the
+meta-repo and fetches every component's branches and tags from the depot (the depot wins), importing new components
+unless the clone is lazy. In a clone, an agentic run's result branch and tags are pushed to the depot as well as to
+the clone's store (write-through); a push that fails leaves the component `failed`, and `agent retry` pushes again.
+Run records stay in the clone; integration happens on the depot.
+
+**Config specs.** A config spec is a text of line rules; `#` starts a comment:
+
+```
+# the parser and what it needs
+map app                 # app and, transitively, every component it references
+select lib v2           # lib at the tag v2
+select * main           # anything else at the tip of main (the default: its default branch)
+load app/src            # materialize app's src folder
+load !app/src/generated # ... except this
+load lib/include/**/*.h
+```
+
+- `map <component>[,<component>...]` maps the components and their reference closure, as runs select it.
+- `select <component-pattern> <version>` picks a mapped component's version: a branch (followed by `view update`), a
+  tag (annotated or not) or a commit hash (unambiguous). The first rule whose pattern (`*`, `?`) matches wins; a
+  component no rule matches is at the tip of its default branch.
+- `load [!]<component-pattern>[/<path-pattern>]` names the files to download and write, with the path patterns of
+  split plans (`**` any folders, `*` within a segment, a folder is everything below it; `load app` is all of app); `!`
+  leaves files out. A mapped component nothing loads is there without any file.
+
+A rule that does not parse, a component that is not registered, a load rule that matches no mapped component and a
+version that names no single commit are errors naming the spec's line.
+
+**Views.** `bassia view create -name <view> -spec <file|-> [-path <dir>]` resolves the spec, imports missing
+histories from the depot, and checks out every mapped component side by side in the view's folder (default
+`<workspace>/view-<name>`), each referenced component nested inside its referrer as a link, as in a run. Every working
+copy is sparse: only the files the load rules match are downloaded and written (git: a partial clone of the store with
+a sparse checkout of exactly those files; the store fetches their content from the depot first, since git cannot fetch
+through it). A file not loaded is absent from disk, never a stub. The folder holds `.bassia-view.toml` - the spec, each
+component's version, commit and load rules, and the monorepo's root - so every view command also works from inside the
+view, even outside the monorepo, and views are registered locally in `<root>/.views`, never in the meta-repo.
+
+- `view list` and `view show [-name]` describe the views; `view ls [-path <component>[/<pattern>]] [-loaded|-unloaded]`
+  lists every mapped file from the history - downloading nothing - with whether it is loaded and its size when the
+  clone holds its content.
+- `view load -path <path>,...` downloads and writes files, folders or patterns, relative to the working directory
+  inside the view (else to the view's folder), as `<component>/<path>`; a path through a nested component
+  (`app/lib/x.h`) loads from that component. Every path must match a mapped file, or nothing is loaded. The rule is
+  added to the manifest.
+- `view update [-name]` fetches the mapped components from the depot, resolves the spec again and checks out each
+  component whose commit changed at its new commit with the same load rules; a component with uncommitted changes
+  stays where it is and is reported.
+- `view remove -name <view> [-force]` deletes the folder and the registration; changed files keep it unless `-force`.
+
+**Sparse runs.** `agent start -spec <file|->` runs on a config spec's mapping: the selection is the mapped closure
+pinned at the commits the versions resolved to (so the record stays reproducible) and the working copies are sparse
+with the spec's load rules. `-select ... -load <[!]component/pattern,...>` makes any run sparse the same way. The run
+folder is a view of kind `run`: its `AGENTS.md`/`CLAUDE.md` tell the agent to list the mapped files with `bassia view
+ls` and to fetch what it needs with `bassia view load`. Files the run never loaded are unchanged in its result; files
+the agent writes anywhere are committed as usual. The run record keeps the load rules (`load`). The code boundary check
+after the run still reads the files it scans, so in a clone it downloads them.
+
 ### Users: who did what
 
 With several people and their agents working in one monorepo, everything Bassia does is attributed to a user, so
@@ -994,6 +1077,12 @@ Bassia has three layers; each depends only on the ones below it.
 3. **Commands** (`Bassia/CliCommands`, `Bassia/Web`) - parse, call the graph for the monorepo on disk
    (`Monorepo.Graph()`), and format results.
 
+A store may hold its history without the files' content (`IComponentStorage.ImportHistoryAsync`, a clone of a
+depot): it lists files without fetching them (size -1), reports what it lacks (`MissingContentAsync`), fetches it from
+its upstream on request (`HydrateAsync`) or when a file is read, and follows or publishes to its upstream
+(`FetchUpstreamAsync`, `PushUpstreamAsync`). A checkout with load patterns is sparse and `IComponentWorkspace.LoadAsync`
+materializes more; views (`Core/Views`: `ConfigSpec`, `Views`, `ViewManifest`, `Depot`) and sparse runs build on that.
+
 A replacement for git implements the storage contract; nothing in the component graph, the integration or locking
 changes. `bassia log`, `agent diff`, `component survey` and the dashboard's history views still read git directly; the
 lock table (`.locks`) is a file store for coordinating processes, not component history.
@@ -1034,7 +1123,9 @@ and integration commands, including detached runs and stopping them, which start
 background process. `ComponentSplitTests` splits a component with a branchy history (moves into and between
 parts, a merge, tags, a dropped folder, a path reused after its file moved away) and checks every part's files,
 `git log --follow`, tags, record commit and registration, plus plan errors, dry runs, rollback and the survey.
-`LockTests` covers the lock filter and keys, the lock table's expiry, dead processes, deadlocks and a suspended run
+`ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
+store fetched so laziness is proven, and write-through with its retry; `ViewCommandTests` clones a local depot and checks
+with git which file contents each step downloaded. `LockTests` covers the lock filter and keys, the lock table's expiry, dead processes, deadlocks and a suspended run
 losing its holds, and - with a detached run holding while a second run starts - implicit holds, conflicts and what
 `lock.conflict` makes of them, `lock claim` and a timed-out `lock wait`, and `lock wait` bringing the holder's result in.
 `ParallelAgentRunEndToEndTests`
