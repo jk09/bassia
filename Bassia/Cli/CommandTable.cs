@@ -60,7 +60,8 @@ internal static class CommandTable
 
 	private const string TaskDetails = "A component's tasks are [tasks.<name>] tables in bassia.toml at its root: command (a shell line run in the " +
 		"component's folder) and depends_on - 'x' runs the component's own task x first, '^x' runs task x of every component it references, " +
-		"transitively, first (depends_on = [\"^build\"]). A component without bassia.toml has no tasks.";
+		"transitively, first (depends_on = [\"^build\"]). cache = true lets an unchanged task be restored instead of run, with the files " +
+		"outputs = [patterns] names (see 'bassia help task cache'). A component without bassia.toml has no tasks.";
 
 	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
 		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
@@ -416,7 +417,8 @@ internal static class CommandTable
 			[
 				new("task", "task,...", "The tasks to run (build, test, ...).", Required: true),
 				new("select", "component[@tag|hash],...", "What to check out and run them in (default: every component at its main-branch tip; inside a run folder: the run's own checkout)."),
-				new("keep", null, "Keep the checkout after the tasks passed (a failure always keeps it).")
+				new("keep", null, "Keep the checkout after the tasks passed (a failure always keeps it)."),
+				new("no-cache", null, "Run every task, also those the cache could restore.")
 			],
 			["bassia task run -task build", "bassia task run -task test -select app,lib@v2", "bassia task run test"],
 			TaskCommands.RunAsync, Positional: "task",
@@ -424,6 +426,15 @@ internal static class CommandTable
 				"to a log under <workspace>/.task-logs. The checkout is a folder under the workspace (tasks-<key>), removed when every task " +
 				"passed unless -keep. Inside an agentic run (BASSIA_RUN_DIR set) and without -select, the tasks run on the run's own checkout, " +
 				"as the agent left it. " + TaskDetails),
+
+		new("task", "cache", "Show the task cache - where it is, how many results it holds and their size - or empty it.",
+			[new("clear", null, "Remove every cached result.")],
+			["bassia task cache", "bassia task cache -clear"],
+			TaskCommands.CacheAsync,
+			Details: "A task marked cache = true in its bassia.toml is restored from <workspace>/.task-cache instead of run while its key is " +
+				"unchanged: its command, depends_on and outputs, the platform, and the content of its component and of every component it " +
+				"references (their commits in a checkout made from commits, a hash of their files in a run folder). A restore copies back the " +
+				"task's outputs and its log. Only passed runs are stored."),
 
 		new("affected", null, "List the components a change affects: the components runs changed (or the ones named), and every component that references one of them, transitively.",
 			[

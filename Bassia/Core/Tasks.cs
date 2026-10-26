@@ -9,9 +9,13 @@ using Tomlyn.Model;
 /// <summary>
 /// One task of a component: a shell command run in the component's folder, after the tasks it depends on. An entry
 /// <c>x</c> of <paramref name="DependsOn"/> is the component's own task <c>x</c>; <c>^x</c> is task <c>x</c> of every
-/// component in its closure that defines it.
+/// component in its closure that defines it. A <paramref name="Cache"/>d task is not run again while its inputs are
+/// unchanged; <paramref name="Outputs"/> (path patterns relative to the component) are what the cache restores.
 /// </summary>
-internal sealed record ComponentTask(string Name, string Command, IReadOnlyList<string> DependsOn);
+internal sealed record ComponentTask(string Name, string Command, IReadOnlyList<string> DependsOn, bool Cache = false, IReadOnlyList<string>? Outputs = null)
+{
+	public IReadOnlyList<string> OutputPatterns => Outputs ?? [];
+}
 
 /// <summary>
 /// A component's tasks, from <c>bassia.toml</c> at its root:
@@ -19,6 +23,8 @@ internal sealed record ComponentTask(string Name, string Command, IReadOnlyList<
 /// [tasks.build]
 /// command = "dotnet build"
 /// depends_on = ["^build"]
+/// cache = true
+/// outputs = ["bin", "obj"]
 /// </code>
 /// </summary>
 internal static class TaskFile
@@ -57,9 +63,29 @@ internal static class TaskFile
 				throw new MonorepoException($"{where} needs a 'command'.");
 			}
 
-			foreach (var key in task.Keys.Where(key => key is not ("command" or "depends_on" or "description")))
+			foreach (var key in task.Keys.Where(key => key is not ("command" or "depends_on" or "description" or "cache" or "outputs")))
 			{
-				throw new MonorepoException($"{where} has the unknown key '{key}'; expected command, depends_on and description.");
+				throw new MonorepoException($"{where} has the unknown key '{key}'; expected command, depends_on, cache, outputs and description.");
+			}
+
+			var cache = task.TryGetValue("cache", out var cacheValue) && (cacheValue as bool? ?? throw new MonorepoException($"{where}: 'cache' must be true or false."));
+			List<string>? outputs = null;
+			if (task.TryGetValue("outputs", out var outputsValue))
+			{
+				if (outputsValue is not TomlArray outputArray || outputArray.Any(item => item is not string))
+				{
+					throw new MonorepoException($"{where}: 'outputs' must be an array of path patterns.");
+				}
+
+				outputs = outputArray.Cast<string>().ToList();
+				try
+				{
+					_ = new Split.PathPatterns(outputs);
+				}
+				catch (ArgumentException ex)
+				{
+					throw new MonorepoException($"{where}: 'outputs': {ex.Message}");
+				}
 			}
 
 			var dependsOn = new List<string>();
@@ -73,7 +99,7 @@ internal static class TaskFile
 				dependsOn.AddRange(array.Cast<string>());
 			}
 
-			tasks[name] = new ComponentTask(name, commandText, dependsOn);
+			tasks[name] = new ComponentTask(name, commandText, dependsOn, cache, outputs);
 		}
 
 		return tasks;
@@ -185,10 +211,17 @@ internal static class TaskPlan
 internal sealed record TaskRequest(PlannedTask Task, string Directory, IReadOnlyDictionary<string, string> Environment, string LogPath, CancellationToken Cancellation);
 
 /// <summary>How a task ended: its exit code (null when it was cancelled), how long it took and where its output is.</summary>
-internal sealed record TaskResult(string Component, string Task, string Command, int? ExitCode, double Seconds, string LogPath)
+/// <remarks><paramref name="Cached"/>: restored from the task cache instead of run; <paramref name="Seconds"/> is then the original run's.</remarks>
+internal sealed record TaskResult(string Component, string Task, string Command, int? ExitCode, double Seconds, string LogPath, bool Cached = false)
 {
 	public bool Ok => ExitCode == 0;
 }
+
+/// <summary>
+/// The cache a task run uses: the cache, the graph (for each task's closure) and each component's content fingerprint
+/// - its commit for a checkout made from one, a hash of its files for a working copy that may have changed.
+/// </summary>
+internal sealed record TaskCaching(TaskCache Cache, ComponentRegistry Registry, IReadOnlyDictionary<string, string> Fingerprints);
 
 /// <summary>Runs planned tasks in a materialized folder, one after another, until one fails.</summary>
 internal static class TaskRunner
@@ -214,9 +247,13 @@ internal static class TaskRunner
 	/// Runs <paramref name="plan"/> in <paramref name="folder"/> (each task in <c>&lt;folder&gt;/&lt;component&gt;</c>), its logs
 	/// in <paramref name="logFolder"/>, and stops after the first task that fails; returns what ran.
 	/// </summary>
+	/// <remarks>
+	/// With <paramref name="caching"/>, a task marked <c>cache = true</c> is restored from the cache when its key has an
+	/// entry, and stored there when it passes.
+	/// </remarks>
 	public static async Task<IReadOnlyList<TaskResult>> RunAsync(IReadOnlyList<PlannedTask> plan, string folder, string logFolder,
 		IReadOnlyDictionary<string, string> environment, Func<TaskRequest, Task<int?>>? run = null, Action<TaskResult>? finished = null,
-		CancellationToken cancellation = default)
+		CancellationToken cancellation = default, TaskCaching? caching = null)
 	{
 		run ??= RunShellAsync;
 		Directory.CreateDirectory(logFolder);
@@ -224,10 +261,22 @@ internal static class TaskRunner
 		foreach (var task in plan)
 		{
 			var log = Path.Combine(logFolder, $"{task.Component}-{task.Task.Name}.log");
-			var env = new Dictionary<string, string>(environment) { ["BASSIA_TASK"] = task.Task.Name, ["BASSIA_COMPONENT"] = task.Component };
-			var clock = Stopwatch.StartNew();
-			var exitCode = await run(new TaskRequest(task, Path.Combine(folder, task.Component), env, log, cancellation));
-			var result = new TaskResult(task.Component, task.Task.Name, task.Task.Command, exitCode, Math.Round(clock.Elapsed.TotalSeconds, 2), log);
+			var componentFolder = Path.Combine(folder, task.Component);
+			var key = caching is not null && task.Task.Cache ? TaskCache.Key(caching.Registry, task, caching.Fingerprints) : null;
+			var result = key is null ? null : caching!.Cache.TryRestore(key, task, componentFolder, log);
+			if (result is null)
+			{
+				var env = new Dictionary<string, string>(environment) { ["BASSIA_TASK"] = task.Task.Name, ["BASSIA_COMPONENT"] = task.Component };
+				var clock = Stopwatch.StartNew();
+				var exitCode = await run(new TaskRequest(task, componentFolder, env, log, cancellation));
+				result = new TaskResult(task.Component, task.Task.Name, task.Task.Command, exitCode, Math.Round(clock.Elapsed.TotalSeconds, 2), log);
+				if (key is not null)
+				{
+					var nested = caching!.Registry.Find(task.Component)?.References.Select(reference => reference.Path).ToList() ?? [];
+					caching.Cache.Store(key, task, result, componentFolder, nested);
+				}
+			}
+
 			results.Add(result);
 			finished?.Invoke(result);
 			if (!result.Ok)

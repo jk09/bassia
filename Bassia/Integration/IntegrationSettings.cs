@@ -25,6 +25,9 @@ internal sealed class IntegrationSettings
 	/// <summary>Runs a task of the verification gate; returns its exit code, or null when it was cancelled. By default a shell command.</summary>
 	public Func<Core.TaskRequest, Task<int?>> RunTask { get; init; } = Core.TaskRunner.RunShellAsync;
 
+	/// <summary>The task cache the verification gate restores unchanged tasks from; null runs every task.</summary>
+	public Core.TaskCache? TaskCache { get; init; }
+
 	/// <summary>Runs a resolver; returns its exit code, or null when it was cancelled. By default a shell command.</summary>
 	public Func<ResolverRequest, Task<int?>> RunResolver { get; init; } = request =>
 		ShellCommand.RunAsync(request.Command, request.Directory, request.Environment, request.Brief, request.OnOutput, request.Cancellation);
@@ -33,6 +36,7 @@ internal sealed class IntegrationSettings
 	{
 		WorkspaceDir = monorepo.WorkspaceDir,
 		Root = monorepo.Root,
+		TaskCache = Core.TaskCache.In(monorepo.WorkspaceDir),
 		MergePolicyFor = monorepo.MergePolicyFor,
 		LockPolicyFor = component => LockFilter.ConflictPolicy(monorepo.Config, component)
 	};
