@@ -84,9 +84,14 @@ internal static class ProgramCli
 		try
 		{
 			var invocation = Invocation.Parse(spec, rest);
-			return invocation.HelpRequested
-				? Help.Show(spec.Sub is null ? [spec.Name] : [spec.Name, spec.Sub])
-				: await spec.Handler(invocation);
+			if (invocation.HelpRequested)
+			{
+				return Help.Show(spec.Sub is null ? [spec.Name] : [spec.Name, spec.Sub]);
+			}
+
+			// Everything the command writes is attributed to the current user (see UserCommands.ActorForAsync).
+			using var actor = Actor.Use(await UserCommands.ActorForAsync(spec));
+			return await spec.Handler(invocation);
 		}
 		catch (CliUsageException ex)
 		{

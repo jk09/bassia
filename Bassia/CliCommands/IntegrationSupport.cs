@@ -51,6 +51,7 @@ internal static class IntegrationSupport
 	{
 		["integration_id"] = outcome.Record.IntegrationId,
 		["status"] = outcome.Record.Status,
+		["user"] = outcome.Record.User,
 		["workspace"] = outcome.Record.WorkspacePath,
 		["runs"] = outcome.Record.Runs,
 		["structural_driver"] = outcome.Record.StructuralDriver,

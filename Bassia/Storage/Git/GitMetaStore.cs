@@ -30,16 +30,93 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 	/// <summary>The boundary rules (<c>[[boundary]]</c>) of <c>components.toml</c> under <paramref name="root"/>, as written.</summary>
 	public static IReadOnlyList<Core.BoundaryRule> ReadBoundaries(string root) => ReadBoundaries(ReadToml(ComponentsFile.PathOf(root)));
 
+	public Task<IReadOnlyList<Core.UserDefinition>> LoadUsersAsync() => Task.FromResult(ReadUsers(Root));
+
+	/// <summary><c>users.toml</c> in the meta-repo: the user registry.</summary>
+	public static string UsersPath(string root) => Path.Combine(root, Monorepo.MetaRepoFolderName, "users.toml");
+
+	/// <summary>The users of <c>users.toml</c> under <paramref name="root"/>, as written.</summary>
+	public static IReadOnlyList<Core.UserDefinition> ReadUsers(string root)
+	{
+		var users = new List<Core.UserDefinition>();
+		var table = ReadToml(UsersPath(root));
+		if (!table.TryGetValue("user", out var entries))
+		{
+			return users;
+		}
+
+		if (entries is not TomlTableArray tables)
+		{
+			throw new MonorepoException("users.toml: 'user' must be an array of tables ([[user]]).");
+		}
+
+		foreach (var (user, index) in tables.Select((user, index) => (user, index)))
+		{
+			var where = $"users.toml [[user]] #{index + 1}";
+			string? Text(string key, bool required) => user.TryGetValue(key, out var value)
+				? value as string ?? throw new MonorepoException($"{where}: '{key}' must be a string.")
+				: required ? throw new MonorepoException($"{where} has no '{key}'.") : null;
+			foreach (var key in user.Keys.Where(key => key is not ("id" or "name" or "email" or "contact" or "key")))
+			{
+				throw new MonorepoException($"{where}: unknown key '{key}'; expected id, name, email, contact and key.");
+			}
+
+			users.Add(new Core.UserDefinition(Text("id", true)!, Text("name", true)!, Text("email", true)!, Text("contact", false), Text("key", false)));
+		}
+
+		return users;
+	}
+
+	private static string UsersText(IEnumerable<Core.UserDefinition> users)
+	{
+		var text = new System.Text.StringBuilder("# Bassia monorepo users: who locks, runs, tags and commits are attributed to.\n" +
+			"# Managed by 'bassia user add|set|remove'.\n");
+		foreach (var user in users)
+		{
+			text.Append($"\n[[user]]\nid = {ConfigFile.Quote(user.Id)}\nname = {ConfigFile.Quote(user.Name)}\nemail = {ConfigFile.Quote(user.Email)}\n");
+			if (user.Contact is not null)
+			{
+				text.Append($"contact = {ConfigFile.Quote(user.Contact)}\n");
+			}
+
+			if (user.Key is not null)
+			{
+				text.Append($"key = {ConfigFile.Quote(user.Key)}\n");
+			}
+		}
+
+		return text.ToString();
+	}
+
 	public async Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message)
 	{
 		var path = ComponentsFile.PathOf(Root);
 		var original = File.Exists(path) ? await File.ReadAllTextAsync(path) : null;
+		var usersPath = UsersPath(Root);
+		var originalUsers = File.Exists(usersPath) ? await File.ReadAllTextAsync(usersPath) : null;
 		try
 		{
 			foreach (var change in changes)
 			{
 				switch (change)
 				{
+					case RegistryChange.SetUser set:
+						var users = ReadUsers(Root).ToList();
+						var index = users.FindIndex(user => user.Id == set.User.Id);
+						if (index < 0)
+						{
+							users.Add(set.User);
+						}
+						else
+						{
+							users[index] = set.User;
+						}
+
+						await File.WriteAllTextAsync(usersPath, UsersText(users));
+						break;
+					case RegistryChange.RemoveUser remove:
+						await File.WriteAllTextAsync(usersPath, UsersText(ReadUsers(Root).Where(user => user.Id != remove.Id)));
+						break;
 					case RegistryChange.Add add:
 						ComponentsFile.Add(Root, add.Component);
 						break;
@@ -83,6 +160,15 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 			if (original is not null && await File.ReadAllTextAsync(path) != original)
 			{
 				await File.WriteAllTextAsync(path, original);
+			}
+
+			if (originalUsers is null)
+			{
+				File.Delete(usersPath);
+			}
+			else if (await File.ReadAllTextAsync(usersPath) != originalUsers)
+			{
+				await File.WriteAllTextAsync(usersPath, originalUsers);
 			}
 
 			throw;

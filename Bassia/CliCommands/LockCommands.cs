@@ -77,13 +77,14 @@ internal static class LockCommands
 			["live"] = states.Count(state => state == LockState.Live),
 			["released"] = states.Count(state => state == LockState.Released),
 			["expired"] = states.Count(state => state == LockState.Expired),
-			["table"] = new TomlText(AsciiTable.Render(["PATH", "KIND", "RUN", "STATE", "HOW", "SINCE", "WAITING"],
+			["table"] = new TomlText(AsciiTable.Render(["PATH", "KIND", "RUN", "USER", "STATE", "HOW", "SINCE", "WAITING"],
 				holds.Select(pair => (IReadOnlyList<string>)
 				[
-					pair.Hold.Key.Display, LockKey.KindName(pair.Hold.Key.Kind), RunMetadata.Key(pair.Entry.RunId), StateName(table.StateOf(pair.Entry)),
+					pair.Hold.Key.Display, LockKey.KindName(pair.Hold.Key.Kind), RunMetadata.Key(pair.Entry.RunId), pair.Entry.User ?? "-", StateName(table.StateOf(pair.Entry)),
 					pair.Hold.How, RunCommands.Time(pair.Hold.Since), string.Join(",", Waiters(table, entries, pair.Entry, pair.Hold).Select(RunMetadata.Key))
 				]))),
-			["hold"] = holds.Select(pair => (IReadOnlyDictionary<string, object?>)HoldData(table, entries, pair.Entry, pair.Hold)).ToList(),
+			["hold"] = holds.Select(pair => (IReadOnlyDictionary<string, object?>)HoldData(monorepo, table, entries, pair.Entry, pair.Hold)).ToList(),
+			["user"] = Holders(monorepo, holds.Select(pair => pair.Entry)),
 			["wait"] = waits.Select(pair => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 			{
 				["run_id"] = pair.Entry.RunId,
@@ -97,8 +98,10 @@ internal static class LockCommands
 		});
 	}
 
-	private static Dictionary<string, object?> HoldData(LockTable table, IReadOnlyList<LockEntry> entries, LockEntry entry, LockHold hold) => new()
+	private static Dictionary<string, object?> HoldData(Monorepo monorepo, LockTable table, IReadOnlyList<LockEntry> entries, LockEntry entry, LockHold hold) => new()
 	{
+		["user"] = entry.User,
+		["contact"] = entry.User is null ? null : UserCommands.Reach(monorepo, entry.User),
 		["component"] = hold.Key.Component,
 		["path"] = hold.Key.Path,
 		["kind"] = LockKey.KindName(hold.Key.Kind),
@@ -120,6 +123,18 @@ internal static class LockCommands
 		.Select(entry => entry.RunId);
 
 	internal static string StateName(LockState state) => state.ToString().ToLowerInvariant();
+
+	/// <summary><c> of jk (Jozef Kosik, jozef@example.com; slack @jk)</c> - whom to talk to about a run's holds - or nothing.</summary>
+	private static string OfUser(Monorepo monorepo, LockEntry entry) => entry.User is null ? "" : $" of {UserCommands.Reach(monorepo, entry.User)}";
+
+	/// <summary>The users behind <paramref name="entries"/>, with how to reach them, once each.</summary>
+	private static IReadOnlyList<IReadOnlyDictionary<string, object?>>? Holders(Monorepo monorepo, IEnumerable<LockEntry> entries)
+	{
+		var users = entries.Select(entry => entry.User).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
+		return users.Count == 0 ? null : users.Select(id => (IReadOnlyDictionary<string, object?>)(monorepo.Registry.Users.Find(id) is { } user
+			? UserCommands.Describe(user)
+			: new Dictionary<string, object?> { ["id"] = id })).ToList();
+	}
 
 	// ----- bassia lock check -----
 
@@ -156,7 +171,7 @@ internal static class LockCommands
 			anyBehind |= behind.Count > 0;
 			if (heldBy.Count > 0)
 			{
-				notes.Add($"{path.Key.Display} is held by {string.Join(", ", heldBy.Select(pair => $"run {RunMetadata.Key(pair.Entry.RunId)} ({pair.Hold.Key.Display})"))}");
+				notes.Add($"{path.Key.Display} is held by {string.Join(", ", heldBy.Select(pair => $"run {RunMetadata.Key(pair.Entry.RunId)} ({pair.Hold.Key.Display}{OfUser(monorepo, pair.Entry)})"))}");
 			}
 			else if (behind.Count > 0)
 			{
@@ -175,6 +190,7 @@ internal static class LockCommands
 				["state"] = state,
 				["held_by"] = heldBy.Select(pair => pair.Entry.RunId).Distinct().ToList(),
 				["holder_paths"] = heldBy.Select(pair => pair.Hold.Key.Display).Distinct().ToList(),
+				["holder_users"] = Holders(monorepo, heldBy.Select(pair => pair.Entry)),
 				["behind"] = behind.Select(item => item.Tag).ToList(),
 				["behind_runs"] = behind.Select(item => item.RunId).Distinct().ToList(),
 				["expired_holders"] = expired
@@ -218,14 +234,15 @@ internal static class LockCommands
 		if (blockers.Count > 0)
 		{
 			return ProgramCli.WriteResult(false, invocation.Command,
-				$"Nothing was claimed: {string.Join(", ", blockers.Select(pair => $"{pair.Hold.Key.Display} is held by run {RunMetadata.Key(pair.Entry.RunId)}").Distinct())}. " +
+				$"Nothing was claimed: {string.Join(", ", blockers.Select(pair => $"{pair.Hold.Key.Display} is held by run {RunMetadata.Key(pair.Entry.RunId)}{OfUser(monorepo, pair.Entry)}").Distinct())}. " +
 				$"'bassia lock wait -path {string.Join(",", paths.Select(path => path.Given))}' waits for it.",
 				new Dictionary<string, object?>
 				{
 					["run_id"] = run.RunId,
 					["claimed"] = new List<string>(),
 					["held_by"] = blockers.Select(pair => pair.Entry.RunId).Distinct().ToList(),
-					["holder_paths"] = blockers.Select(pair => pair.Hold.Key.Display).Distinct().ToList()
+					["holder_paths"] = blockers.Select(pair => pair.Hold.Key.Display).Distinct().ToList(),
+					["holder_users"] = Holders(monorepo, blockers.Select(pair => pair.Entry))
 				});
 		}
 
@@ -330,8 +347,12 @@ internal static class LockCommands
 					}
 				});
 				return ProgramCli.WriteResult(false, invocation.Command,
-					$"{string.Join(", ", blockers.Select(pair => pair.Hold.Key.Display).Distinct())} still held by {string.Join(", ", blockers.Select(pair => RunMetadata.Key(pair.Entry.RunId)).Distinct())} after {timeout}s; wait again, or go on without them.",
-					new Dictionary<string, object?> { ["run_id"] = run.RunId, ["timed_out"] = true, ["held_by"] = blockers.Select(pair => pair.Entry.RunId).Distinct().ToList() });
+					$"{string.Join(", ", blockers.Select(pair => pair.Hold.Key.Display).Distinct())} still held by {string.Join(", ", blockers.Select(pair => $"{RunMetadata.Key(pair.Entry.RunId)}{OfUser(monorepo, pair.Entry)}").Distinct())} after {timeout}s; wait again, ask them, or go on without them.",
+					new Dictionary<string, object?>
+					{
+						["run_id"] = run.RunId, ["timed_out"] = true, ["held_by"] = blockers.Select(pair => pair.Entry.RunId).Distinct().ToList(),
+						["holder_users"] = Holders(monorepo, blockers.Select(pair => pair.Entry))
+					});
 			}
 
 			await Task.Delay(WaitInterval);

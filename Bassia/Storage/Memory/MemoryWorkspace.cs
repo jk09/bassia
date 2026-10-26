@@ -88,7 +88,7 @@ internal sealed class MemoryWorkspace : IComponentWorkspace
 			throw new StorageException($"Tag '{name}' already exists in '{Directory}'.");
 		}
 
-		localTags[name] = (new StoredTag(name, commit, true, message.Split('\n')[0].Trim(), MemoryComponentStore.Now()), message);
+		localTags[name] = (new StoredTag(name, commit, true, message.Split('\n')[0].Trim(), MemoryComponentStore.Now(), MemoryComponentStore.Tagger()), message);
 		return Task.CompletedTask;
 	}
 

@@ -64,6 +64,9 @@ internal sealed class LockEntry
 	public string State { get; set; } = LiveState;
 	public required string Host { get; init; }
 	public required int Pid { get; init; }
+
+	/// <summary>The id of the user the run is attributed to - whom to talk to about what it holds; null without users.</summary>
+	public string? User { get; init; }
 	public required string ProcessStart { get; init; }
 	public required string Started { get; init; }
 	public required string Heartbeat { get; set; }
@@ -87,6 +90,7 @@ internal sealed class LockEntry
 			["heartbeat"] = Heartbeat
 		};
 		if (Released is not null) table["released"] = Released;
+		if (User is not null) table["user"] = User;
 
 		table["hold"] = Array(Holds, hold => new TomlTable
 		{
@@ -122,7 +126,8 @@ internal sealed class LockEntry
 			ProcessStart = (string)table["process_start"],
 			Started = (string)table["started"],
 			Heartbeat = (string)table["heartbeat"],
-			Released = table.TryGetValue("released", out var released) ? released as string : null
+			Released = table.TryGetValue("released", out var released) ? released as string : null,
+			User = table.TryGetValue("user", out var user) ? user as string : null
 		};
 
 		foreach (var hold in Tables(table, "hold"))

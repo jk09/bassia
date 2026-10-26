@@ -118,7 +118,8 @@ internal static class AgentCommand
 			.Append("3. `bassia lock claim -path <path>` holds a path before you start on it, so that others wait for you;\n")
 			.Append("   `bassia lock release -path <path>` gives it up early.\n\n")
 			.Append("Paths are relative to your working directory (`<component>/<path>` from this folder; a folder ends with `/`).\n")
-			.Append("`bassia lock list` shows who holds what. Changing a path another run holds is recorded as a lock conflict, and\n")
+			.Append("`bassia lock list` shows who holds what, and `lock check` names the user behind a holding run and how to reach them,\n")
+			.Append("so you can tell your user whom to ask. Changing a path another run holds is recorded as a lock conflict, and\n")
 			.Append("your result is then reviewed before it is merged. Every command answers in TOML.\n");
 		return text.ToString();
 	}
@@ -181,7 +182,9 @@ internal static class AgentCommand
 			{
 				["BASSIA_ROOT"] = monorepo.Root,
 				["BASSIA_RUN_ID"] = metadata.RunId,
-				["BASSIA_RUN_DIR"] = metadata.WorkspacePath
+				["BASSIA_RUN_DIR"] = metadata.WorkspacePath,
+				// The agent's own bassia commands (lock claim, lock wait) act for the user who started the run.
+				[UserCommands.Variable] = metadata.User ?? Environment.GetEnvironmentVariable(UserCommands.Variable) ?? ""
 			},
 			standardInput: null,
 			context?.OnOutput,
@@ -213,6 +216,7 @@ internal static class AgentCommand
 		["status"] = metadata.Status,
 		["workspace"] = metadata.WorkspacePath,
 		["agent_exit_code"] = metadata.AgentExitCode,
+		["user"] = metadata.User,
 		["metadata_repo"] = store.Location,
 		["metadata_tags"] = metadataTags,
 		// Named as in run.toml, so a caller reads the result and the stored record with the same keys.

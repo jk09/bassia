@@ -39,8 +39,14 @@ internal abstract record RegistryChange
 	/// <summary>Removes the conformance rule at <paramref name="Index"/> (0-based, in file order).</summary>
 	public sealed record RemoveConformance(int Index) : RegistryChange;
 
-	/// <summary>Whether the change is to the rules rather than to the graph.</summary>
-	public bool IsRuleChange => this is AddBoundary or RemoveBoundary or AddConformance or RemoveConformance;
+	/// <summary>Registers a user, or replaces the user with the same id.</summary>
+	public sealed record SetUser(Core.UserDefinition User) : RegistryChange;
+
+	/// <summary>Removes the user with this id from the user registry.</summary>
+	public sealed record RemoveUser(string Id) : RegistryChange;
+
+	/// <summary>Whether the change is to the rules or the users rather than to the graph.</summary>
+	public bool IsRuleChange => this is AddBoundary or RemoveBoundary or AddConformance or RemoveConformance or SetUser or RemoveUser;
 }
 
 /// <summary>
@@ -60,6 +66,9 @@ internal interface IMetaStore
 
 	/// <summary>The conformance rules as of the latest revision, in order.</summary>
 	Task<IReadOnlyList<Core.ConformanceRule>> LoadConformanceAsync();
+
+	/// <summary>The registered users as of the latest revision, in registration order.</summary>
+	Task<IReadOnlyList<Core.UserDefinition>> LoadUsersAsync();
 
 	/// <summary>
 	/// Applies <paramref name="changes"/> (already validated) as one revision described by <paramref name="message"/>

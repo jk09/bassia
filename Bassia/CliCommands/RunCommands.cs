@@ -289,10 +289,10 @@ internal static class RunCommands
 			{
 				["total"] = rows.Count,
 				["live"] = rows.Count(run => run.Live),
-				["table"] = new TomlText(AsciiTable.Render(["ID", "STATUS", "LIVE", "CREATED", "TIME", "COMPONENTS", "SUMMARY"],
+				["table"] = new TomlText(AsciiTable.Render(["ID", "USER", "STATUS", "LIVE", "CREATED", "TIME", "COMPONENTS", "SUMMARY"],
 					shown.Select(run => (IReadOnlyList<string>)
 					[
-						RunMetadata.Key(run.RunId), run.Status + (run.Stale ? "!" : ""), run.Live ? "yes" : "",
+						RunMetadata.Key(run.RunId), run.Record?.User ?? "-", run.Status + (run.Stale ? "!" : ""), run.Live ? "yes" : "",
 						Time(run.Record?.Created ?? run.Job?.Started), Elapsed(run.Record?.Created ?? run.Job?.Started, run.Record?.Finished),
 						string.Join(",", run.Record?.Components.Select(entry => entry.Name) ?? []),
 						run.Record is null ? "" : AgentCommand.SummarizeCommand(run.Record.Command)
@@ -306,6 +306,7 @@ internal static class RunCommands
 		["run_id"] = run.RunId,
 		["short_id"] = RunMetadata.Key(run.RunId),
 		["status"] = run.Status,
+		["user"] = run.Record?.User,
 		["live"] = run.Live,
 		["stale"] = run.Stale,
 		["created"] = run.Record?.Created ?? run.Job?.Started,

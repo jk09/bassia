@@ -6,8 +6,11 @@ namespace Bassia.Storage;
 /// </summary>
 internal class StorageException(string message) : Exception(message);
 
-/// <summary>A node of a component's history DAG: its id, its parents (none for a root commit) and its message.</summary>
-internal sealed record StoredCommit(string Id, IReadOnlyList<string> Parents, string Message)
+/// <summary>
+/// A node of a component's history DAG: its id, its parents (none for a root commit), its message and its author as
+/// <c>Name &lt;email&gt;</c> (null when the backend does not know it).
+/// </summary>
+internal sealed record StoredCommit(string Id, IReadOnlyList<string> Parents, string Message, string? Author = null)
 {
 	public string Subject => Message.Split('\n')[0].Trim();
 }
@@ -19,7 +22,8 @@ internal sealed record StoredBranch(string Name, string Commit, string Subject);
 /// A tag: an immutable name for a commit. Bassia creates annotated tags (with a message and a date); a backend may also
 /// report lightweight ones it imported.
 /// </summary>
-internal sealed record StoredTag(string Name, string Commit, bool Annotated, string Subject, string Date);
+/// <remarks><paramref name="Tagger"/>: who made an annotated tag, as <c>Name &lt;email&gt;</c> (null for a lightweight one or when unknown).</remarks>
+internal sealed record StoredTag(string Name, string Commit, bool Annotated, string Subject, string Date, string? Tagger = null);
 
 /// <summary>A file of a commit: path (with <c>/</c>), mode, content object id and size in bytes.</summary>
 internal sealed record StoredFile(string Path, string Mode, string Object, long Size);

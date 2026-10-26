@@ -59,7 +59,7 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 
 	private async Task<IReadOnlyList<StoredTag>> ReadTagsAsync(string pattern)
 	{
-		const string format = "%(refname:strip=2)%09%(objecttype)%09%(objectname)%09%(*objecttype)%09%(*objectname)%09%(creatordate:iso-strict)%09%(contents:subject)";
+		const string format = "%(refname:strip=2)%09%(objecttype)%09%(objectname)%09%(*objecttype)%09%(*objectname)%09%(creatordate:iso-strict)%09%(contents:subject)%09%(taggername) %(taggeremail)";
 		var output = await git.RunOrThrowAsync(["for-each-ref", "--sort=refname", $"--format={format}", pattern]);
 		var tags = new List<StoredTag>();
 		foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -77,7 +77,8 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 				continue;
 			}
 
-			tags.Add(new StoredTag(fields[0], annotated ? fields[4] : fields[2], annotated, fields[6], fields[5]));
+			var tagger = annotated && fields.Length > 7 && fields[7].Trim().Length > 0 ? fields[7].Trim() : null;
+			tags.Add(new StoredTag(fields[0], annotated ? fields[4] : fields[2], annotated, fields[6], fields[5], tagger));
 		}
 
 		return tags;
@@ -93,7 +94,7 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 			return null;
 		}
 
-		return ParseCommits(await git.RunOrThrowAsync(["log", "-1", "--format=%H%x00%P%x00%B%x01", id])).FirstOrDefault();
+		return ParseCommits(await git.RunOrThrowAsync(["log", "-1", $"--format={CommitFormat}", id])).FirstOrDefault();
 	}
 
 	public async Task<IReadOnlyList<StoredObject>> FindObjectsAsync(string prefix)
@@ -139,13 +140,16 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 		(await git.RunAsync(["merge-base", "--is-ancestor", ancestor, descendant])).ExitCode == 0;
 
 	public async Task<IReadOnlyList<StoredCommit>> HistoryAsync(string tip) =>
-		ParseCommits(await git.RunOrThrowAsync(["log", "--topo-order", "--format=%H%x00%P%x00%B%x01", tip]));
+		ParseCommits(await git.RunOrThrowAsync(["log", "--topo-order", $"--format={CommitFormat}", tip]));
+
+	/// <summary>id, parents, author and message of a commit, NUL-separated; commits end with \x01.</summary>
+	internal const string CommitFormat = "%H%x00%P%x00%an <%ae>%x00%B%x01";
 
 	internal static List<StoredCommit> ParseCommits(string output) =>
 		output.Split('\x01', StringSplitOptions.RemoveEmptyEntries)
 			.Select(entry => entry.TrimStart('\n', '\r').Split('\0'))
-			.Where(fields => fields.Length >= 3 && fields[0].Length > 0)
-			.Select(fields => new StoredCommit(fields[0], fields[1].Split(' ', StringSplitOptions.RemoveEmptyEntries), fields[2].TrimEnd('\n')))
+			.Where(fields => fields.Length >= 4 && fields[0].Length > 0)
+			.Select(fields => new StoredCommit(fields[0], fields[1].Split(' ', StringSplitOptions.RemoveEmptyEntries), fields[3].TrimEnd('\n'), fields[2]))
 			.ToList();
 
 	// ----- content -----
@@ -467,7 +471,7 @@ internal sealed class GitWorkspace(string directory, string sourceRepoDir) : ICo
 	}
 
 	public async Task<IReadOnlyList<StoredCommit>> LogAsync(string from, string to) =>
-		GitComponentStore.ParseCommits((await checkout.RunAsync(["log", "--format=%H%x00%P%x00%B%x01", $"{from}..{to}"])).Output);
+		GitComponentStore.ParseCommits((await checkout.RunAsync(["log", $"--format={GitComponentStore.CommitFormat}", $"{from}..{to}"])).Output);
 
 	public async Task<string> DiffAsync(string from, string to) => (await checkout.RunAsync(["diff", "--no-color", from, to])).Output;
 }
