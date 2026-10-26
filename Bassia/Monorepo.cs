@@ -165,6 +165,12 @@ internal sealed class Monorepo
 	public Core.MonorepoGraph Graph() =>
 		new(Core.MetaRepo.Open(new Storage.Git.GitMetaStore(Root), Registry), new Storage.Git.GitComponentStorage(Root));
 
+	/// <summary>The monorepo this one is a clone of (<c>depot.url</c>), or null for a monorepo of its own.</summary>
+	public Core.Depot? Depot => Config.Value("depot.url").Trim() is { Length: > 0 } url ? new Core.Depot(url) : null;
+
+	/// <summary>The views of this monorepo (<c>bassia view</c>), importing missing components from the depot in a clone.</summary>
+	public Core.Views Views() => new(Graph(), Root, WorkspaceDir, Depot);
+
 	/// <summary>The store of the agentic run records (<see cref="RunsRepoDir"/>).</summary>
 	public RunMetadataStore RunRecords() => new(new Git.GitClient(Root), RunsRepoDir);
 }

@@ -68,6 +68,12 @@ internal sealed class RunMetadata
 	public string? LockFiles { get; set; }
 	public string? LockFolders { get; set; }
 
+	/// <summary>
+	/// The load rules of a sparse run (<c>-load</c>, or a config spec's), as <c>[!]&lt;component&gt;/&lt;pattern&gt;</c> joined
+	/// by commas: only the files they match were materialized. Null when the run materialized every file.
+	/// </summary>
+	public string? Load { get; set; }
+
 	/// <summary>The id of the user the run was started by and is attributed to; null in a monorepo without users.</summary>
 	public string? User { get; set; }
 
@@ -129,6 +135,7 @@ internal sealed class RunMetadata
 		if (AgentExitCode is not null) table["agent_exit_code"] = (long)AgentExitCode.Value;
 		if (LockFiles is not null) table["lock_files"] = LockFiles;
 		if (LockFolders is not null) table["lock_folders"] = LockFolders;
+		if (Load is not null) table["load"] = Load;
 		if (User is not null) table["user"] = User;
 
 		var components = new TomlTableArray();
@@ -225,6 +232,7 @@ internal sealed class RunMetadata
 			AgentExitCode = table.TryGetValue("agent_exit_code", out var exitCode) ? (int)(long)exitCode : null,
 			LockFiles = OptStr(table, "lock_files"),
 			LockFolders = OptStr(table, "lock_folders"),
+			Load = OptStr(table, "load"),
 			User = OptStr(table, "user")
 		};
 

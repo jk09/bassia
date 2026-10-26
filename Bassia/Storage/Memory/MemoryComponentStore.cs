@@ -41,6 +41,80 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 
 	public string? Upstream { get; set; }
 
+	/// <summary>
+	/// The content objects a store imported with its history only holds; null when it holds all of them. Its commits keep
+	/// their files' content anyway (memory is cheap): this set is what the store may read without its upstream.
+	/// </summary>
+	private HashSet<string>? held;
+
+	/// <summary>How many content objects the store fetched from its upstream: what tests check laziness by.</summary>
+	public int HydratedObjects { get; private set; }
+
+	/// <summary>Whether the store holds the content of <paramref name="objectId"/>.</summary>
+	public bool Holds(string objectId)
+	{
+		lock (gate)
+		{
+			return held is null || held.Contains(objectId);
+		}
+	}
+
+	/// <summary>Makes the store one that holds no content until it hydrates it (<see cref="IComponentStorage.ImportHistoryAsync"/>).</summary>
+	internal void DropContent()
+	{
+		lock (gate)
+		{
+			held = new HashSet<string>(StringComparer.Ordinal);
+		}
+	}
+
+	/// <summary>
+	/// Fetches the content of <paramref name="files"/> the store does not hold from its upstream, which must be reachable
+	/// and hold it.
+	/// </summary>
+	internal void Hydrate(IEnumerable<MemoryFile> files)
+	{
+		lock (gate)
+		{
+			if (held is null)
+			{
+				return;
+			}
+
+			var missing = files.Select(file => file.Object).Where(id => !held.Contains(id)).Distinct(StringComparer.Ordinal).ToList();
+			if (missing.Count == 0)
+			{
+				return;
+			}
+
+			var remote = Upstream is null ? null : Upstreams?.Find(Upstream);
+			if (remote is null)
+			{
+				throw new StorageException($"Could not fetch the content of component '{Name}': its upstream '{Upstream}' cannot be reached.");
+			}
+
+			foreach (var id in missing)
+			{
+				if (!remote.Holds(id) || !remote.Contains(id))
+				{
+					throw new StorageException($"Could not fetch object {id} of component '{Name}' from its upstream '{Upstream}'.");
+				}
+
+				held.Add(id);
+				HydratedObjects++;
+			}
+		}
+	}
+
+	/// <summary>Whether any commit of the store has a file with the content <paramref name="objectId"/>.</summary>
+	private bool Contains(string objectId)
+	{
+		lock (gate)
+		{
+			return commits.Values.Any(commit => commit.Files.Values.Any(file => file.Object == objectId));
+		}
+	}
+
 	// ----- seeding (tests, imports) -----
 
 	/// <summary>
@@ -91,6 +165,8 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 			var number = Interlocked.Increment(ref sequence);
 			var id = Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(
 				$"{number}\n{string.Join(' ', parents)}\n{message}\n{string.Join('\n', files.Select(file => $"{file.Key} {file.Value.Object}"))}")));
+			// Content made here is held here.
+			held?.UnionWith(files.Values.Select(file => file.Object));
 			commits[id] = new MemoryCommit(new StoredCommit(id, parents.ToList(), message, Core.Actor.Current is { } actor ? $"{actor.Author.Name} <{actor.Author.Email}>" : null),
 				new SortedDictionary<string, MemoryFile>(files.ToDictionary(), StringComparer.Ordinal),
 				new SortedDictionary<string, NestedUnit>((nested ?? new Dictionary<string, NestedUnit>()).ToDictionary(), StringComparer.Ordinal));
@@ -152,6 +228,7 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 		lock (gate)
 		{
 			var copy = new MemoryComponentStore(newName, newLocation) { DefaultBranch = DefaultBranch, Upstream = Upstream };
+			copy.held = held is null ? null : new HashSet<string>(held, StringComparer.Ordinal);
 			foreach (var commit in commits.Values)
 			{
 				copy.commits[commit.Node.Id] = commit;
@@ -306,10 +383,19 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 		Task.FromResult<IReadOnlyList<StoredCommit>>(Ancestry(tip).Select(commit => commit.Node).ToList());
 
 	public Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit) =>
-		Task.FromResult<IReadOnlyList<StoredFile>>(Get(commit).Files.Select(file => new StoredFile(file.Key, file.Value.Mode, file.Value.Object, file.Value.Content.LongLength)).ToList());
+		Task.FromResult<IReadOnlyList<StoredFile>>(Get(commit).Files
+			.Select(file => new StoredFile(file.Key, file.Value.Mode, file.Value.Object, Holds(file.Value.Object) ? file.Value.Content.LongLength : -1)).ToList());
 
-	public Task<byte[]?> ReadFileAsync(string commit, string path) =>
-		Task.FromResult(Get(commit).Files.TryGetValue(path, out var file) ? file.Content : null);
+	public Task<byte[]?> ReadFileAsync(string commit, string path)
+	{
+		if (!Get(commit).Files.TryGetValue(path, out var file))
+		{
+			return Task.FromResult<byte[]?>(null);
+		}
+
+		Hydrate([file]);
+		return Task.FromResult<byte[]?>(file.Content);
+	}
 
 	public Task<IReadOnlyList<NestedUnit>> ListNestedAsync(string commit) =>
 		Task.FromResult<IReadOnlyList<NestedUnit>>(Get(commit).Nested.Values.ToList());
@@ -349,6 +435,87 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 
 	public Task<string?> UpstreamAsync() => Task.FromResult(Upstream);
 
+	// ----- content held locally -----
+
+	public Task<IReadOnlyList<string>> MissingContentAsync(string commit, IReadOnlyList<string>? paths = null)
+	{
+		var wanted = paths?.ToHashSet(StringComparer.Ordinal);
+		return Task.FromResult<IReadOnlyList<string>>(Get(commit).Files
+			.Where(file => (wanted is null || wanted.Contains(file.Key)) && !Holds(file.Value.Object)).Select(file => file.Key).ToList());
+	}
+
+	public Task HydrateAsync(string commit, IReadOnlyList<string> paths)
+	{
+		var files = Get(commit).Files;
+		Hydrate(paths.Where(files.ContainsKey).Select(path => files[path]));
+		return Task.CompletedTask;
+	}
+
+	private MemoryComponentStore RequireUpstream() =>
+		(Upstream is null ? null : Upstreams?.Find(Upstream))
+			?? throw new StorageException($"Component '{Name}' cannot reach its upstream '{Upstream}'.");
+
+	public Task FetchUpstreamAsync()
+	{
+		var remote = RequireUpstream();
+		var remoteBranches = remote.ListBranchesAsync().GetAwaiter().GetResult();
+		var remoteTags = remote.ListTagsAsync().GetAwaiter().GetResult();
+		foreach (var tip in remoteBranches.Select(branch => branch.Commit).Concat(remoteTags.Select(tag => tag.Commit)).Distinct(StringComparer.Ordinal))
+		{
+			foreach (var ancestor in remote.Ancestry(tip).Reverse())
+			{
+				Adopt(ancestor);
+			}
+		}
+
+		lock (gate)
+		{
+			foreach (var branch in remoteBranches)
+			{
+				branches[branch.Name] = branch.Commit;
+			}
+
+			foreach (var tag in remoteTags)
+			{
+				tags[tag.Name] = (tag, remote.TagMessage(tag.Name) ?? tag.Subject);
+			}
+		}
+
+		return Task.CompletedTask;
+	}
+
+	public async Task PushUpstreamAsync(string branch, IReadOnlyList<string> tagNames)
+	{
+		var remote = RequireUpstream();
+		var tip = await BranchTipAsync(branch) ?? throw new StorageException($"Component '{Name}' has no branch '{branch}'.");
+		if (await remote.BranchTipAsync(branch) is { } remoteTip && !await IsAncestorAsync(remoteTip, tip))
+		{
+			throw new StorageException($"Pushing '{branch}' of component '{Name}' to '{Upstream}' is not a fast-forward.");
+		}
+
+		foreach (var ancestor in Ancestry(tip).Reverse())
+		{
+			remote.Adopt(ancestor);
+		}
+
+		await remote.SetBranchAsync(branch, tip);
+		foreach (var name in tagNames)
+		{
+			var tag = await GetTagAsync(name) ?? throw new StorageException($"Tag '{name}' is not in component '{Name}'.");
+			foreach (var ancestor in Ancestry(tag.Commit).Reverse())
+			{
+				remote.Adopt(ancestor);
+			}
+
+			if (await remote.GetTagAsync(name) is { } existing && existing.Commit != tag.Commit)
+			{
+				throw new StorageException($"Tag '{name}' already exists in '{Upstream}' at another commit.");
+			}
+
+			remote.SetTag(tag, TagMessage(name) ?? tag.Subject);
+		}
+	}
+
 	// ----- merging and comparing -----
 
 	private readonly Dictionary<string, IReadOnlyDictionary<string, MemoryFile>> snapshots = new(StringComparer.Ordinal);
@@ -372,6 +539,7 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 	public async Task<MergeResult> MergeAsync(string ours, string theirs, FileMergeDriver? driver = null)
 	{
 		var mergeBase = await MergeBaseAsync(ours, theirs);
+		Hydrate(new[] { ours, theirs }.Concat(mergeBase is null ? [] : [mergeBase]).SelectMany(commit => Get(commit).Files.Values));
 		var merged = await MemoryMerge.MergeAsync(mergeBase is null ? null : Get(mergeBase).Files, Get(ours).Files, Get(theirs).Files, driver, Drivers);
 		return new MergeResult(merged.Clean, Snapshot(merged.Files), merged.Conflicts, merged.Warnings);
 	}
@@ -401,9 +569,9 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 	/// <summary>The storage holding this store, which remembers its working copies; null for an upstream.</summary>
 	internal MemoryComponentStorage? Storage { get; set; }
 
-	public Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch)
+	public Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch, IReadOnlyList<string>? load = null)
 	{
-		var workspace = MemoryWorkspace.Create(this, commit, directory, branch);
+		var workspace = MemoryWorkspace.Create(this, commit, directory, branch, load);
 		Storage?.Track(workspace);
 		return Task.FromResult<IComponentWorkspace>(workspace);
 	}

@@ -10,7 +10,7 @@ structural merge, and an LLM that knows *why* each side changed. A local web das
 ![The Bassia overview: live agentic runs, the component map, merges that need attention and the latest milestones](docs/images/overview.png)
 
 - **[Scales with your code](#a-monorepo-that-scales-and-stays-git)**: work on a handful of components, not a
-  checkout of everything. It's git all the way down.
+  checkout of everything; clone just the map and download only the files an agent touches. It's git all the way down.
 - **[Agentic runs are built in](#agentic-runs-are-built-in)**: many agents, in parallel, each in its own isolated
   checkout, with every result committed, tagged and recorded.
 - **[Locks keep agents apart](#locks-keep-agents-apart)**: a run holds the files and folders its agent changes;
@@ -45,6 +45,17 @@ own over a small storage contract, so components could one day live elsewhere - 
 together by a commit DAG in a database - without changing how the monorepo works.
 
 ![The component map: each component with what it needs, its live runs, queued results and merges needing attention](docs/images/components.png)
+
+**Clone the map, download what you touch.** `bassia clone` copies a monorepo's meta-repo and every component's history
+without any file content. A ClearCase-like config spec maps the components an agent needs - and what they reference -
+onto any folder, and only the files its `load` rules name are downloaded; the rest of the tree is listed and fetched on
+request. A cloud worker runs its agent on exactly that, and the results go straight back to the depot.
+
+```sh
+bassia clone -from https://git.example.com/acme -path acme && cd acme
+printf 'map api\nselect sortlib v1.1\nload api/src\n' > api.spec
+bassia agent start -spec api.spec -prompt "paginate the list endpoint"   # the agent runs 'bassia view load' for more
+```
 
 **Boundaries keep the architecture.** Tag components (`type:app`, `scope:billing`), say who may reference them, and
 write nx-style rules over the tags, with wildcards (`scope:*` may reference only `scope:$1`). A change to the graph

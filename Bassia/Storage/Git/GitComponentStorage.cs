@@ -57,6 +57,23 @@ internal sealed class GitComponentStorage(string root) : IComponentStorage
 		return new GitComponentStore(name, componentDir);
 	}
 
+	/// <summary>A bare partial clone (<c>blob:none</c>): commits and trees, no blobs; git fetches those from the upstream.</summary>
+	public async Task<IComponentStore> ImportHistoryAsync(string name, string url)
+	{
+		var componentDir = LocationOf(name);
+		try
+		{
+			await GitComponentStore.PartialCloneAsync(url, Path.Combine(componentDir, ".git"), bare: true);
+		}
+		catch
+		{
+			DeleteDirectory(componentDir);
+			throw;
+		}
+
+		return new GitComponentStore(name, componentDir);
+	}
+
 	/// <summary>
 	/// A single-branch bare clone of the parent without tags, given the wanted tags, cut back to the fork point (the later
 	/// commits only the clone brought along are pruned) and detached from the parent: no <c>origin</c> points at it.

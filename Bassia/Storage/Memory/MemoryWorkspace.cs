@@ -19,19 +19,23 @@ internal sealed class MemoryWorkspace : IComponentWorkspace
 	/// </summary>
 	private (string Commit, IReadOnlyList<string> Conflicts, IReadOnlyList<string> Written)? merging;
 
-	private MemoryWorkspace(MemoryComponentStore store, string directory, string branch, string head)
+	/// <summary>The files a sparse working copy materialized; null when it has them all.</summary>
+	private readonly HashSet<string>? loaded;
+
+	private MemoryWorkspace(MemoryComponentStore store, string directory, string branch, string head, HashSet<string>? loaded)
 	{
 		this.store = store;
 		Directory = directory;
 		Branch = branch;
 		this.head = head;
+		this.loaded = loaded;
 	}
 
 	public string Directory { get; }
 
 	public string Branch { get; }
 
-	internal static MemoryWorkspace Create(MemoryComponentStore store, string commit, string directory, string branch)
+	internal static MemoryWorkspace Create(MemoryComponentStore store, string commit, string directory, string branch, IReadOnlyList<string>? load = null)
 	{
 		var snapshot = store.Get(commit);
 		if (System.IO.Directory.Exists(directory) && System.IO.Directory.EnumerateFileSystemEntries(directory).Any())
@@ -39,21 +43,50 @@ internal sealed class MemoryWorkspace : IComponentWorkspace
 			throw new StorageException($"'{directory}' is not empty; a working copy needs an empty folder.");
 		}
 
+		var patterns = load is null ? null : new Split.PathPatterns(load);
+		var files = snapshot.Files.Where(file => patterns is null || patterns.Matches(file.Key)).ToList();
+		store.Hydrate(files.Select(file => file.Value));
 		System.IO.Directory.CreateDirectory(directory);
-		foreach (var (path, file) in snapshot.Files)
+		foreach (var (path, file) in files)
 		{
 			var target = System.IO.Path.Combine(directory, path);
 			System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target)!);
 			File.WriteAllBytes(target, file.Content);
 		}
 
-		return new MemoryWorkspace(store, directory, branch, commit);
+		return new MemoryWorkspace(store, directory, branch, commit, patterns is null ? null : files.Select(file => file.Key).ToHashSet(StringComparer.Ordinal));
 	}
 
 	public Task HideAsync(string path)
 	{
 		hidden.Add(path.Replace('\\', '/').Trim('/'));
 		return Task.CompletedTask;
+	}
+
+	public Task<IReadOnlyList<string>> LoadAsync(IReadOnlyList<string> patterns)
+	{
+		if (loaded is null)
+		{
+			return Task.FromResult<IReadOnlyList<string>>([]);
+		}
+
+		var matcher = new Split.PathPatterns(patterns);
+		var files = Find(head).Files.Where(file => matcher.Matches(file.Key) && !loaded.Contains(file.Key) && !IsHidden(file.Key)).ToList();
+		store.Hydrate(files.Select(file => file.Value));
+		foreach (var (path, file) in files)
+		{
+			// A file the agent already wrote there is the agent's.
+			var target = System.IO.Path.Combine(Directory, path);
+			if (!File.Exists(target))
+			{
+				System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target)!);
+				File.WriteAllBytes(target, file.Content);
+			}
+
+			loaded.Add(path);
+		}
+
+		return Task.FromResult<IReadOnlyList<string>>(files.Select(file => file.Key).ToList());
 	}
 
 	public Task<string?> CommitAsync(string message)
@@ -218,7 +251,10 @@ internal sealed class MemoryWorkspace : IComponentWorkspace
 
 	public Task<string> DiffAsync(string from, string to) => store.DiffAsync(from, to);
 
-	/// <summary>The working copy's files, hidden paths (nested components) left out.</summary>
+	/// <summary>
+	/// The working copy's files, hidden paths (nested components) left out. In a sparse working copy, a file of the head it
+	/// never materialized is as the head has it unless something wrote it.
+	/// </summary>
 	private SortedDictionary<string, MemoryFile> ReadFiles()
 	{
 		var files = new SortedDictionary<string, MemoryFile>(StringComparer.Ordinal);
@@ -228,6 +264,14 @@ internal sealed class MemoryWorkspace : IComponentWorkspace
 			if (!IsHidden(path))
 			{
 				files[path] = new MemoryFile("100644", File.ReadAllBytes(file));
+			}
+		}
+
+		if (loaded is not null)
+		{
+			foreach (var (path, file) in Find(head).Files.Where(file => !loaded.Contains(file.Key) && !IsHidden(file.Key)))
+			{
+				files.TryAdd(path, file);
 			}
 		}
 

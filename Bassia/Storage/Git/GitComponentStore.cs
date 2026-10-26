@@ -166,8 +166,33 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 		}
 	}
 
+	/// <summary>
+	/// <c>ls-tree -l</c> reads every blob for its size, which in a partial clone fetches all of them; there the sizes of the
+	/// blobs it holds are read separately, and the others are unknown (-1).
+	/// </summary>
 	public async Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit)
 	{
+		if (await IsPartialAsync())
+		{
+			var missing = await MissingObjectsAsync(commit);
+			var tree = await TreeAsync(commit);
+			var held = tree.Where(file => !missing.Contains(file.Object)).Select(file => file.Object).Distinct(StringComparer.Ordinal).ToList();
+			var sizes = new Dictionary<string, long>(StringComparer.Ordinal);
+			if (held.Count > 0)
+			{
+				foreach (var line in Lines(await git.RunOrThrowAsync(["cat-file", "--batch-check=%(objectname) %(objectsize)"], string.Join('\n', held) + "\n")))
+				{
+					var fields = line.Split(' ');
+					if (fields.Length == 2 && long.TryParse(fields[1], out var size))
+					{
+						sizes[fields[0]] = size;
+					}
+				}
+			}
+
+			return tree.Select(file => file with { Size = sizes.GetValueOrDefault(file.Object, -1) }).ToList();
+		}
+
 		var files = new List<StoredFile>();
 		foreach (var entry in Split.GitBinary.SplitNul(await Split.GitBinary.RunAsync(Location, ["ls-tree", "-r", "-z", "-l", "--full-tree", commit])))
 		{
@@ -177,6 +202,26 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 			if (fields[1] == "blob")
 			{
 				files.Add(new StoredFile(entry[(tab + 1)..], fields[0], fields[2], long.TryParse(fields[3], out var size) ? size : 0));
+			}
+		}
+
+		return files;
+	}
+
+	/// <summary>The files of a commit without their sizes (0), which needs no blob: <c>ls-tree</c> without <c>-l</c>.</summary>
+	internal async Task<IReadOnlyList<StoredFile>> TreeAsync(string commit) => await TreeAsync(Location, commit);
+
+	internal static async Task<IReadOnlyList<StoredFile>> TreeAsync(string repository, string commit)
+	{
+		var files = new List<StoredFile>();
+		foreach (var entry in Split.GitBinary.SplitNul(await Split.GitBinary.RunAsync(repository, ["ls-tree", "-r", "-z", "--full-tree", commit])))
+		{
+			// <mode> SP <type> SP <object> TAB <path>
+			var tab = entry.IndexOf('\t');
+			var fields = entry[..tab].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+			if (fields[1] == "blob")
+			{
+				files.Add(new StoredFile(entry[(tab + 1)..], fields[0], fields[2], 0));
 			}
 		}
 
@@ -261,6 +306,127 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 		return result.ExitCode == 0 && result.Output.Trim().Length > 0 ? result.Output.Trim() : null;
 	}
 
+	// ----- content held locally -----
+
+	/// <summary>Whether the repository is a partial clone: its <c>origin</c> is a promisor remote holding content it may lack.</summary>
+	public async Task<bool> IsPartialAsync() =>
+		Directory.Exists(Location) && (await git.RunAsync(["config", "--get", "remote.origin.promisor"])).Output.Trim() == "true";
+
+	/// <summary>
+	/// The objects of <paramref name="commit"/>'s tree the repository lacks. <c>rev-list --missing=print</c> lists them
+	/// without fetching them, which reading them (<c>cat-file</c>) would.
+	/// </summary>
+	internal async Task<HashSet<string>> MissingObjectsAsync(string commit) =>
+		Lines(await git.RunOrThrowAsync(["rev-list", "--objects", "--missing=print", "--no-walk", commit]))
+			.Where(line => line.StartsWith('?')).Select(line => line[1..].Trim()).ToHashSet(StringComparer.Ordinal);
+
+	public async Task<IReadOnlyList<string>> MissingContentAsync(string commit, IReadOnlyList<string>? paths = null)
+	{
+		if (!await IsPartialAsync())
+		{
+			return [];
+		}
+
+		var missing = await MissingObjectsAsync(commit);
+		if (missing.Count == 0)
+		{
+			return [];
+		}
+
+		var wanted = paths?.ToHashSet(StringComparer.Ordinal);
+		return (await TreeAsync(commit)).Where(file => missing.Contains(file.Object) && (wanted is null || wanted.Contains(file.Path))).Select(file => file.Path).ToList();
+	}
+
+	public async Task HydrateAsync(string commit, IReadOnlyList<string> paths)
+	{
+		if (paths.Count == 0 || !await IsPartialAsync())
+		{
+			return;
+		}
+
+		var wanted = paths.ToHashSet(StringComparer.Ordinal);
+		var missing = await MissingObjectsAsync(commit);
+		await FetchObjectsAsync((await TreeAsync(commit)).Where(file => wanted.Contains(file.Path) && missing.Contains(file.Object)).Select(file => file.Object).ToList());
+	}
+
+	/// <summary>
+	/// Fetches objects by id from the promisor remote - what git's lazy fetch does one object at a time - and checks they
+	/// arrived. Objects the repository already holds are left out.
+	/// </summary>
+	internal async Task FetchObjectsAsync(IReadOnlyList<string> objects)
+	{
+		var wanted = objects.Distinct(StringComparer.Ordinal).ToList();
+		if (wanted.Count == 0)
+		{
+			return;
+		}
+
+		var fetch = await git.RunAsync(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--filter=blob:none", "--stdin", "origin"], string.Join('\n', wanted) + "\n");
+		if (fetch.ExitCode != 0)
+		{
+			throw new GitException($"Could not fetch the content of {wanted.Count} file(s) of component '{Name}' from its upstream: {fetch.Error.Trim()}");
+		}
+	}
+
+	public async Task FetchUpstreamAsync()
+	{
+		var fetch = await git.RunAsync(["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]);
+		if (fetch.ExitCode != 0)
+		{
+			throw new GitException($"Could not fetch component '{Name}' from its upstream: {fetch.Error.Trim()}");
+		}
+	}
+
+	public async Task PushUpstreamAsync(string branch, IReadOnlyList<string> tags)
+	{
+		var push = await git.RunAsync(["push", "--quiet", "origin", $"refs/heads/{branch}:refs/heads/{branch}", .. tags.Select(tag => $"refs/tags/{tag}:refs/tags/{tag}")]);
+		if (push.ExitCode != 0)
+		{
+			throw new GitException($"Could not push '{branch}' of component '{Name}' to its upstream: {push.Error.Trim()}");
+		}
+	}
+
+	/// <summary>
+	/// The upload-pack a partial clone of a repository on this machine talks to: one that serves filtered clones and objects
+	/// by id, which a repository does not by default. Git runs it locally for a <c>file://</c> URL.
+	/// </summary>
+	internal const string PartialUploadPack = "git -c uploadpack.allowFilter=true -c uploadpack.allowAnySHA1InWant=true upload-pack";
+
+	/// <summary>
+	/// The URL a partial clone of <paramref name="url"/> uses and whether it is on this machine: a folder becomes a
+	/// <c>file://</c> URL, since git ignores a filter in a clone from a plain path.
+	/// </summary>
+	internal static (string Url, bool Local) PartialCloneUrl(string url)
+	{
+		if (url.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+		{
+			return (url, true);
+		}
+
+		return Directory.Exists(url) ? (new Uri(Path.GetFullPath(url)).AbsoluteUri, true) : (url, false);
+	}
+
+	/// <summary>
+	/// A partial clone (<c>blob:none</c>) of <paramref name="url"/> into <paramref name="directory"/>: bare, or without a
+	/// checkout. A clone from this machine is told to use <see cref="PartialUploadPack"/>, now and for its lazy fetches.
+	/// </summary>
+	internal static async Task PartialCloneAsync(string url, string directory, bool bare)
+	{
+		var (cloneUrl, local) = PartialCloneUrl(url);
+		Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(directory))!);
+		var clone = await GitClient.In(Path.GetDirectoryName(Path.GetFullPath(directory))!).RunAsync(
+			["clone", "--quiet", bare ? "--bare" : "--no-checkout", "--filter=blob:none", .. local ? new[] { "--upload-pack", PartialUploadPack } : [], cloneUrl, directory]);
+		if (clone.ExitCode != 0)
+		{
+			throw new GitException($"git clone failed: {clone.Error.Trim()}");
+		}
+
+		if (local)
+		{
+			await GitClient.In(directory).RunOrThrowAsync(["config", "remote.origin.uploadpack", PartialUploadPack]);
+		}
+	}
+
 	// ----- merging and comparing -----
 
 	/// <summary>
@@ -302,12 +468,31 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 
 	// ----- working copies -----
 
-	public async Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch)
+	/// <remarks>
+	/// A full working copy is a plain clone of the repository, so a partial repository gets the commit's content first. A
+	/// sparse one is a partial clone of the repository with a sparse checkout of the exact files the patterns match: git
+	/// fetches their content from the repository as it checks them out, and cannot fetch through it, so the repository
+	/// hydrates them first.
+	/// </remarks>
+	public async Task<IComponentWorkspace> CheckoutAsync(string commit, string directory, string branch, IReadOnlyList<string>? load = null)
 	{
-		Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(directory))!);
-		await GitClient.In(Path.GetDirectoryName(Path.GetFullPath(directory))!).RunOrThrowAsync(["clone", "--quiet", "--no-checkout", Location, directory]);
-		// -B: the clone already has the default branch, which a working copy may continue (a component's first files).
-		await GitClient.In(directory).RunOrThrowAsync(["checkout", "--quiet", "-B", branch, commit]);
+		if (load is null)
+		{
+			await HydrateAsync(commit, await MissingContentAsync(commit));
+			Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(directory))!);
+			await GitClient.In(Path.GetDirectoryName(Path.GetFullPath(directory))!).RunOrThrowAsync(["clone", "--quiet", "--no-checkout", Location, directory]);
+			// -B: the clone already has the default branch, which a working copy may continue (a component's first files).
+			await GitClient.In(directory).RunOrThrowAsync(["checkout", "--quiet", "-B", branch, commit]);
+			return new GitWorkspace(directory, Location);
+		}
+
+		var patterns = new Split.PathPatterns(load);
+		var files = (await TreeAsync(commit)).Where(file => patterns.Matches(file.Path)).Select(file => file.Path).ToList();
+		await HydrateAsync(commit, files);
+		await PartialCloneAsync(Location, directory, bare: false);
+		var checkout = GitClient.In(directory);
+		await checkout.RunOrThrowAsync(["sparse-checkout", "set", "--no-cone", "--stdin"], GitWorkspace.SparsePatterns(files));
+		await checkout.RunOrThrowAsync(["checkout", "--quiet", "-B", branch, commit]);
 		return new GitWorkspace(directory, Location);
 	}
 }
@@ -333,9 +518,73 @@ internal sealed class GitWorkspace(string directory, string sourceRepoDir) : ICo
 		await File.AppendAllTextAsync(excludePath, $"/{path.Replace('\\', '/')}\n");
 	}
 
+	/// <summary>Whether the working copy is sparse (<c>core.sparseCheckout</c>), made by a checkout with load patterns.</summary>
+	private async Task<bool> IsSparseAsync() => (await checkout.RunAsync(["config", "--get", "core.sparseCheckout"])).Output.Trim() == "true";
+
+	/// <summary>
+	/// The files of the head matching the patterns and not yet in the sparse checkout: their content is hydrated in the
+	/// store (from the head when the store has it, else object by object), then they join the sparse checkout, which
+	/// fetches them from the store and writes them.
+	/// </summary>
+	public async Task<IReadOnlyList<string>> LoadAsync(IReadOnlyList<string> patterns)
+	{
+		if (!await IsSparseAsync())
+		{
+			return [];
+		}
+
+		var matcher = new Split.PathPatterns(patterns);
+		var loaded = (await checkout.RunOrThrowAsync(["sparse-checkout", "list"])).Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries)
+			.Select(UnescapePattern).ToHashSet(StringComparer.Ordinal);
+		var head = await HeadAsync();
+		var files = (await GitComponentStore.TreeAsync(Directory, head)).Where(file => matcher.Matches(file.Path) && !loaded.Contains(file.Path)).ToList();
+		if (files.Count == 0)
+		{
+			return [];
+		}
+
+		var store = new GitComponentStore(Path.GetFileName(sourceRepoDir), sourceRepoDir);
+		if (await store.GetCommitAsync(head) is not null)
+		{
+			await store.HydrateAsync(head, files.Select(file => file.Path).ToList());
+		}
+		else if (await store.IsPartialAsync())
+		{
+			await store.FetchObjectsAsync(files.Select(file => file.Object).ToList());
+		}
+
+		await checkout.RunOrThrowAsync(["sparse-checkout", "add", "--stdin"], SparsePatterns(files.Select(file => file.Path)));
+		return files.Select(file => file.Path).ToList();
+	}
+
+	/// <summary>
+	/// A sparse-checkout file (non-cone) naming exactly these files: anchored at the root, with the characters gitignore
+	/// patterns give a meaning escaped.
+	/// </summary>
+	internal static string SparsePatterns(IEnumerable<string> files) =>
+		string.Concat(files.Select(file => "/" + string.Concat(file.Select(c => c is '*' or '?' or '[' or '\\' or '!' or '#' ? $"\\{c}" : c.ToString())) + "\n"));
+
+	private static string UnescapePattern(string pattern)
+	{
+		var text = pattern.Trim().TrimStart('/');
+		var builder = new System.Text.StringBuilder();
+		for (var i = 0; i < text.Length; i++)
+		{
+			if (text[i] == '\\' && i + 1 < text.Length)
+			{
+				i++;
+			}
+
+			builder.Append(text[i]);
+		}
+
+		return builder.ToString();
+	}
+
 	public async Task<string?> CommitAsync(string message)
 	{
-		await checkout.RunOrThrowAsync(["add", "--all"]);
+		// --sparse: a file the agent wrote where the sparse checkout has none is the agent's, like any other.
+		await checkout.RunOrThrowAsync(await IsSparseAsync() ? ["add", "--all", "--sparse"] : ["add", "--all"]);
 		if (await MergeInProgressAsync())
 		{
 			await checkout.RunOrThrowAsync(["commit", "--quiet", "--no-edit", "-m", message]);

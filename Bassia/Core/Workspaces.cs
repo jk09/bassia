@@ -38,16 +38,19 @@ internal static class Workspaces
 	/// <summary>
 	/// Checks out each of <paramref name="commits"/> (component -> commit) at <c>&lt;folder&gt;/&lt;component&gt;</c> on
 	/// <paramref name="branch"/> and nests the references of <paramref name="closure"/>; returns the working copies.
+	/// With <paramref name="load"/> every working copy is sparse, materializing what its patterns match (nothing for a
+	/// component without any).
 	/// </summary>
 	public static async Task<IReadOnlyDictionary<string, IComponentWorkspace>> MaterializeAsync(IComponentStorage storage, IReadOnlyList<ComponentDefinition> closure,
-		IReadOnlyDictionary<string, string> commits, string folder, string branch)
+		IReadOnlyDictionary<string, string> commits, string folder, string branch, IReadOnlyDictionary<string, IReadOnlyList<string>>? load = null)
 	{
 		var workspaces = new Dictionary<string, IComponentWorkspace>(StringComparer.Ordinal);
 		var folders = new Dictionary<string, string>(StringComparer.Ordinal);
 		foreach (var component in closure)
 		{
 			folders[component.Name] = Path.Combine(folder, component.Name);
-			workspaces[component.Name] = await storage.Open(component.Name).CheckoutAsync(commits[component.Name], folders[component.Name], branch);
+			workspaces[component.Name] = await storage.Open(component.Name).CheckoutAsync(commits[component.Name], folders[component.Name], branch,
+				load is null ? null : load.GetValueOrDefault(component.Name) ?? []);
 		}
 
 		await NestAsync(closure, folders, workspaces);

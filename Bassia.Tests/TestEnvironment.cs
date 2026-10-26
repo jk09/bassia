@@ -201,6 +201,7 @@ internal sealed class MonorepoFixture : IAsyncDisposable
 		await File.WriteAllTextAsync(Path.Combine(upstream, "README.md"), $"# {name}\n");
 		foreach (var (file, content) in files ?? new Dictionary<string, string>())
 		{
+			Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(upstream, file))!);
 			await File.WriteAllTextAsync(Path.Combine(upstream, file), content);
 		}
 

@@ -33,7 +33,9 @@ internal static class AgentCommand
 			CommitSubject = monorepo.CommitSubject,
 			RunAgent = (metadata, context) => RunAgentProcessAsync(monorepo, metadata, context),
 			StartLocks = (metadata, report) => RunLocks.Start(monorepo, graph.Storage, metadata, report),
-			Prepared = metadata => WriteRunGuide(metadata, RunLocks.Filters(monorepo, metadata), graph.Registry)
+			Prepared = metadata => WriteRunGuide(metadata, RunLocks.Filters(monorepo, metadata), graph.Registry),
+			WriteThrough = monorepo.Depot is not null,
+			Root = monorepo.Root
 		});
 	}
 
@@ -45,10 +47,11 @@ internal static class AgentCommand
 	/// <paramref name="lockFiles"/> and <paramref name="lockFolders"/> are the run's own lock patterns (<c>-lock-files</c>,
 	/// <c>-lock-folders</c>), added to the configured ones.
 	/// </summary>
+	/// <paramref name="load"/> makes the run sparse (<c>-load</c>, or a config spec's load rules).
 	internal static Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null, string? runId = null,
-		string? lockFiles = null, string? lockFolders = null) =>
+		string? lockFiles = null, string? lockFolders = null, IReadOnlyList<string>? load = null) =>
 		Runs(monorepo, new RunMetadataStore(git, monorepo.RunsRepoDir)).StartAsync(select, command, context, runId, lockFiles, lockFolders,
-			closure => CheckLockPatterns(monorepo, closure, lockFiles, lockFolders));
+			closure => CheckLockPatterns(monorepo, closure, lockFiles, lockFolders), load);
 
 	/// <summary>Checks a <c>-select</c> value and resolves it (see <see cref="AgentRuns.ResolveSelectionAsync"/>).</summary>
 	internal static Task<(IReadOnlyList<ComponentDefinition> Closure, IReadOnlyList<(ComponentDefinition Component, string CommitIsh, string Commit)> Resolved)>
@@ -73,7 +76,7 @@ internal static class AgentCommand
 	/// </summary>
 	internal static void WriteRunGuide(RunMetadata metadata, IReadOnlyDictionary<string, LockFilter> filters, ComponentRegistry registry)
 	{
-		var sections = new[] { LockGuide(filters), BoundaryGuide(metadata, registry) }.OfType<string>().ToList();
+		var sections = new[] { ViewGuide(metadata), LockGuide(filters), BoundaryGuide(metadata, registry) }.OfType<string>().ToList();
 		if (sections.Count == 0)
 		{
 			return;
@@ -82,6 +85,27 @@ internal static class AgentCommand
 		var text = string.Join("\n", sections);
 		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "AGENTS.md"), text);
 		File.WriteAllText(Path.Combine(metadata.WorkspacePath, "CLAUDE.md"), text);
+	}
+
+	/// <summary>How a sparse run's agent gets the files it needs that were not loaded; null for a run with every file.</summary>
+	private static string? ViewGuide(RunMetadata metadata)
+	{
+		if (metadata.Load is null)
+		{
+			return null;
+		}
+
+		return new StringBuilder()
+			.Append("# Files not loaded yet\n\n")
+			.Append("This folder maps its components without downloading all of their files: only the files matching ")
+			.Append(metadata.Load.Length == 0 ? "no load rule" : string.Join(", ", metadata.Load.Split(',').Select(rule => $"`{rule}`")))
+			.Append(" are on disk.\nEvery other file exists in the components' history and is fetched when you load it:\n\n")
+			.Append("- `bassia view ls [-path <component>/<pattern>]` lists every mapped file and whether it is loaded.\n")
+			.Append("- `bassia view load -path <path>,...` downloads and writes files, folders or patterns (`app/src/**/*.cs`), relative to\n")
+			.Append("  your working directory; a path inside a nested component (`app/lib/...`) loads from that component.\n\n")
+			.Append("A file missing from disk is not deleted: load it before you read or change it. Files you create anywhere are part\n")
+			.Append("of your result as usual. Every command answers in TOML.\n")
+			.ToString();
 	}
 
 	private static string? LockGuide(IReadOnlyDictionary<string, LockFilter> filters)
@@ -217,6 +241,7 @@ internal static class AgentCommand
 		["workspace"] = metadata.WorkspacePath,
 		["agent_exit_code"] = metadata.AgentExitCode,
 		["user"] = metadata.User,
+		["load"] = metadata.Load,
 		["metadata_repo"] = store.Location,
 		["metadata_tags"] = metadataTags,
 		// Named as in run.toml, so a caller reads the result and the stored record with the same keys.

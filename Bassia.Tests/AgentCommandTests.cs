@@ -13,8 +13,8 @@ public class AgentCommandTests
 		var (exitCode, _, error) = await TestEnvironment.RunAsync("agent", "start");
 
 		Assert.Equal(2, exitCode);
-		Assert.Contains("-select is required", error);
-		Assert.Contains("Usage: bassia agent start -select", error);
+		Assert.Contains("-select or -spec is required", error);
+		Assert.Contains("Usage: bassia agent start (-select", error);
 	}
 
 	[Fact]

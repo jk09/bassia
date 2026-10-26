@@ -33,6 +33,15 @@ internal sealed class AgentRunOptions
 	/// <summary>Called when the run folder is ready and recorded, just before the agent starts.</summary>
 	public Action<RunMetadata>? Prepared { get; init; }
 
+	/// <summary>
+	/// Publish each result to the store's upstream as well - the depot of a clone - so a run on a cache lands where
+	/// everyone sees it. A push that fails leaves the component failed for a retry.
+	/// </summary>
+	public bool WriteThrough { get; init; }
+
+	/// <summary>The monorepo root a sparse run's view manifest names, so <c>bassia view</c> finds the monorepo from the run folder.</summary>
+	public string Root { get; init; } = "";
+
 	private sealed class NoLocks : IAgentRunLocks
 	{
 		public Task StopAsync() => Task.CompletedTask;
@@ -63,11 +72,17 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 	/// publish. <paramref name="context"/> is how a caller watches and interrupts it; <paramref name="runId"/> is given when
 	/// the id had to be known before the run starts.
 	/// </summary>
+	/// <remarks>
+	/// With <paramref name="load"/> (<c>[!]&lt;component&gt;/&lt;pattern&gt;</c> rules, see <see cref="LoadPatterns"/>) the run
+	/// is sparse: its working copies materialize only the files the rules match, and the run folder is a view, so the
+	/// agent loads more with <c>bassia view load</c>.
+	/// </remarks>
 	public async Task<AgentRunOutcome> StartAsync(string select, string command, AgentRunContext? context = null, string? runId = null,
-		string? lockFiles = null, string? lockFolders = null, Action<IReadOnlyList<ComponentDefinition>>? check = null)
+		string? lockFiles = null, string? lockFolders = null, Action<IReadOnlyList<ComponentDefinition>>? check = null, IReadOnlyList<string>? load = null)
 	{
 		var cancellation = context?.Cancellation ?? CancellationToken.None;
 		var (closure, resolved) = await ResolveSelectionAsync(select);
+		var patterns = load is null ? null : LoadPatterns(load, closure);
 		check?.Invoke(closure);
 
 		// Up to here nothing outside the stores has been touched, so a cancellation simply unwinds.
@@ -89,6 +104,7 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 			WorkspacePath = runDir,
 			LockFiles = string.IsNullOrWhiteSpace(lockFiles) ? null : lockFiles,
 			LockFolders = string.IsNullOrWhiteSpace(lockFolders) ? null : lockFolders,
+			Load = load is null ? null : string.Join(",", load),
 			User = Actor.Current?.User.Id
 		};
 
@@ -106,7 +122,7 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 
 		try
 		{
-			await MaterializeAsync(metadata, closure, context);
+			await MaterializeAsync(metadata, closure, context, patterns);
 		}
 		catch
 		{
@@ -340,7 +356,26 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 
 	// ----- materialization -----
 
-	private async Task MaterializeAsync(RunMetadata metadata, IReadOnlyList<ComponentDefinition> closure, AgentRunContext? context)
+	/// <summary>
+	/// The path patterns per component of load rules (<c>[!]&lt;component-pattern&gt;[/&lt;path-pattern&gt;]</c>, as a config
+	/// spec's <c>load</c> takes them); every rule must match a component of the closure. A component no rule matches gets
+	/// none: it is mapped without any file.
+	/// </summary>
+	public static IReadOnlyDictionary<string, IReadOnlyList<string>> LoadPatterns(IReadOnlyList<string> load, IReadOnlyList<ComponentDefinition> closure)
+	{
+		var rules = load.Select(text => ConfigSpec.ParseLoad(text, "-load")).ToList();
+		foreach (var rule in rules.Where(rule => !closure.Any(component => rule.Components.Matches(component.Name))))
+		{
+			throw new AgentException($"-load '{rule.Components}/{rule.Pattern}' names no component of the run ({string.Join(", ", closure.Select(component => component.Name))}).");
+		}
+
+		return closure.ToDictionary(component => component.Name,
+			component => (IReadOnlyList<string>)rules.Where(rule => rule.Components.Matches(component.Name)).Select(rule => rule.ComponentPattern).ToList(),
+			StringComparer.Ordinal);
+	}
+
+	private async Task MaterializeAsync(RunMetadata metadata, IReadOnlyList<ComponentDefinition> closure, AgentRunContext? context,
+		IReadOnlyDictionary<string, IReadOnlyList<string>>? load)
 	{
 		var runs = metadata.Components.ToDictionary(component => component.Name, StringComparer.Ordinal);
 		var workspaces = new Dictionary<string, IComponentWorkspace>(StringComparer.Ordinal);
@@ -348,9 +383,26 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 		foreach (var component in metadata.Components)
 		{
 			(context?.Cancellation ?? CancellationToken.None).ThrowIfCancellationRequested();
+			var patterns = load?.GetValueOrDefault(component.Name) ?? (load is null ? null : []);
 			Report(context, metadata.RunId, AgentRunPhase.Preparing,
-				$"{metadata.RunId}: checkout of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'.");
-			workspaces[component.Name] = await graph.Storage.Open(component.Name).CheckoutAsync(component.Commit, component.Path, component.Branch);
+				$"{metadata.RunId}: checkout of '{component.Name}' @ {component.CommitIsh} ({component.Commit[..7]}) -> '{component.Path}'" +
+				(patterns is null ? "." : patterns.Count == 0 ? ", no file loaded." : $", loading {string.Join(", ", patterns)}."));
+			workspaces[component.Name] = await graph.Storage.Open(component.Name).CheckoutAsync(component.Commit, component.Path, component.Branch, patterns);
+		}
+
+		if (load is not null)
+		{
+			new ViewManifest
+			{
+				Name = metadata.RunId,
+				Kind = ViewManifest.RunKind,
+				Root = options.Root,
+				Folder = metadata.WorkspacePath,
+				Created = metadata.Created,
+				Components = metadata.Components
+					.Select(component => new ViewComponent(component.Name, component.CommitIsh, component.Commit, component.Name, load.GetValueOrDefault(component.Name) ?? []))
+					.ToList()
+			}.Write();
 		}
 
 		// A referenced component appears inside the referencing component as a link (junction) to its sibling
@@ -436,10 +488,18 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 			}
 
 			await workspace.PublishAsync(component.Branch, [tag]);
+			var upstream = "";
+			if (options.WriteThrough)
+			{
+				var store = graph.Storage.Open(component.Name);
+				await store.PushUpstreamAsync(component.Branch, [tag]);
+				upstream = $" and to '{await store.UpstreamAsync()}'";
+			}
+
 			component.ResultStatus = ResultStatus.Pushed;
 			component.ResultError = null;
 			Report(context, metadata.RunId, AgentRunPhase.Finalizing,
-				$"{metadata.RunId}: '{component.Name}' committed as {component.ResultCommit[..7]}, tagged {tag}, pushed to '{graph.Storage.LocationOf(component.Name)}'.");
+				$"{metadata.RunId}: '{component.Name}' committed as {component.ResultCommit[..7]}, tagged {tag}, pushed to '{graph.Storage.LocationOf(component.Name)}'{upstream}.");
 		}
 		catch (StorageException ex)
 		{
