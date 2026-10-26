@@ -226,7 +226,13 @@ internal static class ComponentSplitter
 				}
 			}
 
-			parts.Add(new ComponentDefinition(part.Name, part.Url ?? "", references));
+			parts.Add(new ComponentDefinition(part.Name, part.Url ?? "", references)
+			{
+				Tags = part.Tags ?? source.Tags,
+				Visibility = part.Visibility ?? source.Visibility,
+				Owners = part.Owners ?? source.Owners,
+				Exports = part.Exports
+			});
 		}
 
 		var referring = registry.ReferrersOf(source.Name).Select(referrer => referrer.Name).ToHashSet(StringComparer.Ordinal);
@@ -313,6 +319,18 @@ internal static class ComponentSplitter
 		if (problems.Count == 0)
 		{
 			CheckAcyclic(after, problems);
+		}
+
+		if (problems.Count == 0)
+		{
+			try
+			{
+				problems.AddRange(Boundaries.Added(registry, ComponentRegistry.FromDefinitions(after, registry.Boundaries)).Select(violation => violation.Message));
+			}
+			catch (MonorepoException ex)
+			{
+				problems.Add(ex.Message);
+			}
 		}
 
 		return after;

@@ -56,7 +56,8 @@ internal static class IntegrationSupport
 		["structural_driver"] = outcome.Record.StructuralDriver,
 		["metadata_repo"] = storeDir,
 		["metadata_tags"] = outcome.RecordTags,
-		["component"] = outcome.Record.Components.Select(ComponentData).ToList()
+		["component"] = outcome.Record.Components.Select(ComponentData).ToList(),
+		["verification"] = outcome.Record.Verification.Count == 0 ? null : TaskCommands.Describe(outcome.Record.Verification)
 	};
 
 	/// <summary>Named as in <c>integration.toml</c>, so a caller reads the result and the stored record with the same keys.</summary>
@@ -71,6 +72,7 @@ internal static class IntegrationSupport
 		["result_tag"] = component.ResultTag,
 		["result_error"] = component.ResultError,
 		["advanced"] = component.Advanced,
+		["owners"] = component.Owners.Count == 0 ? null : component.Owners,
 		["step"] = component.Steps.Select(step => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 		{
 			["run_id"] = step.RunId,
@@ -81,6 +83,7 @@ internal static class IntegrationSupport
 			["conflicts"] = step.Conflicts,
 			["conflicts_with"] = step.ConflictsWith,
 			["lock_conflicts"] = step.LockConflicts,
+			["boundary_violations"] = step.BoundaryViolations.Count == 0 ? null : step.BoundaryViolations,
 			["structural"] = step.Structural is { } structural ? IntegrationRecord.Snake(structural) : null,
 			["structural_conflicts"] = step.StructuralConflicts,
 			["structural_warnings"] = step.StructuralWarnings,

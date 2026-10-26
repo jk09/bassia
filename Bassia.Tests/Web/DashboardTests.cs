@@ -121,6 +121,23 @@ public class DashboardTests
 	}
 
 	[Fact]
+	public async Task Components_ShowTagsAndBoundaryAndConformanceFindings()
+	{
+		await using var fixture = await ThreeComponentsAsync();
+		Assert.Equal(0, (await fixture.BassiaAsync("component", "set", "lib", "-tags", "type:lib", "-owners", "team-lib")).ExitCode);
+		Assert.Equal(0, (await fixture.BassiaAsync("conformance", "add", "-components", "type:lib", "-files", "LICENSE")).ExitCode);
+		await using var host = await Host.StartAsync(fixture);
+
+		var components = await host.GetAsync("/components");
+		var lib = await host.GetAsync("/components/lib");
+
+		Assert.Contains("<span class=\"chip\">type:lib</span>", components);
+		Assert.Contains("<b class=\"bad\">1</b>", components);
+		Assert.Contains("<td>Owners</td><td>team-lib</td>", lib);
+		Assert.Contains("lib: has no &#39;LICENSE&#39;", lib.Replace("&#x27;", "&#39;"));
+	}
+
+	[Fact]
 	public async Task Timeline_TreatsAComponentAndItsDependenciesAsOneUnitAndNeverTheWholeMonorepo()
 	{
 		await using var fixture = await ThreeComponentsAsync();

@@ -435,7 +435,8 @@ internal sealed class SubmoduleUnwinder : IDisposable
 			}
 		}
 
-		graph.Registry.Apply(changes);
+		// Unwinding records the submodule structure as it is: a violation it adds is reported, not refused.
+		graph.MetaRepo.Check(changes, allowNewViolations: true);
 
 		foreach (var context in Unwinding)
 		{
@@ -461,7 +462,7 @@ internal sealed class SubmoduleUnwinder : IDisposable
 			}
 		}
 
-		return await graph.MetaRepo.CommitAsync(changes, metaRepoMessage);
+		return await graph.MetaRepo.CommitAsync(changes, metaRepoMessage, allowNewViolations: true);
 	}
 
 	private IEnumerable<UnwindComponent> DependencyOrder()

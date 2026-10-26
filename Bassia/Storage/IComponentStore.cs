@@ -64,6 +64,9 @@ internal interface IComponentStore
 	/// <summary>The files of <paramref name="commit"/>, nested units excluded, in path order.</summary>
 	Task<IReadOnlyList<StoredFile>> ListFilesAsync(string commit);
 
+	/// <summary>The content of the file <paramref name="path"/> at <paramref name="commit"/>, or null when it has none.</summary>
+	Task<byte[]?> ReadFileAsync(string commit, string path);
+
 	/// <summary>The units nested in <paramref name="commit"/> (git submodules), in path order.</summary>
 	Task<IReadOnlyList<NestedUnit>> ListNestedAsync(string commit);
 

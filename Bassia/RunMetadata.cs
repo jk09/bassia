@@ -40,6 +40,9 @@ internal sealed class ComponentRun
 
 	/// <summary>Other runs' results brought into the checkout before the agent changed what they had changed (<c>bassia lock wait</c>).</summary>
 	public List<LockCatchUp> CaughtUp { get; } = [];
+
+	/// <summary>Code boundary violations the result added over the commit the run started from (see <see cref="Core.CodeBoundaries"/>).</summary>
+	public List<Core.CodeViolation> BoundaryViolations { get; } = [];
 }
 
 /// <summary>The agentic run record committed (as <c>run.toml</c>) into the <c>.agentic-runs</c> bare repo.</summary>
@@ -171,12 +174,36 @@ internal sealed class RunMetadata
 				});
 			}
 
+			if (component.BoundaryViolations.Count > 0)
+			{
+				componentTable["boundary_violation"] = Tables(component.BoundaryViolations, violation => CodeViolationTable(violation));
+			}
+
 			components.Add(componentTable);
 		}
 
 		table["component"] = components;
 		return TomlSerializer.Serialize(table);
 	}
+
+	/// <summary>A code violation as a TOML table (in run and integration records).</summary>
+	internal static TomlTable CodeViolationTable(Core.CodeViolation violation)
+	{
+		var table = new TomlTable
+		{
+			["file"] = violation.File, ["line"] = (long)violation.Line, ["specifier"] = violation.Specifier, ["kind"] = violation.KindName, ["message"] = violation.Message
+		};
+		if (violation.Target is not null)
+		{
+			table["target"] = violation.Target;
+		}
+
+		return table;
+	}
+
+	internal static Core.CodeViolation ReadCodeViolation(string component, TomlTable table) =>
+		new(component, Str(table, "file"), table.TryGetValue("line", out var line) && line is long number ? (int)number : 0, Str(table, "specifier"),
+			Enum.Parse<Core.CodeViolationKind>(Str(table, "kind"), ignoreCase: true), OptStr(table, "target"), Str(table, "message"));
 
 	public static RunMetadata FromToml(string text)
 	{
@@ -234,6 +261,11 @@ internal sealed class RunMetadata
 				{
 					component.CaughtUp.Add(new LockCatchUp(component.Name, Str(catchUp, "run"), Str(catchUp, "tag"), Str(catchUp, "commit"), Str(catchUp, "at"),
 						catchUp.TryGetValue("files", out var files) && files is TomlArray array ? array.OfType<string>().ToList() : []));
+				}
+
+				foreach (var violation in TablesOf(componentTable, "boundary_violation"))
+				{
+					component.BoundaryViolations.Add(ReadCodeViolation(component.Name, violation));
 				}
 
 				metadata.Components.Add(component);

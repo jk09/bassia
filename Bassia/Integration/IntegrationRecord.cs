@@ -106,6 +106,12 @@ internal sealed class IntegrationStep
 	/// </summary>
 	public List<string> LockConflicts { get; } = [];
 
+	/// <summary>
+	/// The code boundary violations the run's result adds over the base, described. <c>merge.boundaries</c> decides what
+	/// that means for the step.
+	/// </summary>
+	public List<string> BoundaryViolations { get; } = [];
+
 	public StepOutcome Outcome { get; set; } = StepOutcome.Pending;
 
 	/// <summary>The integration head after this step: the merge commit, or the head it left unchanged.</summary>
@@ -135,6 +141,9 @@ internal sealed class ComponentIntegration
 
 	/// <summary>The steps in execution order: every syntactic and structural step before every semantic one, then the manual ones, skipped steps last.</summary>
 	public List<IntegrationStep> Steps { get; } = [];
+
+	/// <summary>The component's owners when it was planned: who to ask about a result left for owner review.</summary>
+	public List<string> Owners { get; } = [];
 
 	public string? Branch { get; set; }
 	public string? Path { get; set; }
@@ -172,6 +181,9 @@ internal sealed class IntegrationRecord
 
 	public required string WorkspacePath { get; set; }
 	public List<ComponentIntegration> Components { get; } = [];
+
+	/// <summary>The tasks the verification gate ran (<c>merge.verify</c>), in order; it stopped at the first that failed.</summary>
+	public List<Core.TaskResult> Verification { get; } = [];
 
 	/// <summary><c>integration-&lt;key&gt;</c> with a fresh <see cref="RecordName"/> key, e.g. <c>integration-steady-heron-k2m8qa</c>.</summary>
 	public static string NewId() => IdPrefix + RecordName.NewKey();
@@ -222,6 +234,10 @@ internal sealed class IntegrationRecord
 			Optional(componentTable, "result_commit", component.ResultCommit);
 			Optional(componentTable, "result_tag", component.ResultTag);
 			Optional(componentTable, "result_error", component.ResultError);
+			if (component.Owners.Count > 0)
+			{
+				componentTable["owners"] = Array(component.Owners);
+			}
 
 			var steps = new TomlTableArray();
 			foreach (var step in component.Steps)
@@ -244,6 +260,11 @@ internal sealed class IntegrationRecord
 					stepTable["lock_conflicts"] = Array(step.LockConflicts);
 				}
 
+				if (step.BoundaryViolations.Count > 0)
+				{
+					stepTable["boundary_violations"] = Array(step.BoundaryViolations);
+				}
+
 				if (step.Structural is { } structural)
 				{
 					stepTable["structural"] = Snake(structural);
@@ -262,6 +283,26 @@ internal sealed class IntegrationRecord
 		}
 
 		table["component"] = components;
+		if (Verification.Count > 0)
+		{
+			var verification = new TomlTableArray();
+			foreach (var result in Verification)
+			{
+				var entry = new TomlTable
+				{
+					["component"] = result.Component, ["task"] = result.Task, ["command"] = result.Command, ["seconds"] = result.Seconds, ["log"] = result.LogPath
+				};
+				if (result.ExitCode is { } exitCode)
+				{
+					entry["exit_code"] = (long)exitCode;
+				}
+
+				verification.Add(entry);
+			}
+
+			table["verification"] = verification;
+		}
+
 		return TomlSerializer.Serialize(table);
 	}
 
@@ -298,6 +339,7 @@ internal sealed class IntegrationRecord
 					ResultError = OptStr(componentTable, "result_error"),
 					Advanced = componentTable.TryGetValue("advanced", out var advanced) && advanced is true
 				};
+				component.Owners.AddRange(Strings(componentTable, "owners"));
 
 				if (componentTable.TryGetValue("step", out var steps) && steps is TomlTableArray stepTables)
 				{
@@ -321,6 +363,7 @@ internal sealed class IntegrationRecord
 						step.Conflicts.AddRange(Strings(stepTable, "conflicts"));
 						step.ConflictsWith.AddRange(Strings(stepTable, "conflicts_with"));
 						step.LockConflicts.AddRange(Strings(stepTable, "lock_conflicts"));
+						step.BoundaryViolations.AddRange(Strings(stepTable, "boundary_violations"));
 						step.StructuralConflicts.AddRange(Strings(stepTable, "structural_conflicts"));
 						step.StructuralWarnings.AddRange(Strings(stepTable, "structural_warnings"));
 						component.Steps.Add(step);
@@ -328,6 +371,16 @@ internal sealed class IntegrationRecord
 				}
 
 				record.Components.Add(component);
+			}
+		}
+
+		if (table.TryGetValue("verification", out var verification) && verification is TomlTableArray verificationTables)
+		{
+			foreach (TomlTable entry in verificationTables)
+			{
+				record.Verification.Add(new Core.TaskResult(Str(entry, "component"), Str(entry, "task"), Str(entry, "command"),
+					entry.TryGetValue("exit_code", out var exitCode) && exitCode is long code ? (int)code : null,
+					entry.TryGetValue("seconds", out var seconds) && seconds is double value ? value : 0, Str(entry, "log")));
 			}
 		}
 

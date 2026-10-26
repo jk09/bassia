@@ -101,6 +101,12 @@ internal static class IntegrationRunner
 			await session.IntegrateAsync(component);
 		}
 
+		// Nothing is published before the gate (merge.verify) has passed on everything the integration affects.
+		if (await session.VerifyAsync())
+		{
+			await session.PublishAsync();
+		}
+
 		record.Finished = RunMetadata.Timestamp();
 		var failed = record.AllSteps.Any(step => step.Outcome == StepOutcome.Failed)
 			|| record.Components.Any(component => component.ResultStatus is ResultStatus.Failed);
@@ -140,6 +146,9 @@ internal static class IntegrationRunner
 		return record.Status switch
 		{
 			"completed" => $"Integration '{record.IntegrationId}' completed: {merged} result(s) merged by git, {Structured()}{resolved} resolved semantically; {where}.",
+			_ when record.Verification.FirstOrDefault(result => !result.Ok) is { } failedTask =>
+				$"Integration '{record.IntegrationId}' merged its results, but the verification failed: {failedTask.Component}:{failedTask.Task} exited " +
+				$"{failedTask.ExitCode?.ToString() ?? "(cancelled)"} (log '{failedTask.LogPath}'); nothing was published. The workspace '{record.WorkspacePath}' is kept for inspection.",
 			NeedsAttentionStatus => $"Integration '{record.IntegrationId}' merged {merged} result(s) by git, {Structured()}{resolved} semantically, and left {manual} for a human " +
 				$"as the merge policy says; {where}. 'bassia integration show {IntegrationRecord.Key(record.IntegrationId)}' lists them.",
 			"cancelled" => $"Integration '{record.IntegrationId}' was cancelled; {where}. The workspace '{record.WorkspacePath}' is kept for inspection.",
@@ -214,6 +223,9 @@ internal static class IntegrationRunner
 		private CancellationToken Cancellation => context?.Cancellation ?? CancellationToken.None;
 
 		public bool Cancelled { get; private set; }
+
+		/// <summary>The checkouts of the components merged and waiting to be published.</summary>
+		private readonly Dictionary<string, IComponentWorkspace> merged = new(StringComparer.Ordinal);
 
 		public void Report(string message, string? component = null, string? runId = null)
 		{
@@ -290,7 +302,7 @@ internal static class IntegrationRunner
 					return;
 				}
 
-				await PublishAsync(checkout, component, sourceDir);
+				merged[component.Name] = checkout;
 			}
 			catch (Exception ex)
 			{
@@ -578,6 +590,121 @@ internal static class IntegrationRunner
 				structural is null ? null : new MergeBrief.StructuralInfo(structural.Command, step.Conflicts, step.StructuralWarnings),
 				await SideAsync("Ours", head, integrated),
 				await SideAsync("Theirs", step.SourceCommit, [step.Rationale]));
+		}
+
+		/// <summary>Publishes every merged component (see <see cref="PublishAsync(IComponentWorkspace, ComponentIntegration, string)"/>).</summary>
+		public async Task PublishAsync()
+		{
+			foreach (var component in record.Components.Where(component => merged.ContainsKey(component.Name)))
+			{
+				try
+				{
+					await PublishAsync(merged[component.Name], component, graph.Storage.LocationOf(component.Name));
+				}
+				catch (Exception ex)
+				{
+					component.ResultStatus = ResultStatus.Failed;
+					component.ResultError = ex.Message;
+					Report($"'{component.Name}' failed: {ex.Message}", component.Name);
+				}
+			}
+		}
+
+		/// <summary>
+		/// The gate: when a component the integration affects - one it changed or one referencing those, transitively - has
+		/// <c>merge.verify</c> tasks, the base tips of the affected components it did not change are checked out next to
+		/// the merged ones, the references are nested as in a run, and the tasks run (with what they depend on) in
+		/// dependency order. False when one fails: every merged component is then failed and nothing is published. A
+		/// cancelled integration with a gate publishes nothing either.
+		/// </summary>
+		public async Task<bool> VerifyAsync()
+		{
+			var changed = new List<string>();
+			foreach (var (name, checkout) in merged)
+			{
+				if (await checkout.HeadAsync() != record.Components.First(component => component.Name == name).BaseCommit)
+				{
+					changed.Add(name);
+				}
+			}
+
+			var registry = graph.Registry;
+			var affected = Affected.Of(registry, changed.Where(registry.Contains));
+			var gated = affected.Where(component => settings.MergePolicyFor(component.Name).VerifyTasks.Count > 0).ToList();
+			if (gated.Count == 0)
+			{
+				return true;
+			}
+
+			if (Cancelled)
+			{
+				merged.Clear();
+				return false;
+			}
+
+			try
+			{
+				var closure = registry.Closure(affected.Select(component => component.Name));
+				var folders = new Dictionary<string, string>(StringComparer.Ordinal);
+				var workspaces = new Dictionary<string, IComponentWorkspace>(StringComparer.Ordinal);
+				foreach (var component in closure)
+				{
+					folders[component.Name] = Path.Combine(record.WorkspacePath, component.Name);
+					if (merged.TryGetValue(component.Name, out var checkout))
+					{
+						workspaces[component.Name] = checkout;
+						continue;
+					}
+
+					var store = graph.Storage.Open(component.Name);
+					var tip = await store.DefaultBranchAsync() is { } branch ? await store.BranchTipAsync(branch) : null;
+					workspaces[component.Name] = await store.CheckoutAsync(tip ?? throw new IntegrationException($"Component '{component.Name}' has no main branch to verify against."),
+						folders[component.Name], IntegrationRecord.RefBase(record.IntegrationId) + "-verify");
+				}
+
+				await Workspaces.NestAsync(closure, folders, workspaces);
+				var tasks = closure.ToDictionary(component => component.Name, component => TaskFile.Read(folders[component.Name], component.Name), StringComparer.Ordinal);
+				var plan = new List<PlannedTask>();
+				foreach (var component in gated)
+				{
+					var targets = settings.MergePolicyFor(component.Name).VerifyTasks.Where(tasks[component.Name].ContainsKey).ToList();
+					if (targets.Count > 0)
+					{
+						plan.AddRange(TaskPlan.Plan(registry, [component.Name], targets, tasks).Where(task => plan.All(planned => planned.Id != task.Id)));
+					}
+				}
+
+				Report($"Verifying {string.Join(", ", gated.Select(component => component.Name))}: {(plan.Count == 0 ? "no task defined" : string.Join(", ", plan.Select(task => task.Id)))}.");
+				var results = await TaskRunner.RunAsync(plan, record.WorkspacePath, Path.Combine(record.WorkspacePath, ".verify-logs"),
+					new Dictionary<string, string> { ["BASSIA_ROOT"] = settings.Root, ["BASSIA_INTEGRATION_ID"] = record.IntegrationId },
+					settings.RunTask, result => Report($"verify {result.Component}:{result.Task} exited {result.ExitCode?.ToString() ?? "(cancelled)"} in {result.Seconds}s."),
+					Cancellation);
+				record.Verification.AddRange(results);
+				if (results.FirstOrDefault(result => !result.Ok) is not { } failed)
+				{
+					return true;
+				}
+
+				FailMerged($"verification failed: {failed.Component}:{failed.Task} exited {failed.ExitCode?.ToString() ?? "(cancelled)"} (log '{failed.LogPath}')");
+				return false;
+			}
+			catch (Exception ex) when (ex is MonorepoException or IntegrationException or StorageException)
+			{
+				FailMerged($"verification could not run: {ex.Message}");
+				return false;
+			}
+		}
+
+		private void FailMerged(string reason)
+		{
+			foreach (var component in record.Components.Where(component => merged.ContainsKey(component.Name)))
+			{
+				component.ResultStatus = ResultStatus.Failed;
+				component.ResultError = reason;
+			}
+
+			Report($"Nothing published: {reason}.");
+			merged.Clear();
 		}
 
 		private async Task PublishAsync(IComponentWorkspace checkout, ComponentIntegration component, string sourceDir)

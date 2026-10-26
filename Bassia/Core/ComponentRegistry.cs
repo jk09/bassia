@@ -17,22 +17,35 @@ internal sealed class ComponentRegistry
 {
 	private readonly Dictionary<string, ComponentDefinition> byName;
 
-	private ComponentRegistry(IReadOnlyList<ComponentDefinition> components)
+	private ComponentRegistry(IReadOnlyList<ComponentDefinition> components, IReadOnlyList<BoundaryRule> boundaries, IReadOnlyList<ConformanceRule>? conformance = null)
 	{
 		Components = components;
+		Boundaries = boundaries;
+		Conformance = conformance ?? [];
 		byName = components.ToDictionary(component => component.Name, StringComparer.Ordinal);
 	}
 
-	public static ComponentRegistry Empty { get; } = new([]);
+	public static ComponentRegistry Empty { get; } = new([], []);
 
 	/// <summary>Registered components, in registration order.</summary>
 	public IReadOnlyList<ComponentDefinition> Components { get; }
 
+	/// <summary>The boundary rules (<c>[[boundary]]</c> in <c>components.toml</c>), in order.</summary>
+	public IReadOnlyList<BoundaryRule> Boundaries { get; }
+
+	/// <summary>The conformance rules (<c>[[conformance]]</c> in <c>components.toml</c>), in order.</summary>
+	public IReadOnlyList<ConformanceRule> Conformance { get; }
+
+	/// <summary>Every reference that breaks a boundary rule or a visibility (see <see cref="Core.Boundaries"/>).</summary>
+	public IReadOnlyList<BoundaryViolation> Violations() => Core.Boundaries.Check(this);
+
 	/// <summary>
-	/// A registry of <paramref name="components"/> as they were stored: names unique and non-empty, reference paths
-	/// relative and inside the component, no component referencing itself.
+	/// A registry of <paramref name="components"/> and <paramref name="boundaries"/> as they were stored: names unique and
+	/// non-empty, reference paths relative and inside the component, no component referencing itself, valid tags and rules.
+	/// Violations of the rules are kept: they are reported, not refused (see <see cref="MetaRepo"/>).
 	/// </summary>
-	public static ComponentRegistry FromDefinitions(IEnumerable<ComponentDefinition> components)
+	public static ComponentRegistry FromDefinitions(IEnumerable<ComponentDefinition> components, IEnumerable<BoundaryRule>? boundaries = null,
+		IEnumerable<ConformanceRule>? conformance = null)
 	{
 		var list = new List<ComponentDefinition>();
 		foreach (var component in components)
@@ -48,10 +61,23 @@ internal sealed class ComponentRegistry
 			}
 
 			CheckReferences(component.Name, component.References);
+			CheckAttributes(component);
 			list.Add(component);
 		}
 
-		return new ComponentRegistry(list);
+		var rules = (boundaries ?? []).ToList();
+		for (var i = 0; i < rules.Count; i++)
+		{
+			rules[i].Validate($"[[boundary]] #{i + 1}");
+		}
+
+		var required = (conformance ?? []).ToList();
+		for (var i = 0; i < required.Count; i++)
+		{
+			required[i].Validate($"[[conformance]] #{i + 1}");
+		}
+
+		return new ComponentRegistry(list, rules, required);
 	}
 
 	public ComponentDefinition? Find(string name) => byName.GetValueOrDefault(name);
@@ -124,6 +150,14 @@ internal sealed class ComponentRegistry
 		RegistryChange.Add add => Add(add.Component),
 		RegistryChange.Remove remove => Remove(remove.Name),
 		RegistryChange.SetReferences set => SetReferences(set.Name, set.References),
+		RegistryChange.SetTags set => Replace(set.Name, component => component with { Tags = set.Tags }),
+		RegistryChange.SetVisibility set => Replace(set.Name, component => component with { Visibility = set.Visibility }),
+		RegistryChange.SetOwners set => Replace(set.Name, component => component with { Owners = set.Owners }),
+		RegistryChange.SetExports set => Replace(set.Name, component => component with { Exports = set.Exports }),
+		RegistryChange.AddBoundary add => AddBoundary(add.Rule),
+		RegistryChange.RemoveBoundary remove => RemoveBoundary(remove.Index),
+		RegistryChange.AddConformance add => AddConformance(add.Rule),
+		RegistryChange.RemoveConformance remove => RemoveConformance(remove.Index),
 		_ => throw new ArgumentOutOfRangeException(nameof(change), change, "Unknown registry change.")
 	};
 
@@ -137,8 +171,9 @@ internal sealed class ComponentRegistry
 		}
 
 		CheckReferences(component.Name, component.References);
+		CheckAttributes(component);
 		RequireRegistered(component.References);
-		return new ComponentRegistry([.. Components, component]);
+		return new ComponentRegistry([.. Components, component], Boundaries, Conformance);
 	}
 
 	/// <summary>Unregisters a component nothing references.</summary>
@@ -153,7 +188,7 @@ internal sealed class ComponentRegistry
 				$"remove those references first with 'bassia component set -name <component> -references ...'.");
 		}
 
-		return new ComponentRegistry(Components.Where(item => item.Name != name).ToList());
+		return new ComponentRegistry(Components.Where(item => item.Name != name).ToList(), Boundaries, Conformance);
 	}
 
 	/// <summary>Replaces a component's references; they must name registered components and keep the graph acyclic.</summary>
@@ -162,9 +197,57 @@ internal sealed class ComponentRegistry
 		var component = Require(name);
 		CheckReferences(name, references);
 		RequireRegistered(references);
-		var next = new ComponentRegistry(Components.Select(item => item.Name == name ? component with { References = references } : item).ToList());
+		var next = new ComponentRegistry(Components.Select(item => item.Name == name ? component with { References = references } : item).ToList(), Boundaries, Conformance);
 		next.Closure([name]);
 		return next;
+	}
+
+	/// <summary>Replaces a component's definition by <paramref name="change"/> of it; its tags and visibility must be valid.</summary>
+	public ComponentRegistry Replace(string name, Func<ComponentDefinition, ComponentDefinition> change)
+	{
+		var changed = change(Require(name));
+		CheckAttributes(changed);
+		return new ComponentRegistry(Components.Select(item => item.Name == name ? changed : item).ToList(), Boundaries, Conformance);
+	}
+
+	/// <summary>Appends a valid boundary rule.</summary>
+	public ComponentRegistry AddBoundary(BoundaryRule rule)
+	{
+		rule.Validate($"[[boundary]] #{Boundaries.Count + 1}");
+		return new ComponentRegistry(Components, [.. Boundaries, rule], Conformance);
+	}
+
+	/// <summary>Appends a valid conformance rule.</summary>
+	public ComponentRegistry AddConformance(ConformanceRule rule)
+	{
+		rule.Validate($"[[conformance]] #{Conformance.Count + 1}");
+		return new ComponentRegistry(Components, Boundaries, [.. Conformance, rule]);
+	}
+
+	/// <summary>Removes the conformance rule at <paramref name="index"/> (0-based).</summary>
+	public ComponentRegistry RemoveConformance(int index)
+	{
+		if (index < 0 || index >= Conformance.Count)
+		{
+			throw new MonorepoException(Conformance.Count == 0
+				? "There are no conformance rules to remove."
+				: $"There is no conformance rule #{index + 1}; the rules are #1 to #{Conformance.Count}.");
+		}
+
+		return new ComponentRegistry(Components, Boundaries, Conformance.Where((_, i) => i != index).ToList());
+	}
+
+	/// <summary>Removes the boundary rule at <paramref name="index"/> (0-based).</summary>
+	public ComponentRegistry RemoveBoundary(int index)
+	{
+		if (index < 0 || index >= Boundaries.Count)
+		{
+			throw new MonorepoException(Boundaries.Count == 0
+				? "There are no boundary rules to remove."
+				: $"There is no boundary rule #{index + 1}; the rules are #1 to #{Boundaries.Count}.");
+		}
+
+		return new ComponentRegistry(Components, Boundaries.Where((_, i) => i != index).ToList(), Conformance);
 	}
 
 	/// <summary>
@@ -198,6 +281,28 @@ internal sealed class ComponentRegistry
 		if (references.GroupBy(reference => reference.Path, StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1) is { } clash)
 		{
 			throw new MonorepoException($"Component '{owner}' nests more than one component at '{clash.Key}'.");
+		}
+	}
+
+	private static void CheckAttributes(ComponentDefinition component)
+	{
+		Core.Boundaries.ValidateTags(component.Name, component.Tags);
+		Core.Boundaries.ValidateVisibility(component.Name, component.Visibility);
+		if (component.Exports is { } exports)
+		{
+			try
+			{
+				_ = new Split.PathPatterns(exports);
+			}
+			catch (ArgumentException ex)
+			{
+				throw new MonorepoException($"Component '{component.Name}' exports: {ex.Message}");
+			}
+		}
+
+		if (component.Owners.Any(owner => string.IsNullOrWhiteSpace(owner) || owner.Any(c => char.IsWhiteSpace(c) || c == ',')))
+		{
+			throw new MonorepoException($"Component '{component.Name}': an owner must not be empty or contain whitespace or commas.");
 		}
 	}
 

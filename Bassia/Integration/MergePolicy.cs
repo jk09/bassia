@@ -23,8 +23,14 @@ internal enum WarningsPolicy
 /// <param name="ManualSemantic">A result neither git nor weave can merge is left for a human instead of the resolver.</param>
 /// <param name="ManualPaths">A result whose git conflicts touch any of these paths is left for a human.</param>
 /// <param name="AutoAdvance">A completed integration fast-forwards the base branch itself.</param>
-internal sealed record MergePolicy(bool ManualSemantic, WarningsPolicy Warnings, PathPatterns ManualPaths, bool AutoAdvance)
+/// <param name="ManualBoundaries">A result that adds code boundary violations is left for a human.</param>
+/// <param name="Verify">The tasks the integration runs on the component, when the integration affects it, before publishing.</param>
+/// <param name="OwnerReview">A result in a component with owners is left for a human (its owners).</param>
+internal sealed record MergePolicy(bool ManualSemantic, WarningsPolicy Warnings, PathPatterns ManualPaths, bool AutoAdvance, bool ManualBoundaries = false,
+	IReadOnlyList<string>? Verify = null, bool OwnerReview = false)
 {
+	public IReadOnlyList<string> VerifyTasks => Verify ?? [];
+
 	public static MergePolicy Default { get; } = new(false, WarningsPolicy.Resolver, PathPatterns.Empty, false);
 
 	public static MergePolicy For(ConfigSnapshot config, string component)
@@ -45,7 +51,10 @@ internal sealed record MergePolicy(bool ManualSemantic, WarningsPolicy Warnings,
 			Value("semantic").Equals("manual", StringComparison.OrdinalIgnoreCase),
 			IntegrationRecord.Parse<WarningsPolicy>(Value("warnings").Trim()),
 			patterns,
-			Value("advance").Equals("auto", StringComparison.OrdinalIgnoreCase));
+			Value("advance").Equals("auto", StringComparison.OrdinalIgnoreCase),
+			Value("boundaries").Equals("manual", StringComparison.OrdinalIgnoreCase),
+			Value("verify").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+			Value("owner_review").Equals("manual", StringComparison.OrdinalIgnoreCase));
 	}
 
 	/// <summary>Why a step with these git conflicts needs a human under this policy, or null.</summary>

@@ -21,7 +21,11 @@ concurrency:
 env:
   DOTNET_NOLOGO: '1'
   DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-  DOTNET_VERSION: '10.0.x'
+  # The SDK channel, downloaded from builds.dotnet.microsoft.com directly: the aka.ms redirect that actions/setup-dotnet
+  # and the dotnet-install scripts try first (dotnetorigin.blob.core.windows.net) answered 409 for 10.0.403 and failed
+  # every job before the build.
+  DOTNET_CHANNEL: '10.0'
+  DOTNET_FEED: 'https://builds.dotnet.microsoft.com/dotnet'
 
 jobs:
   test:
@@ -31,9 +35,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Install the .NET SDK
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$DOTNET_CHANNEL/latest.version" | tr -d '\r' | sed '/^$/d' | tail -n 1)
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) rid=linux-x64 ;; Linux/ARM64) rid=linux-arm64 ;; macOS/X64) rid=osx-x64 ;; macOS/ARM64) rid=osx-arm64 ;;
+            *) echo "No .NET SDK for $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-$rid.tar.gz" | tar -xz -C "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+          "$HOME/.dotnet/dotnet" --version
 
       - name: Put the pinned weave-driver on PATH
         shell: pwsh
@@ -80,9 +95,35 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+      - name: Install the .NET SDK
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$DOTNET_CHANNEL/latest.version" | tr -d '\r' | sed '/^$/d' | tail -n 1)
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) rid=linux-x64 ;; Linux/ARM64) rid=linux-arm64 ;; macOS/X64) rid=osx-x64 ;; macOS/ARM64) rid=osx-arm64 ;;
+            *) echo "No .NET SDK for $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-$rid.tar.gz" | tar -xz -C "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+          "$HOME/.dotnet/dotnet" --version
+
+      - name: Install the .NET SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = ((Invoke-RestMethod "$env:DOTNET_FEED/Sdk/$env:DOTNET_CHANNEL/latest.version" -MaximumRetryCount 3) -split "`n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+          $zip = Join-Path $env:RUNNER_TEMP 'dotnet-sdk.zip'
+          Invoke-WebRequest "$env:DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-win-x64.zip" -OutFile $zip -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          & (Join-Path $dir 'dotnet.exe') --version
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Ensure PowerShell 7
         if: runner.os != 'Windows'

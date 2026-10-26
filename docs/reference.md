@@ -121,7 +121,10 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version`, `tutorial` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
-| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>]`, `component show -name <c>`, `component set -name <c> -references ...\|-clear-references`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...]` |
+| Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...] [-tags <t>,...] [-visibility <p>,...] [-owners <o>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>] [-template <t>] [-tags ...] [-visibility ...] [-owners ...]`, `component show -name <c>`, `component set -name <c> [-references ...\|-clear-references] [-tags ...\|-clear-tags] [-visibility ...\|-public\|-private] [-owners ...\|-clear-owners] [-exports ...\|-clear-exports]`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...] [-tags ...] [-visibility ...] [-owners ...]` |
+| Templates and conformance | `template list`, `component create -name <c> -template <t>`, `conformance list`, `conformance add -components <pattern> [-files <p>,...] [-tasks <t>,...] [-owners] [-exports] [-description <text>]`, `conformance remove -index <n>`, `conformance check [-name <c>] [-strict]` |
+| Tasks | `task list [-name <c>]`, `task run -task <t>,... [-select <c[@ref]>,...] [-keep]`, `affected -runs <ids>\|all \| -components <c>,...` |
+| Architectural boundaries | `boundary list`, `boundary add -source <pattern> [-allow <pattern>,...] [-deny <pattern>,...] [-description <text>]`, `boundary remove -index <n>`, `boundary check [-name <c>] [-code] [-strict]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
 | Splitting components | `component survey -name <c> [-depth <n>] [-limit <n>]`, `component split -plan <file>\|- [-name <c>] [-dry-run]` |
@@ -270,6 +273,9 @@ component, is rejected and nothing changes.
 | `merge.semantic` | `resolver` | A result neither git nor weave can merge goes to the resolver, or is left for a human (`manual`) |
 | `merge.warnings` | `resolver` | A result weave merged with warnings: reviewed by the resolver, left for a human (`manual`), or weave's merge stands (`accept`) |
 | `merge.manual_paths` | (none) | Path patterns, as in split plans (`**/*.csproj,db/migrations`), whose conflicts always need a human |
+| `merge.boundaries` | `warn` | `manual`: a result that adds code boundary violations (see [Code boundaries](#code-boundaries-exports-indirect-use-and-paths-outside-a-component)) is left for a human; `warn` only records them |
+| `merge.verify` | (none) | Tasks (`build,test`) the integration runs on every component it affects before publishing anything; see [Tasks](#tasks-affected-components-and-the-verification-gate) |
+| `merge.owner_review` | `off` | `manual`: a result in a component with `owners` is left for a human, and the step names the owners to ask |
 | `merge.advance` | `manual` | `auto`: a completed integration fast-forwards the base branches itself, as `integration advance` would |
 | `lock.files` | (none) | Path patterns of files a run holds one by one while its agent changes them (see [Locking files and folders](#locking-files-and-folders)) |
 | `lock.folders` | (none) | Path patterns of folders a run holds as a whole while its agent changes a file in them: `src/*` is each folder directly under `src`, `**` the folder of every file |
@@ -291,6 +297,122 @@ bassia config unset merge.advance -user
 
 `component add|set|remove` edit `.bassia/components.toml` the same way and reject a change that would leave a cycle
 or a reference to an unregistered component.
+
+### Architectural boundaries
+
+Components are the monorepo's architecture: a run sees only the components it selected and what they reference, so
+nothing else is there to use. Boundaries say which references the architecture allows, in the spirit of nx's module
+boundaries. Each component can carry **tags**, which place it in the architecture (`type:app`, `type:lib`,
+`scope:billing`), a **visibility**, which says who may reference it, and **owners**. **Boundary rules** over the tags
+say which components may reference which. All of it lives in `.bassia/components.toml`, versioned with the graph:
+
+```toml
+[[component]]
+name = "billing-core"
+tags = ["type:lib", "scope:billing"]
+visibility = ["scope:billing", "component:admin"]   # only these may reference it; [] makes it private
+owners = ["team-billing"]
+
+[[boundary]]
+description = "apps use libraries and UI, never other apps"
+source = "type:app"
+allow = ["type:lib", "type:ui"]
+
+[[boundary]]
+source = "scope:*"
+allow = ["scope:$1", "scope:shared"]                # each scope only itself and the shared one
+```
+
+```powershell
+bassia component set -name billing-core -tags type:lib,scope:billing -visibility scope:billing -owners team-billing
+bassia boundary add -source type:lib -deny type:app -description "libraries never depend on apps"
+bassia boundary list
+bassia boundary check                 # every violation, as warnings; -strict fails on any (for CI)
+```
+
+- **Patterns.** In `source`, `allow`, `deny` and `visibility`, `*` matches any characters and `?` one character.
+  `$1`, `$2`, ... in `allow` and `deny` stand for what the source's wildcards matched, so `scope:*` with
+  `allow = ["scope:$1"]` keeps every scope to itself. Every component also has the implicit tag `component:<name>`,
+  so a rule or a visibility can name a single component.
+- **Rules.** A reference `A -> B` is checked against every rule whose `source` matches a tag of `A`, once per matching
+  tag. With `allow`, some tag of `B` must match an allow pattern. With `deny`, no tag of `B` may match a deny pattern.
+  A component no rule's source matches is unconstrained.
+- **Visibility.** A component with `visibility` may be referenced only by components with a tag matching one of its
+  patterns. Without it, it is public.
+- **Enforcement.** Every change to the graph is checked: `component add`, `create`, `fork`, `set` and `split`. A
+  change that would add a violation not already in the graph is refused with every new violation named, and nothing
+  changes. Violations already there are kept and reported as `warnings` by the commands that change the graph, and
+  counted by `status`, `graph`, `component list` and `component show`. They come from a hand edit, or from a rule added
+  to a monorepo that does not follow it yet: adding or removing a rule is never refused. Unwinding submodules records
+  the structure it finds, so its new violations are warnings too.
+- **Defaults.** A fork takes its parent's tags, visibility and owners unless `-tags`, `-visibility` or `-owners` say
+  otherwise. A split part takes the source's, unless its `[[part]]` sets `tags`, `visibility` or `owners`.
+
+A monorepo without tags and rules behaves as before.
+
+#### Code boundaries: exports, indirect use and paths outside a component
+
+A run nests each referenced component whole, together with the components *it* nests, so the graph alone cannot stop
+`app` from using `lib`'s internals or reaching `core` through `lib`. Bassia therefore also reads the code. A component
+declares its public API with `exports` (the split plans' path patterns; without it, everything is exported):
+
+```powershell
+bassia component set -name lib -exports src/api,include
+bassia boundary check -code            # graph and code; -strict fails on any violation (for CI)
+```
+
+The scanner finds path-like dependencies: relative JS/TS imports (`import ... from './x'`, `import()`, `require()`,
+`export ... from`), quoted C/C++ `#include`s, MSBuild items and imports (`ProjectReference`, `Import`, `Compile`, ...)
+and `.sln` projects, `file:`/`link:` packages in `package.json`, and CMake `add_subdirectory`/`include`. Each is resolved
+against the file's folder, where the run nests the references. Namespace and module imports (C# `using`, Python, Go,
+Java) name no folder, so they are not seen. A dependency is a violation when it:
+
+- **private** - uses a path of a referenced component that its `exports` do not cover (a script import may leave out
+  its extension or `/index`);
+- **indirect** - reaches a component through another component's nested reference (`./lib/vendor/core/...`). The
+  referrer should reference it itself and use its own copy, which stays at the version the referrer selects;
+- **outside** - leaves the component's root (`../core/...`), which in a run folder lands in a sibling checkout.
+
+`boundary check -code` scans every component at the tip of its default branch. Per component, it also lists the
+references the code uses and the `unused_references`. The latter are information only, since namespace imports are not
+seen.
+
+- **Runs.** When a run has published a component's result, Bassia scans the result. The violations the commit the run
+  started from did not have are recorded in `run.toml` (`[[component.boundary_violation]]`), named in the run's
+  message and reported by `agent show`. The run still completes. When the monorepo has rules, or a selected component
+  has tags, a visibility or exports, the run folder's `AGENTS.md`/`CLAUDE.md` explain the boundaries of the selected
+  components, so the agent knows them before it starts.
+- **Integration.** Each step records the code violations its result adds over the base (`boundary_violations` in
+  `integration.toml`, `integration plan`/`show`). The semantic brief lists them. `merge.boundaries` decides what they
+  mean: `warn` (the default) only records them, and `manual` leaves the result for a human. Like the other `merge.*`
+  settings, it can be set per component (`merge.component.<component>.boundaries`).
+
+#### Conformance
+
+Conformance rules say what components with given tags must have. They are `[[conformance]]` tables in
+`components.toml`:
+
+```toml
+[[conformance]]
+description = "libraries are documented, tested and owned"
+components = "type:lib"          # a tag pattern, as in boundary rules
+files = ["README.md", "LICENSE"] # paths at the tip of the default branch (a folder: any file below it)
+tasks = ["test"]                 # tasks its bassia.toml defines
+owners = true
+exports = true
+```
+
+```powershell
+bassia conformance add -components type:lib -files README.md -tasks test -owners
+bassia conformance check                # every unmet requirement, as warnings; -strict fails on any (for CI)
+bassia conformance list
+bassia conformance remove 1
+```
+
+Conformance is reported, never enforced on a change. What a component holds changes through runs; hold a result back
+with `merge.verify`, or fail CI with `conformance check -strict`. The dashboard's components table shows each
+component's tags and how many boundary and conformance findings it has; its page lists them, with its visibility,
+exports and owners.
 
 ### Splitting a component
 
@@ -325,6 +447,8 @@ name = "app-ui"
 paths = ["src/ui", "!src/ui/generated"]
 references = ["app-core", "lib"]
 url = "https://github.com/myrepo/app-ui.git"   # optional: recorded in components.toml and as the repo's origin
+tags = ["type:ui"]                      # optional, like visibility and owners: default is the source's
+exports = ["src/api"]                   # optional: the part's public API (default: everything)
 
 [[referrer]]                            # optional: by default a referrer of the source references every part
 name = "tool"
@@ -406,6 +530,27 @@ bassia component create -name app -references lib,ui:vendor/ui
 `component create` makes a component that did not exist anywhere before: its history starts with one commit without
 files on its main branch (`-branch` names another), so an agentic run can select it at once (`-select docs`) and write
 its first files. `-url` records the upstream it will be published to.
+
+#### Templates
+
+A template starts a component from the monorepo's conventions instead of from nothing. It is a folder in the meta-repo,
+`.bassia/templates/<name>/`, committed with it:
+
+```
+.bassia/templates/lib/
+  template.toml        description, tags, visibility, exports, owners, references (each optional)
+  files/README.md      starter files; {{name}} in contents and paths becomes the component's name
+  files/bassia.toml
+```
+
+```powershell
+bassia template list
+bassia component create -name parser -template lib            # tags, exports, owners and files from the template
+bassia component create -name parser -template lib -owners me # a switch given wins over the template
+```
+
+The component gets its empty first commit and a second, `Apply template '<name>'`, with the files. An unknown template
+fails before anything is created. Boundary rules check the new component as they check any other.
 
 ### Forking instead of branching
 
@@ -561,6 +706,50 @@ Locks are advisory while the agent works - Bassia cannot stop an agent from writ
 recorded and the integration enforces `lock.conflict` (see below). The integration also merges a result after the
 results it brought in, and treats it no less carefully than them.
 
+### Tasks, affected components and the verification gate
+
+A component defines its own tasks in a `bassia.toml` at its root, versioned with the code they build, as nx's
+`project.json` is:
+
+```toml
+[tasks.build]
+command = "dotnet build"
+depends_on = ["^build"]      # first: the build of every component it references, transitively
+
+[tasks.test]
+command = "dotnet test --no-build"
+depends_on = ["build"]       # first: its own build
+```
+
+```powershell
+bassia task list                                  # every component's tasks on its main branch
+bassia task run -task test -select app,lib@v2     # lib:build, app:build, app:test - in a checkout laid out as a run's
+bassia affected -runs brave-otter                 # what the run changed, and everything that references it
+bassia config set merge.verify -value build,test  # the integration's gate
+```
+
+- **Tasks.** `command` is a shell line run in the component's folder. In `depends_on`, `x` is the component's own
+  task `x` and `^x` is task `x` of each component it references, transitively, that defines one. An unknown
+  dependency or a cycle is an error naming the task.
+- **`task run`** checks out the selection's closure under the workspace (`tasks-<key>`), with each reference nested
+  as in a run. It runs the selected components' tasks and what they depend on, one after another in dependency order,
+  and stops at the first failure. Each task's output goes to a log under `<workspace>/.task-logs`. The checkout is
+  removed when every task passed, unless `-keep`. Without `-select`, every component is selected at its main-branch
+  tip. Inside an agentic run (`BASSIA_RUN_DIR`), the run's own checkout is used instead, so an agent can build and
+  test its change as it stands.
+- **`affected`** takes `-runs` (their pushed results) or `-components`. It lists those components and every component
+  that references one of them, transitively, in dependency order. It also gives the `-select` value covering their
+  closure.
+- **The gate.** `merge.verify` (a list of task names, also per component as `merge.component.<component>.verify`)
+  makes the integration verify before it publishes. Every component is merged first. Then the base tips of the
+  affected components it did not change are checked out next to the merged ones, the references are nested, and each
+  affected component's `merge.verify` tasks run (with what they depend on). A component that defines none of them is
+  not checked. If a task fails, nothing is published: the merged components are `failed` with the task named, the
+  integration is `partial`, and `integration.toml` records every task that ran under `[[verification]]` (exit code,
+  duration, log). The workspace is kept for inspection. Without `merge.verify`, the integration publishes as before.
+
+Task results are not cached yet.
+
 ### Integration: syntactic first, then structural, then semantic
 
 Every successful run leaves its changes in each component it touched as a result tag `agent-run/<key>/<n>` - the same name in every component. `integration start` consolidates the results of several runs, component by component, into one integration:
@@ -573,7 +762,7 @@ bassia integration plan -runs all -weave off                     # the triage wi
 bassia integration advance <id>                                  # fast-forward the base branches to the result
 ```
 
-1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it), `manual` (left for a human) or `skip`. The **merge policy** (the `merge.*` settings, see [Configuration](#configuration)) decides between the resolver and a human: with `merge.semantic = manual`, with `merge.warnings = manual`, or for conflicts in `merge.manual_paths`, a step is `manual`; with `merge.warnings = accept` weave's merge with warnings stands. A result with a **lock conflict** (it changed a path another run held, see [Locking files and folders](#locking-files-and-folders)) goes by `lock.conflict`: to the resolver even when git or weave merge it cleanly (`resolver`, the default; its brief lists the conflicts), to a human (`manual`), or like any other result (`merge`). Results are taken oldest run first, except that a result which brought other runs' results in (`lock wait`) comes after them, and is `manual` or `semantic` when one of them is. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review, and wins over the policy; `-manual` leaves a result for a human; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
+1. **Triage.** For each component the runs changed, the results are considered oldest run first against a base: the component's default branch (usually `main`), or the branch or tag `-onto` names. Git classifies each one without a working tree (`git merge-tree`): `up_to_date` (already contained), `fast_forward`, `clean` (a three-way merge without conflicts) or `conflict`. Where git conflicts, the **structural merge** is asked the same question (see below): `clean`, `warnings` (merged, but weave doubts the result means what both sides meant) or `conflict`, with the files still conflicted after it. The results git or the structural merge can merge cleanly are chained onto a simulated head in order, so a result that merges cleanly onto the base but collides with an earlier one is caught here too. Every step is then `syntactic` (git merges it), `structural` (git merges it with weave as the merge driver), `semantic` (the resolver merges it), `manual` (left for a human) or `skip`. The **merge policy** (the `merge.*` settings, see [Configuration](#configuration)) decides between the resolver and a human: with `merge.semantic = manual`, with `merge.warnings = manual`, or for conflicts in `merge.manual_paths`, a step is `manual`; with `merge.warnings = accept` weave's merge with warnings stands. A result that adds **code boundary violations** is `manual` with `merge.boundaries = manual`. With `merge.owner_review = manual`, a result in a component that has `owners` is `manual`, and its note names them (the component's `owners` are recorded with it). A result with a **lock conflict** (it changed a path another run held, see [Locking files and folders](#locking-files-and-folders)) goes by `lock.conflict`: to the resolver even when git or weave merge it cleanly (`resolver`, the default; its brief lists the conflicts), to a human (`manual`), or like any other result (`merge`). Results are taken oldest run first, except that a result which brought other runs' results in (`lock wait`) comes after them, and is `manual` or `semantic` when one of them is. `-semantic` sends a result to the resolver even without a textual conflict, for a semantic review, and wins over the policy; `-manual` leaves a result for a human; `-skip` leaves it out. The triage also lists, for each result, the other runs it conflicts with directly.
 2. **Syntactic and structural steps first.** Each component is merged in its own checkout under `.workspace/integration-<key>/<component>`, on the branch `integration/<key>` started at the base. Every syntactic step is a `git merge --no-ff` of the run's result tag, every structural one the same with weave as the merge driver, in run order. If one conflicts after all (or the structural merge warns), it moves to the back of the semantic queue.
 3. **Semantic steps next.** For each remaining step Bassia starts the merge - with weave as the merge driver when the structural merge is enabled, so only what weave could not merge is left conflicted, in entity-labelled conflicts - with `diff3` conflict markers for what git's own merge leaves, so the common ancestor is visible, and writes a **semantic brief**: the incoming run's prompt, baseline, command and commit records; which runs are already integrated and why; the history and diff of both sides since their common ancestor; the conflicted files (and, with the structural merge, which files git alone conflicted on, which of them weave merged, and weave's warnings); and instructions. The resolver command (by default `claude -p --permission-mode acceptEdits`, configurable as `[integration] resolver` in `config.toml`) runs in the component's working tree with the brief on stdin and these environment variables: `BASSIA_MERGE_BRIEF` (the brief's path), `BASSIA_COMPONENT`, `BASSIA_RUN_ID`, `BASSIA_INTEGRATION_ID` and `BASSIA_ROOT`. When it exits with code 0 and no conflict marker (nor weave's `weave explain` pointer) is left, Bassia commits the merge. A non-zero exit or leftover markers abort that step, which is recorded as `failed`; the other steps still go ahead.
 4. **Result.** Each merge commit's message is a subject and an `[integration]` TOML record (run, source tag, strategy, rationale, conflicts, structural driver and conflicts, resolver). The result is tagged `integration/<key>/<n>` - one identically named annotated tag across the components - and branch and tag are pushed to the component's source-of-truth repo. That tag is a baseline like any other: `agent start -select app@integration/<key>/0,...` starts the next run from it. Nothing else moves: `integration advance <id>` fast-forwards each component's base branch to the result, and refuses if the branch moved since the integration was built on it, or if the base was a tag.
@@ -739,8 +928,9 @@ Bassia has three layers; each depends only on the ones below it.
    granularity.
 2. **Component graph** (`Bassia/Core`) - `ComponentRegistry` is the immutable, validated graph of components and
    their references (unique valid names, references to registered components at paths inside the referrer, no
-   cycles; closure and dependency order). `MetaRepo` maintains it: every change is checked against the graph, then
-   persisted as one revision. `MonorepoGraph` is the API over both: create, import, remove, reference, tag, fork,
+   cycles; closure and dependency order), with the components' tags, visibility and owners and the boundary rules
+   (`Core/Boundaries`: tag patterns and the violations of a graph). `MetaRepo` maintains it: every change is checked against the graph and its
+   boundaries (a change to the graph may not add a violation), then persisted as one revision. `MonorepoGraph` is the API over both: create, import, remove, reference, tag, fork,
    split and unwrap components, and `AgentRuns` runs agentic runs on it (selection, working copies with nested
    references, commit/tag/publish, records, retry, abandon), with the agent process and the lock session injected.
    Integration (`Bassia/Integration`: the triage, the merges, the resolver, publishing and advancing, with

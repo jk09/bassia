@@ -219,12 +219,16 @@ internal sealed partial class Dashboard
 		var state = await LoadAsync();
 		var activity = await ActivityAsync(state);
 		var graph = new Graph.ComponentGraph(state.Monorepo.Components);
+		var findings = await FindingsAsync(state.Monorepo);
 		var rows = new StringBuilder();
 		foreach (var component in state.Monorepo.Components)
 		{
 			var info = activity[component.Name];
+			var count = findings.GetValueOrDefault(component.Name)?.Count ?? 0;
 			rows.Append($"""
 				<tr><td><a href="{ComponentHref(component.Name)}" title="{E(component.Url)}"><b>{E(component.Name)}</b></a></td>
+				<td>{Tags(component.Tags)}</td>
+				<td>{(count > 0 ? $"<b class=\"bad\">{count}</b>" : "0")}</td>
 				<td>{References(component.References.Select(reference => reference.Name))}</td>
 				<td>{References(graph.ReferrersOf(component.Name).Select(reference => reference.Name))}</td>
 				<td>{(info.LatestTag is null ? "<span class=\"muted\">-</span>" : Ref(info.LatestTag))}</td>
@@ -235,13 +239,47 @@ internal sealed partial class Dashboard
 		var body = $"""
 			<p class="muted">Each box is a component; an arrow points at what it needs. Hover one to light up everything it needs and everything that needs it. <a href="/graph.svg">graph.svg</a> is the plain picture.</p>
 			<div class="split"><section class="fit">{Charts.ComponentMap(state.Monorepo.Components, activity)}</section><section class="wide">
-			<table class="list"><tr><th>Component</th><th>Needs</th><th>Used by</th><th>Latest tag</th><th>Runs</th><th>Live</th><th>Queued</th><th>Attention</th></tr>
+			<table class="list"><tr><th>Component</th><th>Tags</th><th>Findings</th><th>Needs</th><th>Used by</th><th>Latest tag</th><th>Runs</th><th>Live</th><th>Queued</th><th>Attention</th></tr>
 			{rows}</table>
 			<p>{Cmd("bassia component add -url <url> -references <component,...>")} {Cmd("bassia graph -format tree")}</p>
 			</section></div>
 			""";
 		return View("/components", "Components", body);
 	}
+
+	private static string Tags(IReadOnlyList<string> tags) =>
+		tags.Count == 0 ? "<span class=\"muted\">-</span>" : string.Join(" ", tags.Select(tag => $"<span class=\"chip\">{E(tag)}</span>"));
+
+	/// <summary>Per component, what breaks its boundaries (as referrer or referenced) and what it lacks of the conformance rules.</summary>
+	private static async Task<IReadOnlyDictionary<string, List<string>>> FindingsAsync(Monorepo monorepo)
+	{
+		var findings = monorepo.Components.ToDictionary(component => component.Name, _ => new List<string>(), StringComparer.Ordinal);
+		foreach (var violation in monorepo.Registry.Violations())
+		{
+			findings[violation.From].Add(violation.Message);
+			if (violation.To != violation.From)
+			{
+				findings[violation.To].Add(violation.Message);
+			}
+		}
+
+		try
+		{
+			foreach (var finding in await Core.ConformanceChecker.CheckAllAsync(monorepo.Registry, monorepo.Graph().Storage))
+			{
+				findings[finding.Component].Add(finding.Message);
+			}
+		}
+		catch (Exception ex) when (ex is MonorepoException or Storage.StorageException)
+		{
+			// A component whose history cannot be read has no conformance findings to show.
+		}
+
+		return findings;
+	}
+
+	private static string FindingList(IReadOnlyList<string> findings) =>
+		findings.Count == 0 ? "none" : "<ul>" + string.Concat(findings.Select(finding => $"<li class=\"bad\">{E(finding)}</li>")) + "</ul>";
 
 	private static string References(IEnumerable<string> names)
 	{
@@ -285,6 +323,11 @@ internal sealed partial class Dashboard
 			<tr><td>URL</td><td>{E(component.Url)}</td></tr>
 			<tr><td>Needs</td><td>{References(component.References.Select(reference => reference.Name))}</td></tr>
 			<tr><td>Used by</td><td>{References(graph.ReferrersOf(name).Select(reference => reference.Name))}</td></tr>
+			<tr><td>Tags</td><td>{Tags(component.Tags)}</td></tr>
+			<tr><td>Visibility</td><td>{E(ComponentCommands.DescribeVisibility(component.Visibility))}</td></tr>
+			<tr><td>Exports</td><td>{(component.Exports is null ? "everything" : string.Join(", ", component.Exports.Select(pattern => $"<code>{E(pattern)}</code>")))}</td></tr>
+			<tr><td>Owners</td><td>{(component.Owners.Count == 0 ? "<span class=\"muted\">-</span>" : E(string.Join(", ", component.Owners)))}</td></tr>
+			<tr><td>Findings</td><td>{FindingList((await FindingsAsync(state.Monorepo)).GetValueOrDefault(name) ?? [])}</td></tr>
 			<tr><td>Merge policy</td><td>{PolicyText(policy)} <a href="/config">configuration</a></td></tr>
 			<tr><td>Lock filter</td><td>{LockFilterText(state.Monorepo, name)} <a href="/locks">locks</a></td></tr>
 			{HeldRow("Held now", state.Locks.InComponent(name).Where(row => row.State == Locks.LockState.Live))}

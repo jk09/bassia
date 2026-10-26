@@ -24,18 +24,35 @@ internal sealed class MetaRepo
 	public string Location => store.Location;
 
 	public static async Task<MetaRepo> OpenAsync(IMetaStore store) =>
-		new(store, ComponentRegistry.FromDefinitions(await store.LoadAsync()));
+		new(store, ComponentRegistry.FromDefinitions(await store.LoadAsync(), await store.LoadBoundariesAsync(), await store.LoadConformanceAsync()));
 
 	/// <summary>A meta-repo whose registry was already read from <paramref name="store"/>.</summary>
 	public static MetaRepo Open(IMetaStore store, ComponentRegistry registry) => new(store, registry);
 
 	/// <summary>
-	/// Checks <paramref name="changes"/> against the graph and commits them as one revision; returns the revision id
-	/// (null when the store recorded nothing new). Nothing is persisted when a change does not fit.
+	/// The registry <paramref name="changes"/> would make; throws when a change does not fit the graph, or when a change to
+	/// the graph adds a boundary violation that was not there before (<see cref="BoundaryViolationException"/>), unless
+	/// <paramref name="allowNewViolations"/>. Violations already in the graph are kept, and so are those a change to the
+	/// rules themselves reveals: a rule can be introduced into a monorepo that does not follow it yet.
 	/// </summary>
-	public async Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message)
+	public ComponentRegistry Check(IReadOnlyList<RegistryChange> changes, bool allowNewViolations = false)
 	{
 		var next = Registry.Apply(changes);
+		if (!allowNewViolations && changes.Any(change => !change.IsRuleChange) && Boundaries.Added(Registry, next) is { Count: > 0 } added)
+		{
+			throw new BoundaryViolationException(added);
+		}
+
+		return next;
+	}
+
+	/// <summary>
+	/// Checks <paramref name="changes"/> (see <see cref="Check"/>) and commits them as one revision; returns the revision id
+	/// (null when the store recorded nothing new). Nothing is persisted when a change does not fit.
+	/// </summary>
+	public async Task<string?> CommitAsync(IReadOnlyList<RegistryChange> changes, string message, bool allowNewViolations = false)
+	{
+		var next = Check(changes, allowNewViolations);
 		var revision = await store.CommitAsync(changes, message);
 		Registry = next;
 		return revision;

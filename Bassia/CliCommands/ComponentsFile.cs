@@ -14,30 +14,50 @@ internal static class ComponentsFile
 	public static string PathOf(string root) => Path.Combine(root, Monorepo.MetaRepoFolderName, "components.toml");
 
 	/// <summary>
-	/// Appends a new <c>[[component]]</c> block; an empty <paramref name="url"/> (a component with no upstream) is left out.
-	/// A fork records the component it came from and the commit it forked at.
+	/// Appends a new <c>[[component]]</c> block; an empty url (a component with no upstream), empty references, tags and
+	/// owners and a public visibility are left out. A fork records the component it came from and the commit it forked at.
 	/// </summary>
-	public static void Add(string root, string name, string url, IReadOnlyList<ComponentReference> references, string? forkOf = null, string? forkCommit = null)
+	public static void Add(string root, ComponentDefinition component)
 	{
-		var builder = new StringBuilder($"\n[[component]]\nname = {ConfigFile.Quote(name)}\n");
-		if (url.Length > 0)
+		var builder = new StringBuilder($"\n[[component]]\nname = {ConfigFile.Quote(component.Name)}\n");
+		if (component.Url.Length > 0)
 		{
-			builder.Append($"url = {ConfigFile.Quote(url)}\n");
+			builder.Append($"url = {ConfigFile.Quote(component.Url)}\n");
 		}
 
-		if (references.Count > 0)
+		if (component.References.Count > 0)
 		{
-			builder.Append(ReferencesLine(references)).Append('\n');
+			builder.Append(ReferencesLine(component.References)).Append('\n');
 		}
 
-		if (forkOf is not null)
+		if (component.Tags.Count > 0)
 		{
-			builder.Append($"fork_of = {ConfigFile.Quote(forkOf)}\n");
+			builder.Append(ListLine("tags", component.Tags)).Append('\n');
 		}
 
-		if (forkCommit is not null)
+		if (component.Visibility is not null)
 		{
-			builder.Append($"fork_commit = {ConfigFile.Quote(forkCommit)}\n");
+			builder.Append(ListLine("visibility", component.Visibility)).Append('\n');
+		}
+
+		if (component.Owners.Count > 0)
+		{
+			builder.Append(ListLine("owners", component.Owners)).Append('\n');
+		}
+
+		if (component.Exports is not null)
+		{
+			builder.Append(ListLine("exports", component.Exports)).Append('\n');
+		}
+
+		if (component.ForkOf is not null)
+		{
+			builder.Append($"fork_of = {ConfigFile.Quote(component.ForkOf)}\n");
+		}
+
+		if (component.ForkCommit is not null)
+		{
+			builder.Append($"fork_commit = {ConfigFile.Quote(component.ForkCommit)}\n");
 		}
 
 		Edit(root, text => text + builder);
@@ -45,13 +65,22 @@ internal static class ComponentsFile
 
 	/// <summary>Replaces the <c>references</c> of a component; an empty list removes the key.</summary>
 	public static void SetReferences(string root, string name, IReadOnlyList<ComponentReference> references) =>
+		SetKey(root, name, "references", references.Count > 0 ? ReferencesLine(references) : null);
+
+	/// <summary>Replaces a list key (<c>tags</c>, <c>visibility</c>, <c>owners</c>) of a component; null removes the key.</summary>
+	public static void SetList(string root, string name, string key, IReadOnlyList<string>? values) =>
+		SetKey(root, name, key, values is null ? null : ListLine(key, values));
+
+	/// <summary>Replaces the line(s) of <paramref name="key"/> in a component's block by <paramref name="line"/>, or removes them when null.</summary>
+	private static void SetKey(string root, string name, string key, string? line) =>
 		Edit(root, text =>
 		{
 			var lines = Lines(text);
 			var (start, end) = Block(lines, name);
+			var at = -1;
 			for (var i = start + 1; i < end; i++)
 			{
-				if (!IsKey(lines[i], "references"))
+				if (!IsKey(lines[i], key))
 				{
 					continue;
 				}
@@ -66,15 +95,106 @@ internal static class ComponentsFile
 
 				lines.RemoveRange(i, last - i + 1);
 				end -= last - i + 1;
+				at = i;
 				break;
 			}
 
-			if (references.Count > 0)
+			if (line is not null)
 			{
-				var nameLine = Enumerable.Range(start + 1, end - start - 1).FirstOrDefault(i => IsKey(lines[i], "name"), end - 1);
-				lines.Insert(nameLine + 1, ReferencesLine(references));
+				if (at < 0)
+				{
+					// After the name (and url) - or at the end of the block for anything but references, which comes first.
+					var nameLine = Enumerable.Range(start + 1, end - start - 1).FirstOrDefault(i => IsKey(lines[i], "name"), end - 1);
+					at = key == "references" ? nameLine + 1 : end;
+				}
+
+				lines.Insert(at, line);
 			}
 
+			return string.Join("\n", lines);
+		});
+
+	/// <summary>Appends a <c>[[boundary]]</c> block.</summary>
+	public static void AddBoundary(string root, Core.BoundaryRule rule)
+	{
+		var builder = new StringBuilder("\n[[boundary]]\n");
+		if (rule.Description is not null)
+		{
+			builder.Append($"description = {ConfigFile.Quote(rule.Description)}\n");
+		}
+
+		builder.Append($"source = {ConfigFile.Quote(rule.Source)}\n");
+		if (rule.Allow.Count > 0)
+		{
+			builder.Append(ListLine("allow", rule.Allow)).Append('\n');
+		}
+
+		if (rule.Deny.Count > 0)
+		{
+			builder.Append(ListLine("deny", rule.Deny)).Append('\n');
+		}
+
+		Edit(root, text => text + builder);
+	}
+
+	/// <summary>Appends a <c>[[conformance]]</c> block.</summary>
+	public static void AddConformance(string root, Core.ConformanceRule rule)
+	{
+		var builder = new StringBuilder("\n[[conformance]]\n");
+		if (rule.Description is not null)
+		{
+			builder.Append($"description = {ConfigFile.Quote(rule.Description)}\n");
+		}
+
+		builder.Append($"components = {ConfigFile.Quote(rule.Components)}\n");
+		if (rule.Files.Count > 0)
+		{
+			builder.Append(ListLine("files", rule.Files)).Append('\n');
+		}
+
+		if (rule.Tasks.Count > 0)
+		{
+			builder.Append(ListLine("tasks", rule.Tasks)).Append('\n');
+		}
+
+		if (rule.Owners)
+		{
+			builder.Append("owners = true\n");
+		}
+
+		if (rule.Exports)
+		{
+			builder.Append("exports = true\n");
+		}
+
+		Edit(root, text => text + builder);
+	}
+
+	/// <summary>Removes the <paramref name="index"/>-th (0-based) <c>[[<paramref name="table"/>]]</c> block, with the blank line before it.</summary>
+	public static void RemoveTable(string root, string table, int index) =>
+		Edit(root, text =>
+		{
+			var lines = Lines(text);
+			var headers = Enumerable.Range(0, lines.Count).Where(i => lines[i].Trim() == $"[[{table}]]").ToList();
+			if (index < 0 || index >= headers.Count)
+			{
+				throw new MonorepoException($"components.toml has no [[{table}]] #{index + 1}.");
+			}
+
+			var start = headers[index];
+			var end = lines.FindIndex(start + 1, line => line.TrimStart().StartsWith('['));
+			end = end < 0 ? lines.Count : end;
+			while (end > start + 1 && lines[end - 1].Trim().Length == 0)
+			{
+				end--;
+			}
+
+			if (start > 0 && lines[start - 1].Trim().Length == 0)
+			{
+				start--;
+			}
+
+			lines.RemoveRange(start, end - start);
 			return string.Join("\n", lines);
 		});
 
@@ -110,6 +230,9 @@ internal static class ComponentsFile
 
 			return new ComponentReference(name, path);
 		}).ToList();
+
+	private static string ListLine(string key, IEnumerable<string> values) =>
+		$"{key} = [{string.Join(", ", values.Select(ConfigFile.Quote))}]";
 
 	private static string ReferencesLine(IReadOnlyList<ComponentReference> references) =>
 		"references = [" + string.Join(", ", references.Select(reference => reference.Path == reference.Name

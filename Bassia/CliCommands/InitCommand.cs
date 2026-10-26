@@ -58,7 +58,12 @@ internal static class InitCommand
 		"# Each registered component is recorded as:\n" +
 		"# [[component]]\n" +
 		"# name = \"component_1\"\n" +
-		"# url = \"https://github.com/myrepo/component_1.git\"\n";
+		"# url = \"https://github.com/myrepo/component_1.git\"\n" +
+		"# tags = [\"type:lib\"]           (optional, like references, visibility and owners)\n" +
+		"# Boundary rules - which tagged components may reference which - are recorded as:\n" +
+		"# [[boundary]]\n" +
+		"# source = \"type:app\"\n" +
+		"# allow = [\"type:lib\"]\n";
 
 	public static async Task<int> RunAsync(Invocation invocation)
 	{

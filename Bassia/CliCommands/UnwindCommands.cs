@@ -16,7 +16,8 @@ internal static class UnwindCommands
 		var definition = ComponentCommands.RequireComponent(monorepo, invocation.Require("name"));
 		ComponentCommands.RequireRepo(monorepo, definition.Name);
 
-		using var unwinder = await monorepo.Graph().PlanUnwrapAsync(definition.Name);
+		var graph = monorepo.Graph();
+		using var unwinder = await graph.PlanUnwrapAsync(definition.Name);
 		var dryRun = invocation.Has("dry-run");
 		var count = unwinder.Unwinding.Sum(context => context.Pins.Count);
 		if (count == 0)
@@ -31,7 +32,9 @@ internal static class UnwindCommands
 			commit = await unwinder.ApplyAsync($"Unwind the submodules of component '{definition.Name}'{AddedSuffix(unwinder)}");
 		}
 
-		return ProgramCli.WriteResult(true, invocation.Command, Summary(unwinder, dryRun), Describe(unwinder, dryRun, commit));
+		var payload = Describe(unwinder, dryRun, commit);
+		payload["warnings"] = dryRun ? null : ComponentCommands.Warnings(graph.Registry.Violations());
+		return ProgramCli.WriteResult(true, invocation.Command, Summary(unwinder, dryRun), payload);
 	}
 
 	// ----- bassia component add -unwind -----
@@ -42,12 +45,14 @@ internal static class UnwindCommands
 	/// </summary>
 	public static async Task<int> AddUnwoundAsync(Invocation invocation, Monorepo monorepo, string name, string url, IReadOnlyList<ComponentReference> references)
 	{
-		using var unwinder = await monorepo.Graph().ImportUnwrappedAsync(name, url, references);
+		var graph = monorepo.Graph();
+		using var unwinder = await graph.ImportUnwrappedAsync(name, url, references);
 		var commit = await unwinder.ApplyAsync($"Add component '{name}' from '{url}' and unwind its submodules{AddedSuffix(unwinder)}", references);
 		var count = unwinder.Unwinding.Sum(context => context.Pins.Count);
 		var payload = Describe(unwinder, dryRun: false, commit);
 		payload["url"] = url;
 		payload["path"] = unwinder.Root.RepoDir;
+		payload["warnings"] = ComponentCommands.Warnings(graph.Registry.Violations());
 		return ProgramCli.WriteResult(true, invocation.Command,
 			count == 0
 				? $"Added component '{name}' from '{url}'; it has no submodules to unwind."

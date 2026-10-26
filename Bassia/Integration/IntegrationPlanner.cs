@@ -98,6 +98,8 @@ internal static class IntegrationPlanner
 			?? throw new IntegrationException($"'{baseRef}' does not exist in component '{name}' ('{store.Location}').");
 
 		var component = new ComponentIntegration { Name = name, BaseRef = baseRef, BaseCommit = baseCommit };
+		component.Owners.AddRange(graph.Registry.Find(name)?.Owners ?? []);
+		var baseScan = await ScanAsync(graph, store, name, baseCommit);
 		var candidates = new List<IntegrationStep>();
 		var caughtUp = new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal);
 		foreach (var run in runs)
@@ -122,6 +124,11 @@ internal static class IntegrationPlanner
 				SourceCommit = sourceCommit
 			};
 			step.LockConflicts.AddRange(result.LockConflicts.Select(conflict => conflict.Describe()));
+			if (await ScanAsync(graph, store, name, sourceCommit) is { } scan)
+			{
+				step.BoundaryViolations.AddRange(scan.AddedOver(baseScan).Select(violation => violation.Message));
+			}
+
 			caughtUp[run.RunId] = result.CaughtUp.Select(catchUp => catchUp.Run).ToHashSet(StringComparer.Ordinal);
 			candidates.Add(step);
 		}
@@ -175,6 +182,18 @@ internal static class IntegrationPlanner
 			{
 				step.Strategy = MergeStrategy.Manual;
 				step.Note = $"{LockNote(step)}; lock.conflict = manual leaves that for a human";
+				manual.Add(step);
+			}
+			else if (chosen is null && policy.OwnerReview && component.Owners.Count > 0)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = $"merge.owner_review = manual leaves it for its owners to review: {string.Join(", ", component.Owners)}";
+				manual.Add(step);
+			}
+			else if (chosen is null && step.Triage != Triage.UpToDate && step.BoundaryViolations.Count > 0 && policy.ManualBoundaries)
+			{
+				step.Strategy = MergeStrategy.Manual;
+				step.Note = $"it adds {step.BoundaryViolations.Count} boundary violation(s), which merge.boundaries = manual leaves for a human";
 				manual.Add(step);
 			}
 			else if (chosen != MergeStrategy.Semantic && step.Triage == Triage.Conflict && policy.ManualPathReason(step.Conflicts) is { } reason)
@@ -251,6 +270,19 @@ internal static class IntegrationPlanner
 
 		component.Steps.AddRange([.. deterministic, .. semantic, .. manual, .. skipped]);
 		return component;
+	}
+
+	/// <summary>The code boundary scan of a commit, or null when the component cannot be scanned (it then adds nothing).</summary>
+	private static async Task<CodeScan?> ScanAsync(MonorepoGraph graph, IComponentStore store, string name, string commit)
+	{
+		try
+		{
+			return await CodeBoundaries.ScanAsync(graph.Registry, store, name, commit);
+		}
+		catch (Exception ex) when (ex is StorageException or MonorepoException)
+		{
+			return null;
+		}
 	}
 
 	private static string LockNote(IntegrationStep step) =>

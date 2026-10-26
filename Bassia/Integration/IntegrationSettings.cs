@@ -22,6 +22,9 @@ internal sealed class IntegrationSettings
 
 	public Func<string, LockConflictPolicy> LockPolicyFor { get; init; } = _ => LockConflictPolicy.Resolver;
 
+	/// <summary>Runs a task of the verification gate; returns its exit code, or null when it was cancelled. By default a shell command.</summary>
+	public Func<Core.TaskRequest, Task<int?>> RunTask { get; init; } = Core.TaskRunner.RunShellAsync;
+
 	/// <summary>Runs a resolver; returns its exit code, or null when it was cancelled. By default a shell command.</summary>
 	public Func<ResolverRequest, Task<int?>> RunResolver { get; init; } = request =>
 		ShellCommand.RunAsync(request.Command, request.Directory, request.Environment, request.Brief, request.OnOutput, request.Cancellation);
