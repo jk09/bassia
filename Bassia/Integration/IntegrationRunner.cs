@@ -647,12 +647,14 @@ internal static class IntegrationRunner
 				var closure = registry.Closure(affected.Select(component => component.Name));
 				var folders = new Dictionary<string, string>(StringComparer.Ordinal);
 				var workspaces = new Dictionary<string, IComponentWorkspace>(StringComparer.Ordinal);
+				var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
 				foreach (var component in closure)
 				{
 					folders[component.Name] = Path.Combine(record.WorkspacePath, component.Name);
 					if (merged.TryGetValue(component.Name, out var checkout))
 					{
 						workspaces[component.Name] = checkout;
+						fingerprints[component.Name] = $"commit:{await checkout.HeadAsync()}";
 						continue;
 					}
 
@@ -660,6 +662,7 @@ internal static class IntegrationRunner
 					var tip = await store.DefaultBranchAsync() is { } branch ? await store.BranchTipAsync(branch) : null;
 					workspaces[component.Name] = await store.CheckoutAsync(tip ?? throw new IntegrationException($"Component '{component.Name}' has no main branch to verify against."),
 						folders[component.Name], IntegrationRecord.RefBase(record.IntegrationId) + "-verify");
+					fingerprints[component.Name] = $"commit:{tip}";
 				}
 
 				await Workspaces.NestAsync(closure, folders, workspaces);
@@ -677,8 +680,10 @@ internal static class IntegrationRunner
 				Report($"Verifying {string.Join(", ", gated.Select(component => component.Name))}: {(plan.Count == 0 ? "no task defined" : string.Join(", ", plan.Select(task => task.Id)))}.");
 				var results = await TaskRunner.RunAsync(plan, record.WorkspacePath, Path.Combine(record.WorkspacePath, ".verify-logs"),
 					new Dictionary<string, string> { ["BASSIA_ROOT"] = settings.Root, ["BASSIA_INTEGRATION_ID"] = record.IntegrationId },
-					settings.RunTask, result => Report($"verify {result.Component}:{result.Task} exited {result.ExitCode?.ToString() ?? "(cancelled)"} in {result.Seconds}s."),
-					Cancellation);
+					settings.RunTask, result => Report(result.Cached
+						? $"verify {result.Component}:{result.Task} restored from the cache."
+						: $"verify {result.Component}:{result.Task} exited {result.ExitCode?.ToString() ?? "(cancelled)"} in {result.Seconds}s."),
+					Cancellation, settings.TaskCache is { } cache ? new TaskCaching(cache, registry, fingerprints) : null);
 				record.Verification.AddRange(results);
 				if (results.FirstOrDefault(result => !result.Ok) is not { } failed)
 				{

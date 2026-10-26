@@ -123,7 +123,7 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...] [-tags <t>,...] [-visibility <p>,...] [-owners <o>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>] [-template <t>] [-tags ...] [-visibility ...] [-owners ...]`, `component show -name <c>`, `component set -name <c> [-references ...\|-clear-references] [-tags ...\|-clear-tags] [-visibility ...\|-public\|-private] [-owners ...\|-clear-owners] [-exports ...\|-clear-exports]`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...] [-tags ...] [-visibility ...] [-owners ...]` |
 | Templates and conformance | `template list`, `component create -name <c> -template <t>`, `conformance list`, `conformance add -components <pattern> [-files <p>,...] [-tasks <t>,...] [-owners] [-exports] [-description <text>]`, `conformance remove -index <n>`, `conformance check [-name <c>] [-strict]` |
-| Tasks | `task list [-name <c>]`, `task run -task <t>,... [-select <c[@ref]>,...] [-keep]`, `affected -runs <ids>\|all \| -components <c>,...` |
+| Tasks | `task list [-name <c>]`, `task run -task <t>,... [-select <c[@ref]>,...] [-keep] [-no-cache]`, `task cache [-clear]`, `affected -runs <ids>\|all \| -components <c>,...` |
 | Architectural boundaries | `boundary list`, `boundary add -source <pattern> [-allow <pattern>,...] [-deny <pattern>,...] [-description <text>]`, `boundary remove -index <n>`, `boundary check [-name <c>] [-code] [-strict]` |
 | Submodules | `component add -url <url> -unwind`, `component unwind -name <c> [-dry-run]` |
 | Tags across components | `tag list [-component <c>,...] [-prefix <p>] [-min <n>]`, `tag show -tag <t>`, `tag create -tag <t> -select <c[@ref]>,... [-message <m>]` |
@@ -748,7 +748,31 @@ bassia config set merge.verify -value build,test  # the integration's gate
   integration is `partial`, and `integration.toml` records every task that ran under `[[verification]]` (exit code,
   duration, log). The workspace is kept for inspection. Without `merge.verify`, the integration publishes as before.
 
-Task results are not cached yet.
+#### The task cache
+
+A task marked `cache = true` is not run again while its inputs are unchanged:
+
+```toml
+[tasks.build]
+command = "dotnet build"
+depends_on = ["^build"]
+cache = true
+outputs = ["bin", "obj"]     # what a restore puts back, as patterns relative to the component
+```
+
+- **The key** is a SHA-256 over the task's name, command, `depends_on` and `outputs`, the platform (OS and
+  architecture), and the content of its component and of every component it references, transitively. In a checkout
+  made from commits (`task run -select`, the gate), that content is each component's commit. In a run folder it is a
+  hash of the files git would track, so uncommitted changes count. The two never match each other, which can cost a
+  rebuild but never restores a stale result.
+- **A hit** copies the cached outputs back into the component's folder and the cached log to the task's log path.
+  The task counts as passed and is reported `cached`, in `task run`'s result and in the gate's `[[verification]]`.
+  **A miss** runs the task, and a passed run stores its log and outputs. A failed run is never stored.
+- Caching is opt-in, as in nx: only a task that gives the same result for the same inputs may be cached. A cached
+  task whose outputs are undeclared is skipped without restoring anything, so a `build` that others depend on must
+  declare its `outputs`.
+- The cache is local to the workspace (`<workspace>/.task-cache`). `task run -no-cache` runs everything, and
+  `bassia task cache` reports the entries and their size (`-clear` empties it).
 
 ### Integration: syntactic first, then structural, then semantic
 

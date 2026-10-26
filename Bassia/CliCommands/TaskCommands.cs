@@ -64,11 +64,16 @@ internal static class TaskCommands
 		string folder;
 		IReadOnlyList<string> selected;
 		var materialized = false;
+		var fingerprints = new Dictionary<string, string>(StringComparer.Ordinal);
 		if (!invocation.Has("select") && runDir is not null && Directory.Exists(runDir))
 		{
 			// Inside a run: its own checkout, as the agent left it.
 			folder = runDir;
 			selected = monorepo.Components.Select(component => component.Name).Where(name => Directory.Exists(Path.Combine(runDir, name))).ToList();
+			foreach (var name in selected)
+			{
+				fingerprints[name] = await FolderFingerprintAsync(Path.Combine(runDir, name));
+			}
 		}
 		else
 		{
@@ -80,6 +85,10 @@ internal static class TaskCommands
 				resolved.ToDictionary(entry => entry.Component.Name, entry => entry.Commit, StringComparer.Ordinal), folder, $"tasks/{key}");
 			materialized = true;
 			selected = select.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(entry => entry.Split('@')[0]).ToList();
+			foreach (var (component, _, commit) in resolved)
+			{
+				fingerprints[component.Name] = $"commit:{commit}";
+			}
 		}
 
 		var tasks = monorepo.Components.Where(component => Directory.Exists(Path.Combine(folder, component.Name)))
@@ -90,7 +99,10 @@ internal static class TaskCommands
 		{
 			["BASSIA_ROOT"] = monorepo.Root,
 			["BASSIA_TASK_DIR"] = folder
-		}, finished: result => Console.Error.WriteLine($"{result.Component}:{result.Task} exited {result.ExitCode?.ToString() ?? "(cancelled)"} in {result.Seconds}s"));
+		}, finished: result => Console.Error.WriteLine(result.Cached
+			? $"{result.Component}:{result.Task} restored from the cache"
+			: $"{result.Component}:{result.Task} exited {result.ExitCode?.ToString() ?? "(cancelled)"} in {result.Seconds}s"),
+			caching: invocation.Has("no-cache") ? null : new TaskCaching(TaskCache.In(monorepo.WorkspaceDir), monorepo.Registry, fingerprints));
 
 		var ok = results.Count == plan.Count && results.All(result => result.Ok);
 		var kept = !materialized || invocation.Has("keep") || !ok;
@@ -102,7 +114,7 @@ internal static class TaskCommands
 		var failed = results.FirstOrDefault(result => !result.Ok);
 		return ProgramCli.WriteResult(ok, invocation.Command,
 			ok
-				? $"{results.Count} task(s) passed: {string.Join(", ", results.Select(result => $"{result.Component}:{result.Task}"))}."
+				? $"{results.Count} task(s) passed: {string.Join(", ", results.Select(result => $"{result.Component}:{result.Task}{(result.Cached ? " (cached)" : "")}"))}."
 				: $"Task {failed!.Component}:{failed.Task} failed with exit code {failed.ExitCode?.ToString() ?? "(cancelled)"}; its log is '{failed.LogPath}'" +
 					(materialized ? $" and the checkout is kept at '{folder}'." : "."),
 			new Dictionary<string, object?>
@@ -110,8 +122,10 @@ internal static class TaskCommands
 				["folder"] = kept ? folder : null,
 				["logs"] = logs,
 				["planned"] = plan.Select(task => task.Id).ToList(),
-				["table"] = results.Count == 0 ? null : new TomlText(AsciiTable.Render(["TASK", "EXIT", "SECONDS"],
-					results.Select(result => (IReadOnlyList<string>)[$"{result.Component}:{result.Task}", result.ExitCode?.ToString() ?? "-", result.Seconds.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)]))),
+				["cached"] = results.Count(result => result.Cached),
+				["table"] = results.Count == 0 ? null : new TomlText(AsciiTable.Render(["TASK", "EXIT", "SECONDS", "CACHED"],
+					results.Select(result => (IReadOnlyList<string>)[$"{result.Component}:{result.Task}", result.ExitCode?.ToString() ?? "-",
+						result.Seconds.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), result.Cached ? "yes" : "-"]))),
 				["result"] = Describe(results)
 			});
 	}
@@ -124,8 +138,56 @@ internal static class TaskCommands
 			["command"] = result.Command,
 			["exit_code"] = result.ExitCode,
 			["seconds"] = result.Seconds,
-			["log"] = result.LogPath
+			["log"] = result.LogPath,
+			["cached"] = result.Cached ? true : null
 		}).ToList();
+
+	/// <summary>
+	/// A hash of a working copy's files as they are, uncommitted changes included: what git would track (ignored files
+	/// and the nested reference paths left out), path and content.
+	/// </summary>
+	internal static async Task<string> FolderFingerprintAsync(string folder)
+	{
+		var files = Split.GitBinary.SplitNul(await Split.GitBinary.RunAsync(folder, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]))
+			.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+		using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+		foreach (var file in files)
+		{
+			var path = Path.Combine(folder, file);
+			hash.AppendData(System.Text.Encoding.UTF8.GetBytes(file + "\n"));
+			if (File.Exists(path) && !DirectoryLinks.IsLink(path))
+			{
+				hash.AppendData(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(path)));
+			}
+		}
+
+		return "files:" + Convert.ToHexStringLower(hash.GetHashAndReset());
+	}
+
+	// ----- bassia task cache -----
+
+	public static Task<int> CacheAsync(Invocation invocation)
+	{
+		var monorepo = AgentCommand.LoadMonorepo();
+		var cache = TaskCache.In(monorepo.WorkspaceDir);
+		var (entries, bytes) = cache.Size();
+		if (invocation.Has("clear"))
+		{
+			cache.Clear();
+		}
+
+		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command,
+			invocation.Has("clear")
+				? $"Cleared the task cache: {entries} entr{(entries == 1 ? "y" : "ies")}, {bytes} byte(s) removed."
+				: $"The task cache holds {entries} entr{(entries == 1 ? "y" : "ies")}, {bytes} byte(s).",
+			new Dictionary<string, object?>
+			{
+				["path"] = cache.Folder,
+				["entries"] = invocation.Has("clear") ? 0 : entries,
+				["bytes"] = invocation.Has("clear") ? 0 : bytes,
+				["cleared"] = invocation.Has("clear")
+			}));
+	}
 
 	// ----- bassia affected -----
 

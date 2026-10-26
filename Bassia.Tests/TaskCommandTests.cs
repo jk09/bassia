@@ -73,4 +73,50 @@ public class TaskCommandTests
 		Assert.Contains("the verification failed: app:test exited 1", error + output);
 		Assert.Equal("", await TestEnvironment.GitAsync(monorepo.SourceRepo("lib"), "tag", "--list", "integration/*"));
 	}
+
+	[Fact]
+	public async Task Cache_RestoresAnUnchangedBuildAndItsOutputs_AndRerunsItWhenWhatItNeedsChanged()
+	{
+		await using var monorepo = await MonorepoFixture.CreateAsync();
+		var counter = Path.Combine(monorepo.Root, "..", "builds.txt");
+		var build = OperatingSystem.IsWindows() ? $"echo built> built.txt & echo x>> \"{counter}\"" : $"echo built > built.txt; echo x >> \"{counter}\"";
+		await monorepo.AddComponentAsync("core");
+		await monorepo.AddComponentAsync("lib", files: new Dictionary<string, string>
+		{
+			["bassia.toml"] = $"[tasks.build]\ncommand = '{build}'\ncache = true\noutputs = [\"built.txt\"]\n"
+		});
+		await monorepo.AddComponentAsync("app", files: new Dictionary<string, string>
+		{
+			["bassia.toml"] = $"[tasks.test]\ncommand = '{FileExists("lib/built.txt")}'\ndepends_on = [\"^build\"]\n"
+		});
+		Assert.Equal(0, (await monorepo.BassiaAsync("component", "set", "app", "-references", "lib")).ExitCode);
+		Assert.Equal(0, (await monorepo.BassiaAsync("component", "set", "lib", "-references", "core")).ExitCode);
+		int Builds() => File.Exists(counter) ? File.ReadAllLines(counter).Length : 0;
+
+		var (firstExit, firstOutput, firstError) = await monorepo.BassiaAsync("task", "run", "test", "-select", "app,lib,core");
+		var (secondExit, secondOutput, secondError) = await monorepo.BassiaAsync("task", "run", "test", "-select", "app,lib,core");
+
+		Assert.True(firstExit == 0, firstError);
+		Assert.True(secondExit == 0, secondError);
+		Assert.Contains("cached = 0", firstOutput);
+		Assert.Contains("lib:build (cached), app:test", secondOutput);
+		Assert.Equal(1, Builds());
+
+		// What lib references changed: its build runs again. -no-cache runs it regardless.
+		var runId = await monorepo.RunWritingAsync("core", "core.txt", "changed");
+		var integrated = await monorepo.IntegrationStartAsync("-runs", runId);
+		Assert.True(integrated.ExitCode == 0, integrated.Error);
+		var integration = System.Text.RegularExpressions.Regex.Match(integrated.Output, "integration-[a-z0-9-]+").Value;
+		Assert.Equal(0, (await monorepo.BassiaAsync("integration", "advance", integration)).ExitCode);
+		Assert.Equal(0, (await monorepo.BassiaAsync("task", "run", "test", "-select", "app,lib,core")).ExitCode);
+		Assert.Equal(2, Builds());
+		Assert.Equal(0, (await monorepo.BassiaAsync("task", "run", "test", "-select", "app,lib,core", "-no-cache")).ExitCode);
+		Assert.Equal(3, Builds());
+
+		var (cacheExit, cacheOutput, _) = await monorepo.BassiaAsync("task", "cache");
+		Assert.Equal(0, cacheExit);
+		Assert.Contains("entries = 2", cacheOutput);
+		Assert.Contains("cleared = true", (await monorepo.BassiaAsync("task", "cache", "-clear")).Output);
+		Assert.Contains("entries = 0", (await monorepo.BassiaAsync("task", "cache")).Output);
+	}
 }

@@ -297,6 +297,11 @@ internal sealed class IntegrationRecord
 					entry["exit_code"] = (long)exitCode;
 				}
 
+				if (result.Cached)
+				{
+					entry["cached"] = true;
+				}
+
 				verification.Add(entry);
 			}
 
@@ -380,7 +385,8 @@ internal sealed class IntegrationRecord
 			{
 				record.Verification.Add(new Core.TaskResult(Str(entry, "component"), Str(entry, "task"), Str(entry, "command"),
 					entry.TryGetValue("exit_code", out var exitCode) && exitCode is long code ? (int)code : null,
-					entry.TryGetValue("seconds", out var seconds) && seconds is double value ? value : 0, Str(entry, "log")));
+					entry.TryGetValue("seconds", out var seconds) && seconds is double value ? value : 0, Str(entry, "log"),
+					entry.TryGetValue("cached", out var cached) && cached is true));
 			}
 		}
 

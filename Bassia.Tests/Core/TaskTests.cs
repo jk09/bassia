@@ -104,6 +104,103 @@ public class TaskTests
 		}
 	}
 
+	// ----- the cache -----
+
+	private const string CachedLibTasks = """
+		[tasks.build]
+		command = "make lib"
+		cache = true
+		outputs = ["bin"]
+
+		[tasks.test]
+		command = "make test"
+		depends_on = ["build"]
+		""";
+
+	[Fact]
+	public void Parse_ReadsCacheAndOutputs_AndRejectsBadValues()
+	{
+		var build = TaskFile.Parse("lib", CachedLibTasks)["build"];
+
+		Assert.True(build.Cache);
+		Assert.Equal(["bin"], build.OutputPatterns);
+		Assert.False(TaskFile.Parse("lib", CachedLibTasks)["test"].Cache);
+		Assert.Contains("'cache' must be true or false", Assert.Throws<MonorepoException>(() => TaskFile.Parse("lib", "[tasks.b]\ncommand = \"x\"\ncache = \"yes\"\n")).Message);
+		Assert.Contains("'outputs' must be an array", Assert.Throws<MonorepoException>(() => TaskFile.Parse("lib", "[tasks.b]\ncommand = \"x\"\noutputs = \"bin\"\n")).Message);
+	}
+
+	[Fact]
+	public void Key_ChangesWithTheTaskThePlatformAndTheClosure_NotWithUnrelatedComponents()
+	{
+		var registry = Registry();
+		var build = new PlannedTask("lib", TaskFile.Parse("lib", CachedLibTasks)["build"]);
+		var fingerprints = new Dictionary<string, string> { ["core"] = "commit:1", ["lib"] = "commit:2", ["app"] = "commit:3", ["tool"] = "commit:4" };
+
+		var key = TaskCache.Key(registry, build, fingerprints);
+
+		Assert.Equal(key, TaskCache.Key(registry, build, new Dictionary<string, string>(fingerprints) { ["app"] = "commit:changed" }));
+		Assert.NotEqual(key, TaskCache.Key(registry, build, new Dictionary<string, string>(fingerprints) { ["core"] = "commit:changed" }));
+		Assert.NotEqual(key, TaskCache.Key(registry, build with { Task = build.Task with { Command = "make lib -j" } }, fingerprints));
+		Assert.Null(TaskCache.Key(registry, build, new Dictionary<string, string> { ["lib"] = "commit:2" }));
+	}
+
+	[Fact]
+	public async Task Runner_RestoresACachedTaskAndItsOutputs_RunsUncachedOnes_AndNeverStoresAFailure()
+	{
+		var root = Path.Combine(Path.GetTempPath(), $"bassia-cache-{Guid.NewGuid():N}");
+		try
+		{
+			var registry = Registry();
+			var plan = TaskPlan.Plan(registry, ["lib"], ["test"], Tasks(("lib", CachedLibTasks)));
+			var caching = new TaskCaching(new TaskCache(Path.Combine(root, "cache")), registry,
+				new Dictionary<string, string> { ["core"] = "commit:1", ["lib"] = "commit:2" });
+			var ran = new List<string>();
+			Task<int?> Run(TaskRequest request)
+			{
+				ran.Add(request.Task.Id);
+				if (request.Task.Task.Name == "build")
+				{
+					Directory.CreateDirectory(Path.Combine(request.Directory, "bin"));
+					File.WriteAllText(Path.Combine(request.Directory, "bin", "lib.dll"), "built");
+					File.WriteAllText(Path.Combine(request.Directory, "notes.txt"), "not an output");
+					File.WriteAllText(request.LogPath, "building lib\n");
+				}
+
+				return Task.FromResult<int?>(0);
+			}
+
+			async Task<IReadOnlyList<TaskResult>> RunInAsync(string folder)
+			{
+				Directory.CreateDirectory(Path.Combine(folder, "lib"));
+				return await TaskRunner.RunAsync(plan, folder, Path.Combine(folder, "logs"), new Dictionary<string, string>(), Run, caching: caching);
+			}
+
+			var first = await RunInAsync(Path.Combine(root, "first"));
+			var second = await RunInAsync(Path.Combine(root, "second"));
+
+			Assert.Equal(["lib:build", "lib:test", "lib:test"], ran);
+			Assert.Equal([false, false], first.Select(result => result.Cached));
+			Assert.Equal([true, false], second.Select(result => result.Cached));
+			Assert.Equal("built", File.ReadAllText(Path.Combine(root, "second", "lib", "bin", "lib.dll")));
+			Assert.False(File.Exists(Path.Combine(root, "second", "lib", "notes.txt")));
+			Assert.Equal("building lib\n", File.ReadAllText(second[0].LogPath));
+
+			// A failed run is not stored: with another closure it runs again, fails, and stays uncached.
+			var failing = caching with { Fingerprints = new Dictionary<string, string> { ["core"] = "commit:9", ["lib"] = "commit:2" } };
+			Directory.CreateDirectory(Path.Combine(root, "third", "lib"));
+			await TaskRunner.RunAsync(plan, Path.Combine(root, "third"), Path.Combine(root, "third", "logs"), new Dictionary<string, string>(),
+				_ => Task.FromResult<int?>(1), caching: failing);
+			Assert.Equal(1, caching.Cache.Size().Entries);
+		}
+		finally
+		{
+			if (Directory.Exists(root))
+			{
+				Directory.Delete(root, recursive: true);
+			}
+		}
+	}
+
 	// ----- the integration's gate -----
 
 	/// <summary>lib and app (nesting lib), each with tasks, tagged v1.</summary>
@@ -165,6 +262,48 @@ public class TaskTests
 		Assert.Equal(["lib:build", "lib:test", "app:build", "app:test"], ran);
 		Assert.Equal(4, outcome.Record.Verification.Count);
 		Assert.Equal(ResultStatus.Pushed, Assert.Single(outcome.Record.Components).ResultStatus);
+	}
+
+	[Fact]
+	public async Task Gate_RestoresCachedTasksOfUnchangedComponents()
+	{
+		using var monorepo = new MemoryMonorepo();
+		await monorepo.AddAsync("lib", null, ("lib.txt", "lib\n"), (TaskFile.FileName, CachedLibTasks));
+		await monorepo.AddAsync("app", Refs("lib"), ("app.txt", "app\n"), (TaskFile.FileName, AppTasks.Replace("command = \"make app\"", "command = \"make app\"\ncache = true")));
+		var cache = new TaskCache(Path.Combine(monorepo.WorkspaceDir, ".task-cache"));
+		var ran = new List<string>();
+
+		async Task<IntegrationOutcome> IntegrateAppChangeAsync(string content)
+		{
+			var outcome = await monorepo.Runs(metadata =>
+			{
+				File.WriteAllText(Path.Combine(metadata.WorkspacePath, "app", "app.txt"), content);
+				return 0;
+			}).StartAsync("app,lib", "agent \"change app\"", Quiet());
+			var settings = new IntegrationSettings
+			{
+				WorkspaceDir = monorepo.WorkspaceDir,
+				MergePolicyFor = _ => MergePolicy.Default with { Verify = ["build"] },
+				RunResolver = _ => throw new InvalidOperationException("no resolver expected"),
+				RunTask = request =>
+				{
+					ran.Add(request.Task.Id);
+					return Task.FromResult<int?>(0);
+				},
+				TaskCache = cache
+			};
+			var plan = await IntegrationPlanner.PlanAsync(monorepo.Graph, settings, [outcome.Metadata]);
+			return await IntegrationRunner.RunAsync(monorepo.Graph, settings, monorepo.Records, [outcome.Metadata], plan, "fake-resolver", new IntegrationContext { OnProgress = _ => { } });
+		}
+
+		var first = await IntegrateAppChangeAsync("app 1\n");
+		await IntegrationRunner.AdvanceAsync(monorepo.Graph, monorepo.Records, first.Record);
+		var second = await IntegrateAppChangeAsync("app 2\n");
+
+		Assert.True(second.Ok, second.Message);
+		Assert.Equal(["lib:build", "app:build", "app:build"], ran);
+		Assert.Equal([true, false], second.Record.Verification.Select(result => result.Cached));
+		Assert.Equal([true, false], IntegrationRecord.FromToml(second.Record.ToToml()).Verification.Select(result => result.Cached));
 	}
 
 	[Fact]

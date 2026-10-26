@@ -43,7 +43,13 @@ internal sealed class TempDirectory : IDisposable
 
 internal static class TestEnvironment
 {
-	static TestEnvironment()
+	/// <summary>
+	/// Runs when the test assembly loads, before any test - not on first use of this class, which would reset what a
+	/// test set up just before (a test that turns <see cref="ProgramCli.Interactive"/> on and then runs bassia through
+	/// this class would otherwise lose it whenever it happened to run first).
+	/// </summary>
+	[System.Runtime.CompilerServices.ModuleInitializer]
+	internal static void Initialize()
 	{
 		EnsureGitIdentity();
 
