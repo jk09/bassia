@@ -12,6 +12,22 @@ internal sealed class GitClient(string workingDirectory)
 
 	public string WorkingDirectory => workingDirectory;
 
+	/// <summary>
+	/// Attributes what a git process writes to whom the code acts for (<see cref="Core.Actor.Current"/>): its author is
+	/// the user, its committer (and the tagger of an annotated tag) the user or the agent acting for them. These
+	/// variables win over any configured identity. Without an actor git keeps its own.
+	/// </summary>
+	internal static void ApplyActor(ProcessStartInfo startInfo)
+	{
+		if (Core.Actor.Current is not { } actor)
+		{
+			return;
+		}
+
+		(startInfo.Environment["GIT_AUTHOR_NAME"], startInfo.Environment["GIT_AUTHOR_EMAIL"]) = actor.Author;
+		(startInfo.Environment["GIT_COMMITTER_NAME"], startInfo.Environment["GIT_COMMITTER_EMAIL"]) = actor.Committer;
+	}
+
     /// <summary>Returns a client bound to another working directory (e.g. a component checkout).</summary>
     public static GitClient In(string directory) => new(directory);
 
@@ -41,6 +57,7 @@ internal sealed class GitClient(string workingDirectory)
 			process.StartInfo.ArgumentList.Add(argument);
 		}
 
+		ApplyActor(process.StartInfo);
 		foreach (var (name, value) in environment ?? new Dictionary<string, string>())
 		{
 			process.StartInfo.Environment[name] = value;

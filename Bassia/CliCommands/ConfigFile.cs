@@ -204,6 +204,8 @@ internal static class ConfigFile
 			"Command that resolves a semantic merge; it gets the merge brief on stdin."),
 		new("integration.weave", ["integration"], "weave", Monorepo.DefaultStructuralDriver,
 			"Structural merge driver tried where git's merge conflicts (weave's weave-driver), used when installed; off disables it."),
+		new("user.id", ["user"], "id", "",
+			"Who you are in this monorepo: a registered user id. Set it in your own layer with 'bassia user use -id <id>'; BASSIA_USER overrides it."),
 		new("merge.semantic", ["merge"], "semantic", "resolver",
 			"What happens to a result neither git nor weave can merge: the resolver merges it, or it is left for a human (manual).",
 			["resolver", "manual"], PerComponent: true),

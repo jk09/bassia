@@ -88,7 +88,8 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 			Command = command,
 			WorkspacePath = runDir,
 			LockFiles = string.IsNullOrWhiteSpace(lockFiles) ? null : lockFiles,
-			LockFolders = string.IsNullOrWhiteSpace(lockFolders) ? null : lockFolders
+			LockFolders = string.IsNullOrWhiteSpace(lockFolders) ? null : lockFolders,
+			User = Actor.Current?.User.Id
 		};
 
 		foreach (var (component, commitIsh, commit) in resolved)
@@ -158,9 +159,12 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 
 		await locks.CheckStaleAsync();
 		Report(context, runId, AgentRunPhase.Finalizing, $"{runId}: committing, tagging and pushing the component results.");
-		foreach (var component in metadata.Components)
+		using (ActingThroughAgent(metadata))
 		{
-			await FinalizeComponentAsync(metadata, component, context);
+			foreach (var component in metadata.Components)
+			{
+				await FinalizeComponentAsync(metadata, component, context);
+			}
 		}
 
 		await CheckBoundariesAsync(metadata, context);
@@ -446,6 +450,13 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 	}
 
 	/// <summary>
+	/// The run's result commits and tags are the user's work done through the agent: authored by the user, committed and
+	/// tagged as <c>&lt;agent&gt; via bassia</c> (see <see cref="Actor"/>). Nothing changes without a current user.
+	/// </summary>
+	private static IDisposable ActingThroughAgent(RunMetadata metadata) =>
+		Actor.Use(Actor.Current?.Through(Actor.AgentOf(metadata.Command)));
+
+	/// <summary>
 	/// Scans each published result for code boundary violations and records those the commit the run started from did not
 	/// have. It only records: the result stays published, and the integration decides what the violations mean
 	/// (<c>merge.boundaries</c>). A scan that fails is reported and leaves the component without a record.
@@ -544,9 +555,12 @@ internal sealed class AgentRuns(MonorepoGraph graph, IRunRecordStore records, Ag
 			throw new AgentException($"Agentic run '{metadata.RunId}' has status '{metadata.Status}'; only runs whose commit/push sequence failed can be retried.");
 		}
 
-		foreach (var component in metadata.Components)
+		using (ActingThroughAgent(metadata))
 		{
-			await FinalizeComponentAsync(metadata, component);
+			foreach (var component in metadata.Components)
+			{
+				await FinalizeComponentAsync(metadata, component);
+			}
 		}
 
 		await CheckBoundariesAsync(metadata);

@@ -31,6 +31,7 @@ internal static class GitBinary
 			process.StartInfo.ArgumentList.Add(argument);
 		}
 
+		GitClient.ApplyActor(process.StartInfo);
 		process.Start();
 		using var output = new MemoryStream();
 		var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output);

@@ -255,10 +255,10 @@ internal static class IntegrationCommands
 			new Dictionary<string, object?>
 			{
 				["total"] = rows.Count,
-				["table"] = new TomlText(AsciiTable.Render(["ID", "STATUS", "LIVE", "CREATED", "RUNS", "RESULT TAGS"],
+				["table"] = new TomlText(AsciiTable.Render(["ID", "USER", "STATUS", "LIVE", "CREATED", "RUNS", "RESULT TAGS"],
 					shown.Select(found => (IReadOnlyList<string>)
 					[
-						IntegrationRecord.Key(found.Id), found.Status + (found.Stale ? "!" : ""), found.Live ? "yes" : "",
+						IntegrationRecord.Key(found.Id), found.Record!.User ?? "-", found.Status + (found.Stale ? "!" : ""), found.Live ? "yes" : "",
 						RunCommands.Time(found.Record!.Created), string.Join(",", found.Record.Runs.Select(RunMetadata.Key)),
 						string.Join(",", found.Record.Components.Where(component => component.ResultTag is not null).Select(component => component.Name))
 					]))),
@@ -267,6 +267,7 @@ internal static class IntegrationCommands
 					["integration_id"] = found.Id,
 					["short_id"] = IntegrationRecord.Key(found.Id),
 					["status"] = found.Status,
+					["user"] = found.Record.User,
 					["live"] = found.Live,
 					["stale"] = found.Stale,
 					["created"] = found.Record!.Created,

@@ -35,6 +35,7 @@ internal static class ResultCommitMessage
 			["created"] = metadata.Created
 		};
 		if (metadata.Finished is not null) run["finished"] = metadata.Finished;
+		if (metadata.User is not null) run["user"] = metadata.User;
 		run["record_tag"] = RunMetadata.TagName(metadata.RunId, 0);
 
 		run["component"] = new TomlTable

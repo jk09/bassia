@@ -77,6 +77,7 @@ internal static class IntegrationRunner
 			Status = "started",
 			Created = RunMetadata.Timestamp(),
 			Resolver = resolver,
+			User = Actor.Current?.User.Id,
 			StructuralDriver = structural?.Command,
 			WorkspacePath = Path.Combine(settings.WorkspaceDir, id)
 		};

@@ -63,6 +63,13 @@ internal static class CommandTable
 		"transitively, first (depends_on = [\"^build\"]). cache = true lets an unchanged task be restored instead of run, with the files " +
 		"outputs = [patterns] names (see 'bassia help task cache'). A component without bassia.toml has no tasks.";
 
+	private const string UserDetails = "The current user comes from BASSIA_USER, else user.id in your own configuration layer (bassia user use), else the " +
+		"registered user whose email is the git user.email configured for the meta-repo. Once a monorepo has users, a command that changes it " +
+		"needs a known user: its commits, annotated tags and meta-repo revisions are authored by them, and runs, integrations and lock entries " +
+		"record their id. A run's result commits and tags are committed as '<agent> via bassia' with the user's email (the agent is the first word " +
+		"of the run's command), and the agent's own bassia commands act for the same user. 'lock list|check|claim|wait' name the user holding a " +
+		"path and how to reach them. Without users nothing is attributed.";
+
 	private const string ConfigDetails = "Settings resolve in layers: the user's .bassia/config.user.toml (git-ignored) over the monorepo's " +
 		".bassia/config.toml (committed) over Bassia's default. A merge setting can be set per component as " +
 		"merge.component.<component>.<setting>, which falls back to merge.<setting>. merge.semantic (resolver|manual): a result git and weave cannot " +
@@ -330,6 +337,60 @@ internal static class CommandTable
 				"excludes. Every file at the tip must go to exactly one part, 'shared' or 'drop'; all problems are reported at once, and nothing changes. " +
 				"Each part is a new repository whose history holds every commit that changed its files (authors, dates and messages kept, a Split-from " +
 				"trailer added), the tags of the branch, and a split record commit tagged split/<id>; the source's repository is kept, tagged split/<id>."),
+
+		// ----- users -----
+
+		new("whoami", null, "Show who you are in this monorepo - the user your locks, runs, tags and commits are attributed to - and where Bassia got it from.",
+			[],
+			["bassia whoami"],
+			UserCommands.WhoAmIAsync,
+			Details: UserDetails),
+
+		new("user", "list", "List the monorepo's users with how to reach them.",
+			[],
+			["bassia user list"],
+			UserCommands.ListAsync),
+
+		new("user", "show", "Show a user: name, email, contact, key, and the runs attributed to them.",
+			[new("id", "user", "The user's id.", Required: true)],
+			["bassia user show -id jk", "bassia user show jk"],
+			UserCommands.ShowAsync, Positional: "id"),
+
+		new("user", "add", "Register a user in the meta-repo (users.toml): the identity locks, runs, tags and commits are attributed to.",
+			[
+				new("id", "user", "A short, stable id (no whitespace, '/', ':', ',' or '@').", Required: true),
+				new("name", "name", "Display name, as in a git author.", Required: true),
+				new("email", "email", "Email address, as in a git author.", Required: true),
+				new("contact", "text", "How else to reach them (chat handle, phone), shown to whoever waits for their locks."),
+				new("key", "public key", "A public key (e.g. ssh-ed25519 ...), kept for signing.")
+			],
+			["bassia user add -id jk -name \"Jozef Kosik\" -email jozef@example.com -contact \"slack @jozef\""],
+			UserCommands.AddAsync,
+			Details: "Anyone may register themselves, also without being known yet; the registration is attributed to the user it adds. " + UserDetails),
+
+		new("user", "set", "Change a registered user's name, email, contact or key.",
+			[
+				new("id", "user", "The user's id.", Required: true),
+				new("name", "name", "New display name."),
+				new("email", "email", "New email address."),
+				new("contact", "text", "New contact details."),
+				new("clear-contact", null, "Remove the contact details."),
+				new("key", "public key", "New public key."),
+				new("clear-key", null, "Remove the key.")
+			],
+			["bassia user set -id jk -contact \"teams: Jozef Kosik\""],
+			UserCommands.SetAsync, Positional: "id"),
+
+		new("user", "remove", "Remove a user from the registry; what was attributed to them keeps their id.",
+			[new("id", "user", "The user's id.", Required: true)],
+			["bassia user remove -id old-colleague"],
+			UserCommands.RemoveAsync, Positional: "id"),
+
+		new("user", "use", "Say who you are in this monorepo: records the user id in your own configuration layer (config.user.toml, not committed).",
+			[new("id", "user", "A registered user's id.", Required: true)],
+			["bassia user use -id jk", "bassia user use jk"],
+			UserCommands.UseAsync, Positional: "id",
+			Details: UserDetails),
 
 		// ----- architectural boundaries -----
 

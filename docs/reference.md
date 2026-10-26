@@ -120,6 +120,7 @@ Add `-p` to `glow` (or `| glow -p -`) to page long output. An error goes to stde
 | Area | Commands |
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `status`, `version`, `tutorial` |
+| Users | `whoami`, `user list`, `user show -id <u>`, `user add -id <u> -name <n> -email <e> [-contact <text>] [-key <key>]`, `user set -id <u> ...`, `user remove -id <u>`, `user use -id <u>` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v> [-user]`, `config unset -key <k> [-user]` |
 | Components | `component list`, `component add -url <url> [-name <n>] [-references <c[:path]>,...] [-tags <t>,...] [-visibility <p>,...] [-owners <o>,...]`, `component create -name <c> [-references <c[:path]>,...] [-branch <b>] [-url <url>] [-template <t>] [-tags ...] [-visibility ...] [-owners ...]`, `component show -name <c>`, `component set -name <c> [-references ...\|-clear-references] [-tags ...\|-clear-tags] [-visibility ...\|-public\|-private] [-owners ...\|-clear-owners] [-exports ...\|-clear-exports]`, `component remove -name <c> [-purge]`, `component tag -name <c> -tag <t> [-ref <commit-ish>] [-message <m>]`, `component fork -name <c> -as <fork> [-ref <commit-ish>] [-url <url>] [-references <c[:path]>,...] [-tags ...] [-visibility ...] [-owners ...]` |
 | Templates and conformance | `template list`, `component create -name <c> -template <t>`, `conformance list`, `conformance add -components <pattern> [-files <p>,...] [-tasks <t>,...] [-owners] [-exports] [-description <text>]`, `conformance remove -index <n>`, `conformance check [-name <c>] [-strict]` |
@@ -646,6 +647,36 @@ path = 'D:\bassia-workspace'
 ```
 
 `Bassia` passes arguments to Git without invoking a shell. This keeps commit messages and paths from being interpreted as shell commands.
+
+### Users: who did what
+
+With several people and their agents working in one monorepo, everything Bassia does is attributed to a user, so
+whoever waits for a lock knows whom to ask. The users are registered in the meta-repo (`.bassia/users.toml`), and the
+registry is versioned and read through the storage contract like the component graph:
+
+```powershell
+bassia user add -id jk -name "Jozef Kosik" -email jozef@example.com -contact "slack @jozef"
+bassia user use -id jk          # who you are here: user.id in your own layer (config.user.toml), never committed
+bassia whoami
+bassia user list
+```
+
+- **Who you are.** Bassia takes `BASSIA_USER`, then `user.id` from your own configuration layer, then the registered
+  user whose email is the git `user.email` configured for the meta-repo. Identity is declared, as a git author's is.
+  A user may carry a public `key`, kept for signing later.
+- **What is attributed.** Once a monorepo has users, a command that changes it needs a known user. Read-only commands,
+  `user add|use`, `init`, the guide and feedback are exempt, and anyone may register themselves. Commits, annotated tags
+  and meta-repo revisions are authored by the user. In git, the author, committer and tagger are set for every git
+  process Bassia starts; the memory store records them too. Run records (`run.toml`), the result commits' TOML records,
+  integration records and lock entries carry the user's id. `agent list|show` and `integration list|show` report it.
+- **Runs.** A run's work is the user's, done through the agent. Its result commits are authored by the user and
+  committed, like its tags, as `<agent> via bassia` with the user's email; the agent is the first word of the run's
+  command, e.g. `claude`. The agent process gets `BASSIA_USER`, so its own `bassia lock ...` commands act for the same
+  user.
+- **Coordination.** `lock list` has a `USER` column. `lock check`, `lock claim` and `lock wait` name the user behind
+  a holding run with their email and contact (`holder_users`), so the people involved can agree who goes first. The
+  agent's `AGENTS.md` points it there.
+- A monorepo without users works as before and attributes nothing.
 
 ### Locking files and folders
 

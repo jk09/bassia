@@ -345,7 +345,8 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 		Pid = pid,
 		ProcessStart = processStart,
 		Started = started,
-		Heartbeat = heartbeat
+		Heartbeat = heartbeat,
+		User = Core.Actor.Current?.User.Id
 	};
 
 	public async ValueTask DisposeAsync()

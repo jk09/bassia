@@ -24,7 +24,8 @@ internal sealed class MetaRepo
 	public string Location => store.Location;
 
 	public static async Task<MetaRepo> OpenAsync(IMetaStore store) =>
-		new(store, ComponentRegistry.FromDefinitions(await store.LoadAsync(), await store.LoadBoundariesAsync(), await store.LoadConformanceAsync()));
+		new(store, ComponentRegistry.FromDefinitions(await store.LoadAsync(), await store.LoadBoundariesAsync(), await store.LoadConformanceAsync(),
+			await store.LoadUsersAsync()));
 
 	/// <summary>A meta-repo whose registry was already read from <paramref name="store"/>.</summary>
 	public static MetaRepo Open(IMetaStore store, ComponentRegistry registry) => new(store, registry);

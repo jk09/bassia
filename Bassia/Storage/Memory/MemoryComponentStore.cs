@@ -91,7 +91,7 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 			var number = Interlocked.Increment(ref sequence);
 			var id = Convert.ToHexStringLower(SHA1.HashData(Encoding.UTF8.GetBytes(
 				$"{number}\n{string.Join(' ', parents)}\n{message}\n{string.Join('\n', files.Select(file => $"{file.Key} {file.Value.Object}"))}")));
-			commits[id] = new MemoryCommit(new StoredCommit(id, parents.ToList(), message),
+			commits[id] = new MemoryCommit(new StoredCommit(id, parents.ToList(), message, Core.Actor.Current is { } actor ? $"{actor.Author.Name} <{actor.Author.Email}>" : null),
 				new SortedDictionary<string, MemoryFile>(files.ToDictionary(), StringComparer.Ordinal),
 				new SortedDictionary<string, NestedUnit>((nested ?? new Dictionary<string, NestedUnit>()).ToDictionary(), StringComparer.Ordinal));
 			return id;
@@ -251,7 +251,7 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 				throw new StorageException($"Tag '{name}' already exists in component '{Name}'.");
 			}
 
-			tags[name] = (new StoredTag(name, commit, true, message.Split('\n')[0].Trim(), Now()), message);
+			tags[name] = (new StoredTag(name, commit, true, message.Split('\n')[0].Trim(), Now(), Tagger()), message);
 			return Task.CompletedTask;
 		}
 	}
@@ -320,6 +320,9 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 		var nested = source.Nested.Where(unit => !paths.Contains(unit.Key)).ToDictionary();
 		return Task.FromResult(Add([commit], message, source.Files, nested));
 	}
+
+	/// <summary>Who makes a tag now: the committer of <see cref="Core.Actor.Current"/>, as git records a tagger.</summary>
+	internal static string? Tagger() => Core.Actor.Current is { } actor ? $"{actor.Committer.Name} <{actor.Committer.Email}>" : null;
 
 	/// <summary>The upstreams <see cref="EnsureCommitAsync"/> fetches from; set by the storage that made the store.</summary>
 	internal MemoryUpstreams? Upstreams { get; set; }

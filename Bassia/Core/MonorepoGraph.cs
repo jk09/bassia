@@ -296,6 +296,29 @@ internal sealed class MonorepoGraph(MetaRepo metaRepo, IComponentStorage storage
 		return new BoundaryChange(Registry.Boundaries, revision);
 	}
 
+	/// <summary>Registers <paramref name="user"/>, or with <paramref name="replace"/> changes the registered user with its id.</summary>
+	public async Task<string?> SetUserAsync(UserDefinition user, bool replace)
+	{
+		if (!replace && Registry.Users.Find(user.Id) is not null)
+		{
+			throw new MonorepoException($"User '{user.Id}' is already registered; change it with 'bassia user set'.");
+		}
+
+		if (replace)
+		{
+			Registry.Users.Require(user.Id);
+		}
+
+		return await MetaRepo.CommitAsync(new RegistryChange.SetUser(user), replace ? $"Change user '{user.Id}'" : $"Add user '{user.Id}': {user.Display}");
+	}
+
+	/// <summary>Removes a registered user; what was attributed to them keeps their id.</summary>
+	public Task<string?> RemoveUserAsync(string id)
+	{
+		Registry.Users.Require(id);
+		return MetaRepo.CommitAsync(new RegistryChange.RemoveUser(id), $"Remove user '{id}'");
+	}
+
 	/// <summary>Adds a conformance rule; it only reports, so nothing is refused for what it finds.</summary>
 	public async Task<IReadOnlyList<ConformanceRule>> AddConformanceAsync(ConformanceRule rule)
 	{

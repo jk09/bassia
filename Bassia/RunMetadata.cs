@@ -68,6 +68,9 @@ internal sealed class RunMetadata
 	public string? LockFiles { get; set; }
 	public string? LockFolders { get; set; }
 
+	/// <summary>The id of the user the run was started by and is attributed to; null in a monorepo without users.</summary>
+	public string? User { get; set; }
+
 	/// <summary>Whether the run collided with another run's hold in any component.</summary>
 	public bool HasLockConflicts => Components.Any(component => component.LockConflicts.Count > 0);
 	public List<ComponentRun> Components { get; } = [];
@@ -126,6 +129,7 @@ internal sealed class RunMetadata
 		if (AgentExitCode is not null) table["agent_exit_code"] = (long)AgentExitCode.Value;
 		if (LockFiles is not null) table["lock_files"] = LockFiles;
 		if (LockFolders is not null) table["lock_folders"] = LockFolders;
+		if (User is not null) table["user"] = User;
 
 		var components = new TomlTableArray();
 		foreach (var component in Components)
@@ -220,7 +224,8 @@ internal sealed class RunMetadata
 			WorkspacePath = Str(table, "workspace"),
 			AgentExitCode = table.TryGetValue("agent_exit_code", out var exitCode) ? (int)(long)exitCode : null,
 			LockFiles = OptStr(table, "lock_files"),
-			LockFolders = OptStr(table, "lock_folders")
+			LockFolders = OptStr(table, "lock_folders"),
+			User = OptStr(table, "user")
 		};
 
 		if (table.TryGetValue("component", out var components) && components is TomlTableArray componentTables)

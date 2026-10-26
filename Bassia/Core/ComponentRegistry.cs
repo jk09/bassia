@@ -17,11 +17,13 @@ internal sealed class ComponentRegistry
 {
 	private readonly Dictionary<string, ComponentDefinition> byName;
 
-	private ComponentRegistry(IReadOnlyList<ComponentDefinition> components, IReadOnlyList<BoundaryRule> boundaries, IReadOnlyList<ConformanceRule>? conformance = null)
+	private ComponentRegistry(IReadOnlyList<ComponentDefinition> components, IReadOnlyList<BoundaryRule> boundaries, IReadOnlyList<ConformanceRule>? conformance = null,
+		UserDirectory? users = null)
 	{
 		Components = components;
 		Boundaries = boundaries;
 		Conformance = conformance ?? [];
+		Users = users ?? UserDirectory.Empty;
 		byName = components.ToDictionary(component => component.Name, StringComparer.Ordinal);
 	}
 
@@ -36,6 +38,9 @@ internal sealed class ComponentRegistry
 	/// <summary>The conformance rules (<c>[[conformance]]</c> in <c>components.toml</c>), in order.</summary>
 	public IReadOnlyList<ConformanceRule> Conformance { get; }
 
+	/// <summary>The monorepo's users (<c>users.toml</c> in the meta-repo).</summary>
+	public UserDirectory Users { get; }
+
 	/// <summary>Every reference that breaks a boundary rule or a visibility (see <see cref="Core.Boundaries"/>).</summary>
 	public IReadOnlyList<BoundaryViolation> Violations() => Core.Boundaries.Check(this);
 
@@ -45,7 +50,7 @@ internal sealed class ComponentRegistry
 	/// Violations of the rules are kept: they are reported, not refused (see <see cref="MetaRepo"/>).
 	/// </summary>
 	public static ComponentRegistry FromDefinitions(IEnumerable<ComponentDefinition> components, IEnumerable<BoundaryRule>? boundaries = null,
-		IEnumerable<ConformanceRule>? conformance = null)
+		IEnumerable<ConformanceRule>? conformance = null, IEnumerable<UserDefinition>? users = null)
 	{
 		var list = new List<ComponentDefinition>();
 		foreach (var component in components)
@@ -77,7 +82,7 @@ internal sealed class ComponentRegistry
 			required[i].Validate($"[[conformance]] #{i + 1}");
 		}
 
-		return new ComponentRegistry(list, rules, required);
+		return new ComponentRegistry(list, rules, required, UserDirectory.FromDefinitions(users ?? []));
 	}
 
 	public ComponentDefinition? Find(string name) => byName.GetValueOrDefault(name);
@@ -158,6 +163,8 @@ internal sealed class ComponentRegistry
 		RegistryChange.RemoveBoundary remove => RemoveBoundary(remove.Index),
 		RegistryChange.AddConformance add => AddConformance(add.Rule),
 		RegistryChange.RemoveConformance remove => RemoveConformance(remove.Index),
+		RegistryChange.SetUser set => new ComponentRegistry(Components, Boundaries, Conformance, Users.Set(set.User)),
+		RegistryChange.RemoveUser remove => new ComponentRegistry(Components, Boundaries, Conformance, Users.Remove(remove.Id)),
 		_ => throw new ArgumentOutOfRangeException(nameof(change), change, "Unknown registry change.")
 	};
 
@@ -173,7 +180,7 @@ internal sealed class ComponentRegistry
 		CheckReferences(component.Name, component.References);
 		CheckAttributes(component);
 		RequireRegistered(component.References);
-		return new ComponentRegistry([.. Components, component], Boundaries, Conformance);
+		return new ComponentRegistry([.. Components, component], Boundaries, Conformance, Users);
 	}
 
 	/// <summary>Unregisters a component nothing references.</summary>
@@ -188,7 +195,7 @@ internal sealed class ComponentRegistry
 				$"remove those references first with 'bassia component set -name <component> -references ...'.");
 		}
 
-		return new ComponentRegistry(Components.Where(item => item.Name != name).ToList(), Boundaries, Conformance);
+		return new ComponentRegistry(Components.Where(item => item.Name != name).ToList(), Boundaries, Conformance, Users);
 	}
 
 	/// <summary>Replaces a component's references; they must name registered components and keep the graph acyclic.</summary>
@@ -197,7 +204,7 @@ internal sealed class ComponentRegistry
 		var component = Require(name);
 		CheckReferences(name, references);
 		RequireRegistered(references);
-		var next = new ComponentRegistry(Components.Select(item => item.Name == name ? component with { References = references } : item).ToList(), Boundaries, Conformance);
+		var next = new ComponentRegistry(Components.Select(item => item.Name == name ? component with { References = references } : item).ToList(), Boundaries, Conformance, Users);
 		next.Closure([name]);
 		return next;
 	}
@@ -207,21 +214,21 @@ internal sealed class ComponentRegistry
 	{
 		var changed = change(Require(name));
 		CheckAttributes(changed);
-		return new ComponentRegistry(Components.Select(item => item.Name == name ? changed : item).ToList(), Boundaries, Conformance);
+		return new ComponentRegistry(Components.Select(item => item.Name == name ? changed : item).ToList(), Boundaries, Conformance, Users);
 	}
 
 	/// <summary>Appends a valid boundary rule.</summary>
 	public ComponentRegistry AddBoundary(BoundaryRule rule)
 	{
 		rule.Validate($"[[boundary]] #{Boundaries.Count + 1}");
-		return new ComponentRegistry(Components, [.. Boundaries, rule], Conformance);
+		return new ComponentRegistry(Components, [.. Boundaries, rule], Conformance, Users);
 	}
 
 	/// <summary>Appends a valid conformance rule.</summary>
 	public ComponentRegistry AddConformance(ConformanceRule rule)
 	{
 		rule.Validate($"[[conformance]] #{Conformance.Count + 1}");
-		return new ComponentRegistry(Components, Boundaries, [.. Conformance, rule]);
+		return new ComponentRegistry(Components, Boundaries, [.. Conformance, rule], Users);
 	}
 
 	/// <summary>Removes the conformance rule at <paramref name="index"/> (0-based).</summary>
@@ -234,7 +241,7 @@ internal sealed class ComponentRegistry
 				: $"There is no conformance rule #{index + 1}; the rules are #1 to #{Conformance.Count}.");
 		}
 
-		return new ComponentRegistry(Components, Boundaries, Conformance.Where((_, i) => i != index).ToList());
+		return new ComponentRegistry(Components, Boundaries, Conformance.Where((_, i) => i != index).ToList(), Users);
 	}
 
 	/// <summary>Removes the boundary rule at <paramref name="index"/> (0-based).</summary>
@@ -247,7 +254,7 @@ internal sealed class ComponentRegistry
 				: $"There is no boundary rule #{index + 1}; the rules are #1 to #{Boundaries.Count}.");
 		}
 
-		return new ComponentRegistry(Components, Boundaries.Where((_, i) => i != index).ToList(), Conformance);
+		return new ComponentRegistry(Components, Boundaries.Where((_, i) => i != index).ToList(), Conformance, Users);
 	}
 
 	/// <summary>

@@ -176,6 +176,9 @@ internal sealed class IntegrationRecord
 	public List<string> Runs { get; } = [];
 	public required string Resolver { get; set; }
 
+	/// <summary>The id of the user who started the integration; its merges and tags are attributed to them.</summary>
+	public string? User { get; set; }
+
 	/// <summary>The structural merge driver the integration used (<see cref="StructuralMerge.Command"/>); null when none.</summary>
 	public string? StructuralDriver { get; set; }
 
@@ -216,6 +219,7 @@ internal sealed class IntegrationRecord
 			["runs"] = Array(Runs)
 		};
 		if (Finished is not null) table["finished"] = Finished;
+		if (User is not null) table["user"] = User;
 		if (StructuralDriver is not null) table["structural_driver"] = StructuralDriver;
 
 		var components = new TomlTableArray();
@@ -322,6 +326,7 @@ internal sealed class IntegrationRecord
 			Created = Str(table, "created"),
 			Finished = OptStr(table, "finished"),
 			Resolver = Str(table, "resolver"),
+			User = OptStr(table, "user"),
 			StructuralDriver = OptStr(table, "structural_driver"),
 			WorkspacePath = Str(table, "workspace")
 		};
