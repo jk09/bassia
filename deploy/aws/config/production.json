@@ -1,0 +1,26 @@
+{
+  "envName": "bassia",
+  "region": "eu-central-1",
+  "availabilityZones": ["eu-central-1a", "eu-central-1b", "eu-central-1c"],
+  "domainName": "bassia.example.com",
+  "hostedZoneName": "example.com",
+  "hostedZoneId": "Z0000000000000EXAMPLE",
+  "certificateArn": null,
+  "natGateways": 3,
+  "server": { "cpu": 1024, "memoryMiB": 4096, "ephemeralGiB": 100, "minTasks": 2, "maxTasks": 8, "imageTag": "v0.1.0" },
+  "database": { "engineVersion": "16.11", "minAcu": 0.5, "maxAcu": 16, "backupDays": 14 },
+  "workers": { "cpu": 2048, "memoryMiB": 8192, "ephemeralGiB": 60, "spot": true, "imageTag": "v0.1.0", "agentSecretName": "bassia/anthropic-api-key" },
+  "organization": "Example",
+  "admins": ["admin"],
+  "defaultPermission": "none",
+  "oidc": [
+    { "name": "sso", "issuer": "https://example.okta.com", "audience": "bassia", "client_id": "0oa-bassia-cli", "scopes": "openid email profile groups offline_access" }
+  ],
+  "githubClientId": null,
+  "alarmEmail": "ops@example.com",
+  "monthlyBudgetUsd": 1500,
+  "gcSchedule": "cron(17 3 * * ? *)",
+  "rateLimitPer5Minutes": 20000,
+  "storageAlarmGiB": 500,
+  "retainData": true
+}

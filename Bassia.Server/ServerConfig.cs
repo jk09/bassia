@@ -190,6 +190,92 @@ internal sealed record ServerConfig
 		return config;
 	}
 
+	/// <summary>
+	/// The configuration from environment variables, for containers: <c>BASSIA_URL</c>, <c>BASSIA_PUBLIC_URL</c>,
+	/// <c>BASSIA_ORGANIZATION</c>, <c>BASSIA_ADMINS</c> (comma-separated), <c>BASSIA_DEFAULT_PERMISSION</c>,
+	/// <c>BASSIA_STATE</c>; the database as <c>BASSIA_DB_HOST</c>, <c>BASSIA_DB_PORT</c>, <c>BASSIA_DB_NAME</c>,
+	/// <c>BASSIA_DB_USER</c>, <c>BASSIA_DB_PASSWORD</c> (PostgreSQL); the cloud storage as <c>BASSIA_BUCKET</c>,
+	/// <c>BASSIA_TABLE</c>, <c>BASSIA_REGION</c>, <c>BASSIA_PREFIX</c>; the logins as <c>BASSIA_OIDC</c> (a JSON array of
+	/// <c>{name, issuer, audience, client_id, scopes}</c>) and <c>BASSIA_GITHUB_CLIENT_ID</c>; the signing key as
+	/// <c>BASSIA_SERVER_SIGNING_KEY</c>.
+	/// </summary>
+	public static ServerConfig FromEnvironment()
+	{
+		static string? Get(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
+		string Require(string name) => Get(name) ?? throw new ServerConfigException($"{name} must be set.");
+
+		var table = new TomlTable
+		{
+			["url"] = Get("BASSIA_URL") ?? "http://0.0.0.0:8080",
+			["state"] = Get("BASSIA_STATE") ?? Path.Combine(Path.GetTempPath(), "bassia-server"),
+			["default_permission"] = Get("BASSIA_DEFAULT_PERMISSION") ?? "none",
+		};
+		var admins = new TomlArray();
+		foreach (var admin in (Get("BASSIA_ADMINS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			admins.Add(admin);
+		}
+
+		table["admins"] = admins;
+		if (Get("BASSIA_PUBLIC_URL") is { } publicUrl)
+		{
+			table["public_url"] = publicUrl;
+		}
+
+		if (Get("BASSIA_ORGANIZATION") is { } organization)
+		{
+			table["organization"] = organization;
+		}
+
+		if (Get("BASSIA_DB_HOST") is { } host)
+		{
+			var connection = new Npgsql.NpgsqlConnectionStringBuilder
+			{
+				Host = host,
+				Port = int.TryParse(Get("BASSIA_DB_PORT"), out var port) ? port : 5432,
+				Database = Get("BASSIA_DB_NAME") ?? "bassia",
+				Username = Require("BASSIA_DB_USER"),
+				Password = Require("BASSIA_DB_PASSWORD"),
+				SslMode = Npgsql.SslMode.Require
+			};
+			table["database"] = new TomlTable { ["provider"] = "postgres", ["connection"] = connection.ToString() };
+		}
+
+		table["storage"] = Get("BASSIA_BUCKET") is { } bucket
+			? new TomlTable { ["kind"] = "cloud", ["bucket"] = bucket, ["table"] = Require("BASSIA_TABLE"), ["region"] = Get("BASSIA_REGION") ?? Get("AWS_REGION") ?? "", ["prefix"] = Get("BASSIA_PREFIX") ?? "" }
+			: new TomlTable { ["kind"] = "git", ["path"] = Require("BASSIA_STORAGE_PATH") };
+		if (((TomlTable)table["storage"]).TryGetValue("region", out var region) && region is "")
+		{
+			((TomlTable)table["storage"]).Remove("region");
+		}
+
+		var auth = new TomlTable { ["signing_key"] = Get("BASSIA_SERVER_SIGNING_KEY") ?? "" };
+		if (Get("BASSIA_OIDC") is { } oidc)
+		{
+			var providers = new TomlTableArray();
+			foreach (var provider in System.Text.Json.JsonDocument.Parse(oidc).RootElement.EnumerateArray())
+			{
+				var item = new TomlTable();
+				foreach (var property in provider.EnumerateObject())
+				{
+					item[property.Name] = property.Value.GetString() ?? "";
+				}
+
+				providers.Add(item);
+			}
+
+			auth["oidc"] = providers;
+		}
+
+		if (Get("BASSIA_GITHUB_CLIENT_ID") is { } github)
+		{
+			auth["github"] = new TomlTable { ["client_id"] = github };
+		}
+
+		table["auth"] = auth;
+		return Parse(TomlSerializer.Serialize(table), Directory.GetCurrentDirectory());
+	}
+
 	private static TomlTable Section(TomlTable table, string key) =>
 		table.TryGetValue(key, out var value) ? value as TomlTable ?? throw new ServerConfigException($"[{key}] must be a table.") : new TomlTable();
 

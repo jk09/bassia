@@ -59,6 +59,49 @@ public class ServerContractTests
 		Assert.Contains("Basic", git.Headers.WwwAuthenticate.ToString());
 	}
 
+	[Fact]
+	public void Configuration_FromTheEnvironment_IsWhatAContainerIsGiven()
+	{
+		var variables = new Dictionary<string, string?>
+		{
+			["BASSIA_ADMINS"] = "alice, bob",
+			["BASSIA_DB_HOST"] = "db.internal",
+			["BASSIA_DB_USER"] = "bassia",
+			["BASSIA_DB_PASSWORD"] = "pass;word",
+			["BASSIA_BUCKET"] = "histories",
+			["BASSIA_TABLE"] = "bassia",
+			["BASSIA_REGION"] = "eu-central-1",
+			["BASSIA_SERVER_SIGNING_KEY"] = new string('k', 40),
+			["BASSIA_OIDC"] = """[{"name": "okta", "issuer": "https://example.okta.com", "audience": "bassia", "client_id": "cli"}]""",
+			["BASSIA_GITHUB_CLIENT_ID"] = "gh-app"
+		};
+		var saved = variables.Keys.ToDictionary(key => key, Environment.GetEnvironmentVariable);
+		try
+		{
+			foreach (var (key, value) in variables)
+			{
+				Environment.SetEnvironmentVariable(key, value);
+			}
+
+			var config = Bassia.Server.ServerConfig.FromEnvironment();
+
+			Assert.Equal(["alice", "bob"], config.Admins);
+			Assert.Equal("postgres", config.DatabaseProvider);
+			Assert.Contains("Password=\"pass;word\"", config.DatabaseConnection);
+			Assert.Equal(("cloud", "histories", "bassia", "eu-central-1"), (config.StorageKind, config.Bucket, config.Table, config.Region));
+			Assert.Equal("https://example.okta.com", Assert.Single(config.Oidc).Issuer);
+			Assert.Equal("gh-app", config.GitHub!.ClientId);
+			Assert.Equal("http://0.0.0.0:8080", config.Url);
+		}
+		finally
+		{
+			foreach (var (key, value) in saved)
+			{
+				Environment.SetEnvironmentVariable(key, value);
+			}
+		}
+	}
+
 	// ----- logging in -----
 
 	[Fact]

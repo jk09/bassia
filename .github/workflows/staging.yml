@@ -1,0 +1,116 @@
+# Creates the staging environment from this commit, exercises it and destroys it (bassia-b9581afe): the images are
+# built and published with the tag 'staging', every stack is deployed (config/staging.json), the two-client scenario
+# of bassia-f245cd5f runs against it (deploy/aws/scripts/staging-check.sh), and - when asked - the load test and the
+# restore drill, whose results go to the run's summary for the feature record. Runs on demand, once the repository
+# has an AWS role to assume (the AWS_DEPLOY_ROLE_ARN variable).
+name: Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      load-test:
+        description: Run the load test (scripts/Invoke-CloudLoadTest.ps1) against staging.
+        type: boolean
+        default: false
+      agents:
+        description: Agents the load test simulates.
+        default: '50'
+      restore-drill:
+        description: Run the restore drill (deploy/aws/scripts/restore-drill.sh) and measure the recovery time.
+        type: boolean
+        default: false
+      keep:
+        description: Keep the environment instead of destroying it at the end.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-central-1
+  DOTNET_NOLOGO: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_FEED: 'https://builds.dotnet.microsoft.com/dotnet'
+
+jobs:
+  staging:
+    name: Staging
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 14400
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: deploy/aws/package-lock.json
+
+      - name: Install the .NET SDK and build bassia
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/10.0/latest.version" | tr -d '\r' | sed '/^$/d' | tail -n 1)
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-linux-x64.tar.gz" | tar -xz -C "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          "$HOME/.dotnet/dotnet" publish Bassia/Bassia.csproj --configuration Release --output "$RUNNER_TEMP/bassia"
+          ln -s "$RUNNER_TEMP/bassia/Bassia" "$RUNNER_TEMP/bassia/bassia"
+          echo "$RUNNER_TEMP/bassia" >> "$GITHUB_PATH"
+
+      - name: Deploy the network and the data
+        working-directory: deploy/aws
+        run: |
+          npm ci --no-audit --no-fund
+          npx cdk bootstrap --require-approval never
+          npx cdk deploy bassia-staging-network bassia-staging-data -c env=staging --require-approval never
+
+      - name: Publish the images
+        run: |
+          set -euo pipefail
+          output() { aws cloudformation describe-stacks --stack-name bassia-staging-data --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          server=$(output ServerRepositoryUri); worker=$(output WorkerRepositoryUri)
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${server%%/*}"
+          docker build --file deploy/docker/server.Dockerfile --tag "$server:staging" . && docker push "$server:staging"
+          docker build --file deploy/docker/worker.Dockerfile --tag "$worker:staging" . && docker push "$worker:staging"
+
+      - name: Deploy the server, the workers and the observability
+        working-directory: deploy/aws
+        run: npx cdk deploy --all -c env=staging --require-approval never
+
+      - name: The two-client scenario
+        run: ./deploy/aws/scripts/staging-check.sh -env bassia-staging | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The load test
+        if: inputs.load-test
+        shell: pwsh
+        run: |
+          $url = aws cloudformation describe-stacks --stack-name bassia-staging-server --query "Stacks[0].Outputs[?OutputKey=='Url'].OutputValue" --output text
+          $env:BASSIA_TOKEN = (./deploy/aws/scripts/server-task.sh -env bassia-staging token -user admin -minutes 240 | Select-Object -Last 1)
+          git config --global "credential.$url.helper" "!bassia credential"
+          "## Load test ($env:AGENTS agents)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          ./scripts/Invoke-CloudLoadTest.ps1 -Gateway "$url/git" -Components staging-lib -Agents $env:AGENTS -Minutes 20 -PushInterval 60 |
+            Out-String | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+        env:
+          AGENTS: ${{ inputs.agents }}
+
+      - name: The restore drill
+        if: inputs.restore-drill
+        run: ./deploy/aws/scripts/restore-drill.sh -env bassia-staging -cleanup | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Destroy the environment
+        if: always() && !inputs.keep
+        working-directory: deploy/aws
+        run: npx cdk destroy --all -c env=staging --force

@@ -1136,7 +1136,8 @@ client_id = "Iv1..."
   `/access/grants|groups|identities|audit`. Errors are `{"error": "..."}` with 400, 401, 403, 404 or 409. `/healthz`
   and `/readyz` (database and meta-repo reachable) are for the load balancer; each request is logged as one JSON line.
 
-The dashboard for many users and metrics follow in `bassia-d3c6cfe4`.
+Deploying it on AWS - the stacks, images, upgrades, restores and costs - is [deploy-aws.md](deploy-aws.md). The
+dashboard for many users and metrics follow in `bassia-d3c6cfe4`.
 
 ## Architecture
 

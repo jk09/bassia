@@ -74,6 +74,36 @@ jobs:
       - name: Test
         run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
 
+  infrastructure:
+    name: Infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: deploy/aws/package-lock.json
+
+      # The CDK app of bassia-b9581afe: its assertion tests, and both environments synthesized.
+      - name: Test and synthesize the AWS deployment
+        working-directory: deploy/aws
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npx cdk synth --quiet -c env=production
+          npx cdk synth --quiet -c env=staging -o cdk.out.staging
+
+      # The images are built on every change, so a release never finds a broken Dockerfile; they are published by
+      # .github/workflows/deploy.yml.
+      - name: Build the server and worker images
+        run: |
+          docker build --file deploy/docker/server.Dockerfile --tag bassia-server:ci .
+          docker build --file deploy/docker/worker.Dockerfile --tag bassia-worker:ci .
+          docker run --rm bassia-server:ci help
+
   package:
     name: Package (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}

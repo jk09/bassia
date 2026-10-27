@@ -146,8 +146,34 @@ internal sealed class ServerDatabase
 
 	private string Serial => IsPostgres ? "BIGSERIAL PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
 
-	/// <summary>Applies the migrations the database does not have yet, each in its own transaction.</summary>
+	/// <summary>
+	/// Applies the migrations the database does not have yet, each in its own transaction. On PostgreSQL an advisory lock
+	/// holds back the other tasks of a deployment that start at the same moment, so each migration runs once.
+	/// </summary>
 	public async Task MigrateAsync()
+	{
+		if (!IsPostgres)
+		{
+			await ApplyMigrationsAsync();
+			return;
+		}
+
+		await using var holder = await ConnectAsync();
+		await ExecuteAsync(holder, null, $"SELECT pg_advisory_lock({MigrationLock});");
+		try
+		{
+			await ApplyMigrationsAsync();
+		}
+		finally
+		{
+			await ExecuteAsync(holder, null, $"SELECT pg_advisory_unlock({MigrationLock});");
+		}
+	}
+
+	/// <summary>The advisory lock migrations take on PostgreSQL ("bassia" in ASCII).</summary>
+	private const long MigrationLock = 0x626173736961;
+
+	private async Task ApplyMigrationsAsync()
 	{
 		await ExecuteAsync("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);");
 		var current = (await QueryAsync("SELECT MAX(version) FROM schema_version;", reader => reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture)))[0];

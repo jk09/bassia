@@ -1,0 +1,26 @@
+{
+  "name": "bassia-deploy-aws",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Bassia server on AWS: CDK stacks for the network, data, server, workers and observability (bassia-b9581afe).",
+  "bin": { "bassia-deploy": "bin/bassia.js" },
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "synth": "cdk synth --quiet",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@types/jest": "30.0.0",
+    "@types/node": "22.19.1",
+    "aws-cdk": "2.1145.0",
+    "jest": "30.5.2",
+    "ts-jest": "29.4.14",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.273.0",
+    "constructs": "10.8.1"
+  }
+}
