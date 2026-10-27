@@ -6,7 +6,7 @@ using Bassia.Git;
 /// <summary><c>bassia init</c>: initializes a Bassia monorepo.</summary>
 internal static class InitCommand
 {
-	private const string DefaultConfigToml =
+	internal const string DefaultConfigToml =
 		"# Bassia meta-repo configuration. Read and change it with 'bassia config list|get|set'.\n" +
 		"\n" +
 		"[agent]\n" +
@@ -53,7 +53,7 @@ internal static class InitCommand
 		"# ttl: seconds a hold lasts without its run renewing it, so a crashed or suspended run's holds expire.\n" +
 		"ttl = 120\n";
 
-	private const string DefaultComponentsToml =
+	internal const string DefaultComponentsToml =
 		"# Bassia monorepo components\n" +
 		"# Each registered component is recorded as:\n" +
 		"# [[component]]\n" +

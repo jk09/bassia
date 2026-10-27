@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Bassia.Tests" />
+    <InternalsVisibleTo Include="bassia-server" />
   </ItemGroup>
 
   <ItemGroup>

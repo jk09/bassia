@@ -13,20 +13,98 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Logging;
 
 /// <summary>
-/// Git's smart HTTP protocol over a <see cref="CloudComponentStorage"/>: <c>&lt;prefix&gt;/&lt;component&gt;</c> is a
-/// repository git clones, fetches (protocol v0 and v2, filters and objects by id for partial clones) and pushes to; and,
-/// when given, <c>&lt;prefix&gt;/.bassia</c> is a meta-repo folder served read-only, so the prefix URL is a depot
-/// <c>bassia clone</c> takes.
+/// Where the gateway finds the repositories it serves (see <see cref="GitGateway"/>): a git folder per component,
+/// brought up to date before git runs on it, and how pushed ref changes are published.
+/// </summary>
+internal interface IGitHost
+{
+	/// <summary>A folder for the scratch repositories pushes are received in.</summary>
+	string ScratchRoot { get; }
+
+	bool Exists(string name);
+
+	/// <summary>The component's repository folder, up to date.</summary>
+	Task<string> SyncAsync(string name);
+
+	/// <summary>Moves the refs - all of them or, when one is not as expected, none (<see cref="StorageException"/>).</summary>
+	Task PublishAsync(string name, IReadOnlyList<RefUpdate> updates);
+}
+
+/// <summary><see cref="IGitHost"/> on the cloud storage: its node cache, published to S3 and DynamoDB.</summary>
+internal sealed class CloudGitHost(CloudComponentStorage storage) : IGitHost
+{
+	public string ScratchRoot => storage.CacheRoot;
+
+	public bool Exists(string name) => !name.StartsWith('.') && storage.Exists(name);
+
+	public async Task<string> SyncAsync(string name)
+	{
+		await storage.SyncAsync(name);
+		return storage.LocationOf(name);
+	}
+
+	public Task PublishAsync(string name, IReadOnlyList<RefUpdate> updates) => storage.PublishAsync(name, updates);
+}
+
+/// <summary>
+/// Who may do what through a <see cref="GitGateway"/>. The caller object is the policy's own; the gateway only hands
+/// it back.
+/// </summary>
+internal interface IGatewayPolicy
+{
+	/// <summary>The caller, or null to answer 401 and have git ask for credentials.</summary>
+	Task<object?> AuthenticateAsync(HttpContext context);
+
+	Task<bool> MayFetchAsync(object caller, string component);
+
+	/// <summary>Why the caller may not push <paramref name="commands"/> (none: may it push at all), or null when it may.</summary>
+	Task<string?> RefusePushAsync(object caller, string component, IReadOnlyList<PushCommand> commands);
+
+	/// <summary>The meta-repo folder to serve this caller at <c>.bassia</c>, or null for none.</summary>
+	Task<string?> MetaRepoAsync(object caller);
+
+	/// <summary>Called after a push published <paramref name="commands"/>.</summary>
+	Task PushedAsync(object caller, string component, IReadOnlyList<PushCommand> commands, HttpContext context);
+}
+
+/// <summary>Everyone may do everything; the meta-repo is the given folder, when there is one.</summary>
+internal sealed class OpenGatewayPolicy(string? metaRepoDir) : IGatewayPolicy
+{
+	private static readonly object Anyone = new();
+
+	public Task<object?> AuthenticateAsync(HttpContext context) => Task.FromResult<object?>(Anyone);
+
+	public Task<bool> MayFetchAsync(object caller, string component) => Task.FromResult(true);
+
+	public Task<string?> RefusePushAsync(object caller, string component, IReadOnlyList<PushCommand> commands) => Task.FromResult<string?>(null);
+
+	public Task<string?> MetaRepoAsync(object caller) => Task.FromResult(metaRepoDir);
+
+	public Task PushedAsync(object caller, string component, IReadOnlyList<PushCommand> commands, HttpContext context) => Task.CompletedTask;
+}
+
+/// <summary>
+/// Git's smart HTTP protocol over the repositories of an <see cref="IGitHost"/>: <c>&lt;prefix&gt;/&lt;component&gt;</c>
+/// is a repository git clones, fetches (protocol v0 and v2, filters and objects by id for partial clones) and pushes to;
+/// and <c>&lt;prefix&gt;/.bassia</c> is the meta-repo the policy names, served read-only, so the prefix URL is a depot
+/// <c>bassia clone</c> takes. The <see cref="IGatewayPolicy"/> authenticates and authorizes every request; a repository
+/// the caller may not read is answered as one that does not exist.
 /// </summary>
 /// <remarks>
-/// Fetches run git's upload-pack on the node's cache, brought up to the table first. A push runs git's receive-pack on a
-/// scratch repository that borrows the cache's objects and starts with its refs; the refs it accepted are then
+/// Fetches run git's upload-pack on the host's repository, brought up to date first. A push runs git's receive-pack on a
+/// scratch repository that borrows the repository's objects and starts with its refs; the refs it accepted are then
 /// published under compare-and-swap - each must still be where the client saw it - and the gateway reports the outcome
 /// itself: every ref updated, or (a race lost) none.
 /// </remarks>
-internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepoDir = null)
+internal sealed class GitGateway(IGitHost host, IGatewayPolicy policy)
 {
 	private const string ZeroId = "0000000000000000000000000000000000000000";
+
+	/// <summary>A gateway open to everyone over the cloud storage, serving <paramref name="metaRepoDir"/> as the meta-repo.</summary>
+	public GitGateway(CloudComponentStorage storage, string? metaRepoDir = null)
+		: this(new CloudGitHost(storage), new OpenGatewayPolicy(metaRepoDir))
+	{
+	}
 
 	public WebApplication Build(string url, string prefix = "/git")
 	{
@@ -46,22 +124,37 @@ internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepo
 		app.MapPost(prefix + "/{name}/git-receive-pack", ReceivePackAsync);
 	}
 
-	/// <summary>The repository folder <paramref name="name"/> names, brought up to date; null when there is none (or, for a push, none to write).</summary>
-	private async Task<string?> RepositoryAsync(string name, bool push)
+	/// <summary>
+	/// The caller and the repository folder <paramref name="name"/> names, brought up to date; no folder when there is
+	/// none the caller may fetch (or, for a push, push to). Null when the response is already written (401).
+	/// </summary>
+	private async Task<(object Caller, string? Directory)?> RepositoryAsync(HttpContext context, string name, bool push)
 	{
-		name = name.EndsWith(".git", StringComparison.Ordinal) ? name[..^4] : name;
-		if (name == Monorepo.MetaRepoFolderName)
+		if (await policy.AuthenticateAsync(context) is not { } caller)
 		{
-			return push ? null : metaRepoDir;
-		}
-
-		if (name.StartsWith('.') || !storage.Exists(name))
-		{
+			context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+			context.Response.Headers.WWWAuthenticate = "Basic realm=\"Bassia\"";
+			await context.Response.WriteAsync("Authentication required: log in with 'bassia login'.\n");
 			return null;
 		}
 
-		await storage.SyncAsync(name);
-		return storage.LocationOf(name);
+		name = Name(name);
+		if (name == Monorepo.MetaRepoFolderName)
+		{
+			return (caller, push ? null : await policy.MetaRepoAsync(caller));
+		}
+
+		if (!host.Exists(name) || !await policy.MayFetchAsync(caller, name))
+		{
+			return (caller, null);
+		}
+
+		if (push && await policy.RefusePushAsync(caller, name, []) is not null)
+		{
+			return (caller, null);
+		}
+
+		return (caller, await host.SyncAsync(name));
 	}
 
 	private static string Name(string name) => name.EndsWith(".git", StringComparison.Ordinal) ? name[..^4] : name;
@@ -90,7 +183,12 @@ internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepo
 			return;
 		}
 
-		if (await RepositoryAsync(name, service == "git-receive-pack") is not { } directory)
+		if (await RepositoryAsync(context, name, service == "git-receive-pack") is not { } found)
+		{
+			return;
+		}
+
+		if (found.Directory is not { } directory)
 		{
 			await RefuseAsync(context, StatusCodes.Status404NotFound, $"No repository '{Name(name)}' to {(service == "git-receive-pack" ? "push to" : "fetch from")}.");
 			return;
@@ -110,7 +208,12 @@ internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepo
 
 	private async Task UploadPackAsync(HttpContext context, string name)
 	{
-		if (await RepositoryAsync(name, push: false) is not { } directory)
+		if (await RepositoryAsync(context, name, push: false) is not { } found)
+		{
+			return;
+		}
+
+		if (found.Directory is not { } directory)
 		{
 			await RefuseAsync(context, StatusCodes.Status404NotFound, $"No repository '{Name(name)}'.");
 			return;
@@ -125,7 +228,12 @@ internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepo
 	/// <summary>See the class remarks: receive-pack on a scratch repository, then one publish of every ref it accepted.</summary>
 	private async Task ReceivePackAsync(HttpContext context, string name)
 	{
-		if (await RepositoryAsync(name, push: true) is not { } directory)
+		if (await RepositoryAsync(context, name, push: true) is not { } found)
+		{
+			return;
+		}
+
+		if (found.Directory is not { } directory)
 		{
 			await RefuseAsync(context, StatusCodes.Status404NotFound, $"No repository '{Name(name)}' to push to.");
 			return;
@@ -139,36 +247,47 @@ internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepo
 		}
 
 		var (commands, capabilities) = PushCommands(request.ToArray());
-		var scratch = Path.Combine(storage.CacheRoot, ".push", Guid.NewGuid().ToString("N"));
 		var statuses = new Dictionary<string, string?>(StringComparer.Ordinal);
-		string unpack;
-		try
+		var unpack = "ok";
+		if (await policy.RefusePushAsync(found.Caller, name, commands) is { } refusal)
 		{
-			unpack = await ReceiveAsync(directory, scratch, request, commands, statuses);
-			var accepted = commands.Where(command => statuses[command.Ref] is null).ToList();
-			if (accepted.Count > 0)
+			foreach (var command in commands)
 			{
-				try
+				statuses[command.Ref] = refusal.ReplaceLineEndings(" ");
+			}
+		}
+		else
+		{
+			var scratch = Path.Combine(host.ScratchRoot, ".push", Guid.NewGuid().ToString("N"));
+			try
+			{
+				unpack = await ReceiveAsync(directory, scratch, request, commands, statuses);
+				var accepted = commands.Where(command => statuses[command.Ref] is null).ToList();
+				if (accepted.Count > 0)
 				{
-					await storage.PublishAsync(name, accepted.Select(command => new RefUpdate(
-						command.Ref,
-						command.New == ZeroId ? null : command.New,
-						command.Old == ZeroId ? RefExpect.Absent : RefExpect.Value,
-						command.Old)).ToList());
-				}
-				catch (StorageException ex)
-				{
-					var reason = ex.Message.ReplaceLineEndings(" ");
-					foreach (var command in commands)
+					try
 					{
-						statuses[command.Ref] = statuses[command.Ref] ?? $"{reason} No ref of this push was updated.";
+						await host.PublishAsync(name, accepted.Select(command => new RefUpdate(
+							command.Ref,
+							command.New == ZeroId ? null : command.New,
+							command.Old == ZeroId ? RefExpect.Absent : RefExpect.Value,
+							command.Old)).ToList());
+						await policy.PushedAsync(found.Caller, name, accepted, context);
+					}
+					catch (StorageException ex)
+					{
+						var reason = ex.Message.ReplaceLineEndings(" ");
+						foreach (var command in commands)
+						{
+							statuses[command.Ref] = statuses[command.Ref] ?? $"{reason} No ref of this push was updated.";
+						}
 					}
 				}
 			}
-		}
-		finally
-		{
-			GitComponentStorage.DeleteDirectory(scratch);
+			finally
+			{
+				GitComponentStorage.DeleteDirectory(scratch);
+			}
 		}
 
 		NoCache(context.Response);
@@ -186,7 +305,7 @@ internal sealed class GitGateway(CloudComponentStorage storage, string? metaRepo
 	/// </summary>
 	private static async Task<string> ReceiveAsync(string cacheDir, string scratch, MemoryStream request, IReadOnlyList<PushCommand> commands, Dictionary<string, string?> statuses)
 	{
-		var cacheObjects = Path.Combine(cacheDir, ".git", "objects");
+		var cacheObjects = Path.GetFullPath(await GitClient.In(cacheDir).RunOrThrowAsync(["rev-parse", "--git-path", "objects"]), cacheDir);
 		await GitClient.In(Directory.CreateDirectory(Path.GetDirectoryName(scratch)!).FullName).RunOrThrowAsync(["init", "--bare", "--quiet", scratch]);
 		await File.WriteAllTextAsync(Path.Combine(scratch, "objects", "info", "alternates"), Path.GetFullPath(cacheObjects).Replace('\\', '/') + "\n");
 		var git = GitClient.In(scratch);

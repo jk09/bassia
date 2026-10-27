@@ -18,7 +18,7 @@ internal static class CommandCatalog
 		"component list", "component show", "component survey",
 		"tag list", "tag show", "graph", "log", "boundary list", "boundary check", "task list", "affected", "conformance list", "conformance check", "template list", "user list", "user show", "whoami",
 		"agent list", "agent show", "agent logs", "agent wait", "agent diff",
-		"lock list", "lock check",
+		"lock list", "lock check", "access list", "audit",
 		"integration plan", "integration list", "integration show", "integration logs", "integration wait",
 		"skill list", "skill show", "help", "web",
 		"view list", "view show", "view ls"

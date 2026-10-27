@@ -1049,6 +1049,95 @@ only write issues of the repository is enough. Without a token, or when GitHub c
 kept in `feedback/pending` under `BASSIA_HOME` and `bassia feedback pending -send` sends it later. A failed report never
 changes the outcome of the command. The choice is stored in `feedback.toml` in the same folder.
 
+### Bassia server: many users, one monorepo
+
+`bassia-server` (the `Bassia.Server` project) keeps a monorepo for many people and agents: they log in, clone it, and
+from then on their runs, locks, records and integrations are the server's, so everyone sees everyone's work. Agents
+still run on the machine that starts them; the server records, coordinates and stores.
+
+```sh
+bassia-server -config server.toml                    # run it (several instances behind a load balancer with cloud storage)
+bassia-server token -config server.toml -user alice  # a token for a configured admin or registered user, to bootstrap
+bassia-server migrate -config server.toml            # bring the database schema up to date (also done at start)
+bassia-server check -config server.toml              # the cloud storage's bucket versioning and table recovery
+```
+
+The configuration (TOML; the full list is in `Bassia.Server/ServerConfig.cs`):
+
+```toml
+url = "http://0.0.0.0:8080"
+admins = ["alice"]                 # hold every permission, even before they are registered users
+default_permission = "none"        # what every user holds on every component: none or read
+state = "/var/lib/bassia"          # this instance's scratch: caches, meta-repo views
+
+[database]
+provider = "postgres"              # or "sqlite" (one instance; tests)
+connection = "Host=db;Database=bassia;Username=bassia;Password=..."
+
+[storage]
+kind = "cloud"                     # S3 and DynamoDB (see Cloud storage); or "git" with path = a monorepo folder
+bucket = "bassia-histories"
+table = "bassia"
+
+[auth]
+signing_key = "..."                # or BASSIA_SERVER_SIGNING_KEY; signs the server's own tokens
+
+[[auth.oidc]]                      # any OpenID Connect provider: Okta, Entra ID, Cognito, IAM Identity Center...
+name = "okta"
+issuer = "https://example.okta.com"
+audience = "bassia"
+client_id = "0oa..."               # the public client 'bassia login' uses (authorization code + PKCE)
+
+[auth.github]                      # GitHub sign-in: an OAuth app with the device flow enabled
+client_id = "Iv1..."
+```
+
+- **State.** Records (runs, integrations), the lock table, jobs and their output, the task cache's index, identity
+  links, grants, groups, refresh tokens, idempotency keys and the audit log are in the database (PostgreSQL, or SQLite
+  for a single instance); task cache entries in the object store. The registry and the monorepo's settings are a
+  meta-repo: with git storage the monorepo's own `.bassia`, with cloud storage a history `.bassia` in the cloud
+  storage, changed by compare-and-swap on its branch so instances never lose each other's changes. Every change goes
+  through Core's checks, as on a monorepo on disk.
+- **Logging in.** `bassia login -server <url>`: in the browser with an OIDC provider (authorization code with PKCE; the
+  `BROWSER` variable names the browser), with a code at GitHub (`-provider github`; the server checks the GitHub token
+  and issues its own, short-lived and refreshed), as a worker with OIDC client credentials (`-client-id`,
+  `-client-secret`), or with a token (`-token`). An identity is mapped to a registered user (`users.toml`) by a link
+  made on first login from a verified email; an admin links others (`bassia access link`, e.g. a worker's client).
+  Credentials are kept in the OS keychain where there is one, else in `~/.bassia/credentials` readable by the user only
+  (`BASSIA_CREDENTIAL_STORE=file` chooses the file); `BASSIA_TOKEN` overrides them. `bassia logout` forgets one.
+- **Cloning.** `bassia clone -from https://<server>` after logging in: the meta-repo is the server's view of it - only
+  the components the user may read, as a single commit per revision - and each component a history-only clone of the
+  server's git gateway (`<server>/git/<component>`), git getting the login through `bassia credential` (its credential
+  helper, which Bassia sets for every git it starts). `bassia fetch` resets the meta-repo to the server's view and
+  fetches the components; a branch or tag another client pushed is fetched when asked for. Plain git works too, with
+  `bassia credential` configured as git's credential helper for the server.
+- **Working in a clone.** Runs, `lock ...`, `agent list|show|logs|wait|stop` and `integration ...` show and change the
+  server's state: a run's record, holds and (for a detached run) output as it goes; its results are pushed to the
+  server. The registry and settings are changed on the server (`component create|import|fork|remove`, `user add`,
+  `config set`, ...). Landing (`integration advance`) goes through the server's merge queue: one landing per component
+  at a time, components taken in name order, every branch of a landing moved together or none. Splitting a component
+  from a clone is not available yet.
+- **Permissions.** Per component: `read` (see it: registration, history, runs, locks; fetch it), `run` (start runs on
+  it, push run branches and the tags of runs and integrations), `integrate` (land on its default branch, push other
+  tags) and `admin` (change its registration, remove it), each including the ones before. They are granted to users,
+  groups (the server's, `bassia access group`, and the OIDC `groups` claim) and everyone, on a component or every
+  component (`bassia access grant|revoke|list`); owners hold `integrate`; configured admins and holders of `admin` on
+  `*` are server admins. A user sees nothing of a component they may not read: not in their registry, git, run or
+  lock listings, and a view or run mapping it is refused before anything is materialized. `bassia token create
+  -components a,b` makes a worker's token: `run` at most, on those components only, for at most a day.
+- **Audit.** GitHub logins, registry and settings changes, record writes, stopped jobs, pushes, landings, components made or
+  removed, worker tokens and access changes are appended to the audit log - who, what, when, from where - which the
+  server never changes (`bassia audit`, admins). Lock decisions and job heartbeats, many per run, are not.
+- **The API** (`/api/v1`, JSON, every request authenticated with a bearer token but `/info` and `/auth/*`; a write
+  with an `Idempotency-Key` is applied once): `/info`, `/auth/github`, `/auth/refresh`, `/me`, `/tokens/worker`;
+  `/meta/components`, `/meta/users`, `/meta/commit`, `/config`; `/records` (`index`, `keys`, `latest`), `/runs`;
+  `/locks` (read with the table's version, write a decision while it is unchanged); `/jobs` (register, `heartbeat`,
+  `log`, `finish`, `stop`); `/task-cache/{key}`; `/components/{name}` (create, import, fork, delete), `/land`;
+  `/access/grants|groups|identities|audit`. Errors are `{"error": "..."}` with 400, 401, 403, 404 or 409. `/healthz`
+  and `/readyz` (database and meta-repo reachable) are for the load balancer; each request is logged as one JSON line.
+
+The dashboard for many users and metrics follow in `bassia-d3c6cfe4`.
+
 ## Architecture
 
 Bassia has three layers; each depends only on the ones below it.
@@ -1122,7 +1211,7 @@ storage contract with S3 and DynamoDB as the durable truth, reached through two 
   repository borrowing the cache's objects, then one publish of the refs it accepted, each still where the client saw
   it; the gateway reports the outcome itself, so a push that loses a race is refused as a whole. Given a meta-repo
   folder it serves it read-only at `<prefix>/.bassia`, which makes the prefix a depot for `bassia clone`.
-  Authentication is the server's (`bassia-f245cd5f`).
+  `bassia-server` puts authentication and per-component permissions in front of it (see Bassia server).
 - **Garbage collection.** `CloudGarbageCollector` repacks the objects a component's refs reach into one pack and marks
   the other packs superseded; a later collection deletes the packs superseded longer than the grace period ago
   (default 14 days) - records first, then files - and packs no record lists once first seen unlisted that long ago.
@@ -1138,7 +1227,8 @@ storage contract with S3 and DynamoDB as the durable truth, reached through two 
 
 A replacement for git implements the storage contract; nothing in the component graph, the integration or locking
 changes, and `bassia log`, `agent diff`, `component survey`, the tag commands and the dashboard read history through it
-as well. A monorepo kept elsewhere - on a server - is another `IMonorepoBackend`. What stays tied to the machine is
+as well. A monorepo kept elsewhere is another `IMonorepoBackend`: in a clone of a Bassia server it is `Storage/Remote`'s
+`RemoteBackend` (see Bassia server), chosen by `server.url`. What stays tied to the machine is
 what lives on it: working copies (git checkouts, whatever the backend), `bassia init` and `bassia clone` (which create
 a local monorepo), and the uncommitted hand edits of the meta-repo that `bassia status` reports.
 
@@ -1184,7 +1274,13 @@ behavior on memory, git and the cloud storage - on the in-memory object store an
 `BASSIA_CLOUD_TEST_ENDPOINT` (DynamoDB, e.g. DynamoDB Local or moto) and `BASSIA_CLOUD_TEST_S3_ENDPOINT` (S3, e.g.
 MinIO or moto) are set - plus two nodes seeing each other's writes and racing for a branch, garbage collection, and the
 same operations giving the same ids, trees, merges and diffs on git and cloud. `GitGatewayTests` runs real git and
-`bassia clone` with a sparse run against the gateway on a local port. `ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
+`bassia clone` with a sparse run against the gateway on a local port. The server's tests (`Category=Server`) start
+`bassia-server` in the test process on a local port (SQLite, or a new PostgreSQL database each when
+`BASSIA_SERVER_TEST_POSTGRES` is a connection string): `ServerEndToEndTests` runs two clones against one server
+(shared runs, records, holds and integrations; landing taking `integrate`; a user without `read` seeing nothing; a
+worker token's limits), `ServerContractTests` the remote backend's records, jobs, task cache, idempotent writes and the
+merge queue, every way to log in against a fake identity provider, git's credential helper, and a server on the
+cloud storage; `BackendContractTests` holds the database's and the remote lock store to the lock contract. `ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
 store fetched so laziness is proven, and write-through with its retry; `ViewCommandTests` clones a local depot and checks
 with git which file contents each step downloaded. `LockTests` covers the lock filter and keys, the lock table's expiry, dead processes, deadlocks and a suspended run
 losing its holds, and - with a detached run holding while a second run starts - implicit holds, conflicts and what

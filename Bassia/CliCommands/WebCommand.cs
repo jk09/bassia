@@ -78,12 +78,14 @@ internal static class WebCommand
 		return null;
 	}
 
-	/// <summary>Best effort: a machine without a browser (or a display) still gets the URL on stderr.</summary>
-	private static void OpenBrowser(string url)
+	/// <summary>Best effort: a machine without a browser (or a display) still gets the URL on stderr. <c>BROWSER</c> names the browser to use.</summary>
+	internal static void OpenBrowser(string url)
 	{
 		try
 		{
-			var startInfo = OperatingSystem.IsWindows() ? new ProcessStartInfo(url) { UseShellExecute = true }
+			// BROWSER, as many command line tools honor it: the program to open URLs with.
+			var startInfo = Environment.GetEnvironmentVariable("BROWSER") is { Length: > 0 } browser ? new ProcessStartInfo(browser, [url])
+				: OperatingSystem.IsWindows() ? new ProcessStartInfo(url) { UseShellExecute = true }
 				: OperatingSystem.IsMacOS() ? new ProcessStartInfo("open", url)
 				: new ProcessStartInfo("xdg-open", url);
 			startInfo.RedirectStandardError = !startInfo.UseShellExecute;

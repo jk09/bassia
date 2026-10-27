@@ -80,6 +80,14 @@ internal static class CommandTable
 		"(resolver|manual|merge): a result that changed a path another run held; both per component as lock.component.<component>.<setting>; " +
 		"lock.ttl (seconds): how long a hold lasts without its run renewing it.";
 
+	private const string ServerDetails = "A Bassia server (bassia-server) keeps a monorepo for many users; 'bassia clone -from https://<server>' after logging in makes a clone " +
+		"whose locks, jobs, run and integration records and registry are the server's. The login is kept in the OS keychain where there is one, else in " +
+		"~/.bassia/credentials; BASSIA_TOKEN overrides it.";
+
+	private const string AccessDetails = "Permissions are read, run (start runs, push run branches and tags), integrate (land on the default branch, push other " +
+		"tags) and admin (change the registration), each including the ones before; owners of a component hold integrate, server admins everything. A user " +
+		"sees only the components they may read.";
+
 	private const string ViewDetails = "A config spec is line rules, # starting a comment: 'map <component>[,...]' maps the components and, transitively, " +
 		"what they reference; 'select <component-pattern> <version>' picks a version - a branch (followed by 'view update'), a tag or a commit hash - " +
 		"the first matching rule winning, a component no rule matches at its default branch's tip; 'load [!]<component-pattern>[/<path-pattern>]' " +
@@ -419,6 +427,103 @@ internal static class CommandTable
 			DepotCommands.FetchAsync,
 			Details: "Components the depot registered since are imported (history only) unless the clone is lazy (depot.lazy). Views move to new " +
 				"versions with 'bassia view update'."),
+
+		// ----- servers -----
+
+		new("login", null, "Log in to a Bassia server: in the browser (OIDC), with a code at GitHub, as a worker (OIDC client credentials), or with a token.",
+			[
+				new("server", "url", "The server, e.g. https://bassia.example.com (default: the server this clone is of)."),
+				new("provider", "name", "The login to use when the server offers several (see its /api/v1/info)."),
+				new("token", "token", "A token to log in with as it is: a worker token (bassia token create) or an admin's bootstrap token."),
+				new("client-id", "id", "A worker's OIDC client id: log in with client credentials."),
+				new("client-secret", "secret", "The OIDC client's secret."),
+				new("scopes", "scopes", "The scopes client credentials ask for."),
+				new("no-browser", null, "Print the login URL without opening a browser.")
+			],
+			["bassia login -server https://bassia.example.com", "bassia login -server https://bassia.example.com -provider github",
+				"bassia login -server https://bassia.example.com -client-id worker -client-secret $SECRET"],
+			ServerCommands.LoginAsync,
+			Details: ServerDetails),
+
+		new("logout", null, "Forget the login to a Bassia server.",
+			[new("server", "url", "The server (default: the server this clone is of).")],
+			["bassia logout -server https://bassia.example.com"],
+			ServerCommands.LogoutAsync),
+
+		new("credential", null, "Git's credential helper for Bassia servers: prints the login's token for the server git asks about.",
+			[new("operation", "get|store|erase", "What git asks (only get answers).", Required: true)],
+			["bassia credential get"],
+			ServerCommands.CredentialAsync, Positional: "operation",
+			Details: "Git calls it with the request (protocol=, host=, path= lines) on stdin. Bassia gives itself to git as the helper for the server of a " +
+				"clone, so 'bassia clone', fetches and pushes need nothing set up; plain git needs it configured: " +
+				"git config --global credential.https://bassia.example.com.helper '!bassia credential'."),
+
+		new("token", "create", "Make a worker's token: 'run' at most, on the named components only, expiring.",
+			[
+				new("components", "name,...", "The components the worker may run on.", Required: true),
+				new("minutes", "n", "How long the token is valid (default 120, at most 1440)."),
+				new("server", "url", "The server (default: the server this clone is of).")
+			],
+			["bassia token create -components app,lib -minutes 60"],
+			ServerCommands.TokenCreateAsync,
+			Details: "A worker logs in with 'bassia login -token <token>' or sets BASSIA_TOKEN."),
+
+		new("access", "list", "List a server's grants, groups and identity links (admins).",
+			[new("server", "url", "The server (default: the server this clone is of).")],
+			["bassia access list"],
+			ServerCommands.AccessListAsync,
+			Details: AccessDetails),
+
+		new("access", "grant", "Grant a permission on a component (or every component) to a user, a group or everyone (admins).",
+			[
+				new("to", "principal", "A user id, group:<name>, or * for everyone.", Required: true),
+				new("permission", "read|run|integrate|admin", "The permission; each includes the ones before it.", Required: true),
+				new("component", "name", "The component (default: * - every component)."),
+				new("server", "url", "The server (default: the server this clone is of).")
+			],
+			["bassia access grant -to bob -permission run -component app", "bassia access grant -to group:release -permission integrate"],
+			ServerCommands.AccessGrantAsync,
+			Details: AccessDetails),
+
+		new("access", "revoke", "Revoke what a principal was granted on a component (admins).",
+			[
+				new("from", "principal", "A user id, group:<name>, or *.", Required: true),
+				new("component", "name", "The component (default: *)."),
+				new("server", "url", "The server (default: the server this clone is of).")
+			],
+			["bassia access revoke -from bob -component app"],
+			ServerCommands.AccessRevokeAsync,
+			Details: AccessDetails),
+
+		new("access", "group", "Put a user in one of the server's groups, or take them out (-remove) (admins).",
+			[
+				new("group", "name", "The group.", Required: true),
+				new("user", "id", "The registered user.", Required: true),
+				new("remove", null, "Take the user out of the group."),
+				new("server", "url", "The server (default: the server this clone is of).")
+			],
+			["bassia access group -group release -user alice"],
+			ServerCommands.AccessGroupAsync,
+			Details: AccessDetails),
+
+		new("access", "link", "Link an identity at a provider (an OIDC issuer's subject, or a GitHub account id) to a registered user (admins).",
+			[
+				new("provider", "issuer|github", "The OIDC issuer URL, or github.", Required: true),
+				new("subject", "id", "The identity's subject there (a worker client's id, a GitHub account's number).", Required: true),
+				new("user", "id", "The registered user it is.", Required: true),
+				new("server", "url", "The server (default: the server this clone is of).")
+			],
+			["bassia access link -provider https://example.okta.com -subject 0oa1worker -user build-bot"],
+			ServerCommands.AccessLinkAsync,
+			Details: AccessDetails),
+
+		new("audit", null, "Show a server's audit log, newest first: who changed what, when, from where (admins).",
+			[
+				new("limit", "n", "How many entries (default 50)."),
+				new("server", "url", "The server (default: the server this clone is of).")
+			],
+			["bassia audit -limit 20"],
+			ServerCommands.AuditAsync),
 
 		new("view", "create", "Map the components of a config spec onto a folder: each mapped component and what it references, side by side, with only the files the spec loads downloaded and written.",
 			[

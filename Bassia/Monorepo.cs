@@ -129,8 +129,20 @@ internal sealed class Monorepo
 		return null;
 	}
 
-	/// <summary>The monorepo at <paramref name="root"/> on this machine's disk (<see cref="LocalBackend"/>).</summary>
-	public static Monorepo Load(string root) => Load(new LocalBackend(root));
+	/// <summary>
+	/// The monorepo at <paramref name="root"/>: on this machine's disk (<see cref="LocalBackend"/>), or - in a clone of a
+	/// Bassia server (<c>server.url</c>) - the server's (<see cref="Storage.Remote.RemoteBackend"/>).
+	/// </summary>
+	public static Monorepo Load(string root) => Load(BackendOf(root));
+
+	/// <summary>The backend of the monorepo at <paramref name="root"/> (see <see cref="Load(string)"/>).</summary>
+	public static Storage.IMonorepoBackend BackendOf(string root) =>
+		ConfigSnapshot.Load(root).Raw(ConfigLayer.User, ConfigFile.Find("server.url")) is { Length: > 0 } server
+			? new Storage.Remote.RemoteBackend(root, server)
+			: new LocalBackend(root);
+
+	/// <summary>The Bassia server this monorepo is a clone of (<c>server.url</c>), or null.</summary>
+	public string? Server => Config.Value("server.url").Trim() is { Length: > 0 } server ? server : null;
 
 	/// <summary>
 	/// The monorepo <paramref name="backend"/> keeps: its settings and its registry as of now. It waits for the backend in

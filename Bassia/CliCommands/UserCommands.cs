@@ -36,6 +36,12 @@ internal static class UserCommands
 	/// </summary>
 	public static async Task<Actor?> ActorForAsync(CommandSpec spec)
 	{
+		// A server's commands act for the login, not for a user of the monorepo; git calls 'credential' from inside one.
+		if (spec.Name is "login" or "logout" or "credential" or "token" or "access" or "audit")
+		{
+			return null;
+		}
+
 		if (Monorepo.FindRoot(Environment.CurrentDirectory) is not { } root)
 		{
 			return null;

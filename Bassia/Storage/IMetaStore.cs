@@ -4,6 +4,20 @@ namespace Bassia.Storage;
 /// One change to the component registry. The meta-repo persists changes rather than whole registries, so a store can
 /// apply them its own way: the git store edits <c>components.toml</c> line by line, a database store in a transaction.
 /// </summary>
+[System.Text.Json.Serialization.JsonPolymorphic(TypeDiscriminatorPropertyName = "change")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(Add), "add")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(Remove), "remove")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(SetReferences), "set-references")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(SetTags), "set-tags")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(SetVisibility), "set-visibility")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(SetOwners), "set-owners")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(SetExports), "set-exports")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(AddBoundary), "add-boundary")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(RemoveBoundary), "remove-boundary")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(AddConformance), "add-conformance")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(RemoveConformance), "remove-conformance")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(SetUser), "set-user")]
+[System.Text.Json.Serialization.JsonDerivedType(typeof(RemoveUser), "remove-user")]
 internal abstract record RegistryChange
 {
 	/// <summary>Registers <paramref name="Component"/>.</summary>
@@ -46,6 +60,7 @@ internal abstract record RegistryChange
 	public sealed record RemoveUser(string Id) : RegistryChange;
 
 	/// <summary>Whether the change is to the rules or the users rather than to the graph.</summary>
+	[System.Text.Json.Serialization.JsonIgnore]
 	public bool IsRuleChange => this is AddBoundary or RemoveBoundary or AddConformance or RemoveConformance or SetUser or RemoveUser;
 }
 
