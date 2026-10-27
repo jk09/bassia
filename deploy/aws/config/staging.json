@@ -1,0 +1,23 @@
+{
+  "envName": "bassia-staging",
+  "region": "eu-central-1",
+  "availabilityZones": ["eu-central-1a", "eu-central-1b", "eu-central-1c"],
+  "domainName": null,
+  "hostedZoneName": null,
+  "hostedZoneId": null,
+  "certificateArn": null,
+  "natGateways": 1,
+  "server": { "cpu": 1024, "memoryMiB": 2048, "ephemeralGiB": 50, "minTasks": 1, "maxTasks": 4, "imageTag": "staging" },
+  "database": { "engineVersion": "16.11", "minAcu": 0.5, "maxAcu": 4, "backupDays": 1 },
+  "workers": { "cpu": 1024, "memoryMiB": 4096, "ephemeralGiB": 30, "spot": true, "imageTag": "staging", "agentSecretName": null },
+  "admins": ["admin"],
+  "defaultPermission": "none",
+  "oidc": [],
+  "githubClientId": null,
+  "alarmEmail": "ops@example.com",
+  "monthlyBudgetUsd": 300,
+  "gcSchedule": "rate(1 day)",
+  "rateLimitPer5Minutes": 20000,
+  "storageAlarmGiB": 50,
+  "retainData": false
+}

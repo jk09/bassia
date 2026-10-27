@@ -9,7 +9,10 @@ using Bassia.Storage.Cloud;
 /// bassia-server token -config server.toml -user alice [-minutes 60]  print a server token for a registered user
 /// bassia-server migrate -config server.toml                       bring the database schema up to date
 /// bassia-server check -config server.toml                         check the AWS resources (versioning, recovery)
+/// bassia-server gc -config server.toml                            collect the garbage of every history (cloud storage)
 /// </code>
+/// Without <c>-config</c>, the configuration comes from environment variables (<see cref="ServerConfig.FromEnvironment"/>),
+/// as in a container.
 /// </summary>
 internal static class Program
 {
@@ -19,21 +22,23 @@ internal static class Program
 		  bassia-server token -config <file> -user <id> [-minutes <n>]   print a token for a registered user (bootstrap, automation)
 		  bassia-server migrate -config <file>                       bring the database schema up to date
 		  bassia-server check -config <file>                         check the cloud resources the configuration names
+		  bassia-server gc -config <file> [-grace-days <n>]          collect the garbage of every history (cloud storage)
+		Without -config, the configuration comes from BASSIA_* environment variables (containers).
 		""";
 
 	public static async Task<int> Main(string[] args)
 	{
 		var command = args.Length > 0 && !args[0].StartsWith('-') ? args[0] : "serve";
 		var options = Options(args.SkipWhile(arg => !arg.StartsWith('-')).ToArray());
-		if (command is "help" or "-help" or "--help" || !options.TryGetValue("config", out var configPath))
+		if (command is "help" or "-help" or "--help")
 		{
 			Console.Out.WriteLine(Usage);
-			return command is "help" ? 0 : 2;
+			return 0;
 		}
 
 		try
 		{
-			var config = ServerConfig.Load(configPath);
+			var config = options.TryGetValue("config", out var configPath) ? ServerConfig.Load(configPath) : ServerConfig.FromEnvironment();
 			switch (command)
 			{
 				case "serve":
@@ -71,6 +76,8 @@ internal static class Program
 					}
 
 					return problems.Count == 0 ? 0 : 1;
+				case "gc":
+					return await CollectAsync(config, int.TryParse(options.GetValueOrDefault("grace-days"), out var days) ? days : null);
 				default:
 					Console.Error.WriteLine($"Unknown command '{command}'.\n{Usage}");
 					return 2;
@@ -81,6 +88,41 @@ internal static class Program
 			Console.Error.WriteLine(ex.Message);
 			return 1;
 		}
+	}
+
+	/// <summary>
+	/// Collects the garbage of every component's history and the meta-repo's, one after the other; a component another
+	/// collection holds is skipped. Exit code 1 when one failed.
+	/// </summary>
+	private static async Task<int> CollectAsync(ServerConfig config, int? graceDays)
+	{
+		var state = await ServerState.CreateAsync(config);
+		if (state.Storage is not CloudComponentStorage storage)
+		{
+			Console.Out.WriteLine("The storage is a folder on this machine; git collects its own garbage.");
+			return 0;
+		}
+
+		var collector = new CloudGarbageCollector(storage, graceDays is { } days ? TimeSpan.FromDays(days) : null);
+		var failed = 0;
+		foreach (var name in (await state.ComponentsAsync()).Select(component => component.Name).Append(Meta.HistoryServerMeta.Name))
+		{
+			try
+			{
+				var result = await collector.CollectAsync(name);
+				Console.Out.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+				{
+					component = name, pack = result.Pack, superseded = result.Superseded.Count, deleted = result.Deleted.Count
+				}));
+			}
+			catch (Bassia.Storage.StorageException ex)
+			{
+				failed++;
+				Console.Error.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { component = name, error = ex.Message }));
+			}
+		}
+
+		return failed == 0 ? 0 : 1;
 	}
 
 	/// <summary><c>-name value</c> pairs.</summary>

@@ -1,0 +1,80 @@
+# Publishes the server and worker images of a v<semver> tag to the production environment's ECR repositories and
+# deploys them (bassia-b9581afe, docs/deploy-aws.md): the server's tasks run the database migrations before they serve,
+# and the service rolls over without downtime. Runs only once the repository has an AWS role to assume
+# (the AWS_DEPLOY_ROLE_ARN variable), through the 'production' environment, whose reviewers approve the deployment.
+name: Deploy
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The version tag to deploy (its images must be published).
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      AWS_REGION: eu-central-1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: deploy/aws/package-lock.json
+
+      - name: Deploy the network and the data (with the image repositories)
+        working-directory: deploy/aws
+        run: |
+          npm ci --no-audit --no-fund
+          npx cdk deploy bassia-network bassia-data -c env=production -c imageTag="$TAG" --require-approval never
+
+      - name: Publish the images
+        run: |
+          set -euo pipefail
+          output() { aws cloudformation describe-stacks --stack-name bassia-data --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          server=$(output ServerRepositoryUri); worker=$(output WorkerRepositoryUri)
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${server%%/*}"
+          for image in "server:$server" "worker:$worker"; do
+            name=${image%%:*}; repository=${image#*:}
+            if aws ecr describe-images --repository-name "${repository#*/}" --image-ids imageTag="$TAG" > /dev/null 2>&1; then
+              echo "$repository:$TAG is published already"
+            else
+              docker build --file "deploy/docker/$name.Dockerfile" --tag "$repository:$TAG" .
+              docker push "$repository:$TAG"
+            fi
+          done
+
+      - name: Deploy the server, the workers and the observability
+        working-directory: deploy/aws
+        run: npx cdk deploy --all -c env=production -c imageTag="$TAG" --require-approval never
+
+      - name: Check the deployment
+        run: |
+          url=$(aws cloudformation describe-stacks --stack-name bassia-server --query "Stacks[0].Outputs[?OutputKey=='Url'].OutputValue" --output text)
+          curl -fsS "$url/healthz" && curl -fsS "$url/readyz"
+          ./deploy/aws/scripts/server-task.sh -env bassia check
