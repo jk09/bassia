@@ -17,6 +17,21 @@ internal static class DepotCommands
 	{
 		var from = invocation.Require("from");
 		var url = Directory.Exists(from) ? Path.GetFullPath(from) : from;
+
+		// A Bassia server is cloned through its git gateway, with the login as git's credential.
+		string? server = null;
+		if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase) && await Storage.Remote.ServerClient.InfoAsync(url) is not null)
+		{
+			server = Storage.Remote.ServerCredentials.Normalize(url);
+			if (await Storage.Remote.ServerCredentials.AccessTokenAsync(server, new HttpClient()) is null)
+			{
+				return ProgramCli.WriteResult(false, invocation.Command, $"'{server}' is a Bassia server; log in first with 'bassia login -server {server}'.");
+			}
+
+			Storage.Remote.GitCredentials.UseFor(server);
+			url = Storage.Remote.RemoteBackend.GatewayUrl(server);
+		}
+
 		var depot = new Depot(url);
 		var root = Path.GetFullPath(invocation.Get("path") ?? Path.Combine(Environment.CurrentDirectory, DefaultFolder(url)));
 		var lazy = invocation.Has("lazy");
@@ -38,6 +53,10 @@ internal static class DepotCommands
 			Directory.CreateDirectory(Path.Combine(root, Monorepo.DefaultWorkspaceFolderName));
 			var settings = new LocalConfigStore(root);
 			await settings.SetAsync(ConfigFile.Find("depot.url"), url, ConfigLayer.User);
+			if (server is not null)
+			{
+				await settings.SetAsync(ConfigFile.Find("server.url"), server, ConfigLayer.User);
+			}
 			if (lazy)
 			{
 				await settings.SetAsync(ConfigFile.Find("depot.lazy"), "true", ConfigLayer.User);
@@ -109,10 +128,18 @@ internal static class DepotCommands
 			?? throw new MonorepoException("This monorepo is no clone: depot.url is not set. 'bassia clone -from <depot>' makes one.");
 
 		var before = (await GitClient.In(Path.Combine(root, Monorepo.MetaRepoFolderName)).RunOrThrowAsync(["rev-parse", "HEAD"])).Trim();
-		var pull = await GitClient.In(Path.Combine(root, Monorepo.MetaRepoFolderName)).RunAsync(["pull", "--quiet", "--ff-only"]);
-		if (pull.ExitCode != 0)
+		if (Monorepo.Load(root).Server is not null)
 		{
-			throw new MonorepoException($"The meta-repo could not be brought up to the depot's: {pull.Error.Trim()}");
+			// A server's meta-repo is a view of the registry, a commit of its own per revision: reset to it, never merged.
+			await Storage.Remote.RemoteMetaStore.RefreshAsync(root);
+		}
+		else
+		{
+			var pull = await GitClient.In(Path.Combine(root, Monorepo.MetaRepoFolderName)).RunAsync(["pull", "--quiet", "--ff-only"]);
+			if (pull.ExitCode != 0)
+			{
+				throw new MonorepoException($"The meta-repo could not be brought up to the depot's: {pull.Error.Trim()}");
+			}
 		}
 
 		var after = (await GitClient.In(Path.Combine(root, Monorepo.MetaRepoFolderName)).RunOrThrowAsync(["rev-parse", "HEAD"])).Trim();

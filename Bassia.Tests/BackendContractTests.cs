@@ -15,10 +15,40 @@ public class BackendContractTests
 {
 	// ----- lock stores -----
 
-	public static TheoryData<string> LockStores => new() { "memory", "file" };
+	public static TheoryData<string> LockStores => new() { "memory", "file", "database", "remote" };
 
-	private static ILockStore LockStore(string kind, TempDirectory temp) =>
-		kind == "memory" ? new MemoryLockStore(TimeSpan.FromMinutes(2)) : new FileLockStore(Path.Combine(temp.Path, FileLockStore.FolderName), TimeSpan.FromMinutes(2));
+	/// <summary>
+	/// A lock store of the kind, empty: in memory, in files, in the server's database (SQLite), or a server's through the
+	/// remote backend (a server of its own, which the returned handle stops).
+	/// </summary>
+	private static async Task<(ILockStore Store, IAsyncDisposable? Server)> LockStoreAsync(string kind, TempDirectory temp)
+	{
+		switch (kind)
+		{
+			case "memory":
+				return (new MemoryLockStore(TimeSpan.FromMinutes(2)), null);
+			case "file":
+				return (new FileLockStore(Path.Combine(temp.Path, FileLockStore.FolderName), TimeSpan.FromMinutes(2)), null);
+			case "database":
+				var (provider, connection) = await Server.TestDatabase.CreateAsync(temp.Path);
+				var database = Bassia.Server.Data.ServerDatabase.Open(provider, connection);
+				await database.MigrateAsync();
+				return (new Bassia.Server.Data.DbLockStore(database, TimeSpan.FromMinutes(2)), null);
+			default:
+				var host = await Server.ServerHost.StartAsync();
+				var token = Server.ServerHost.As(host.TokenFor("alice"));
+				return (new Bassia.Storage.Remote.RemoteLockStore(new Bassia.Storage.Remote.ServerClient(host.Url), TimeSpan.FromMinutes(2)), new Stop(host, token));
+		}
+	}
+
+	private sealed class Stop(IAsyncDisposable server, IDisposable token) : IAsyncDisposable
+	{
+		public async ValueTask DisposeAsync()
+		{
+			token.Dispose();
+			await server.DisposeAsync();
+		}
+	}
 
 	/// <summary>An entry of a process elsewhere, so only its lease decides whether it is live.</summary>
 	private static LockEntry Entry(string runId, DateTimeOffset heartbeat) => new()
@@ -36,7 +66,8 @@ public class BackendContractTests
 	public async Task LockStore_JudgesLivenessByLease_AndAppliesADecisionAsAWhole(string kind)
 	{
 		using var temp = new TempDirectory();
-		var store = LockStore(kind, temp);
+		var (store, server) = await LockStoreAsync(kind, temp);
+		await using var _ = server;
 		Assert.False(await store.HasEntriesAsync());
 
 		var fresh = Entry("agent-run-a", DateTimeOffset.UtcNow);
@@ -76,7 +107,8 @@ public class BackendContractTests
 	public async Task LockStore_RunsOneDecisionAtATime(string kind)
 	{
 		using var temp = new TempDirectory();
-		var store = LockStore(kind, temp);
+		var (store, server) = await LockStoreAsync(kind, temp);
+		await using var _ = server;
 
 		// Every decision reads the counter and writes it plus one; none may be lost.
 		await Task.WhenAll(Enumerable.Range(0, 20).Select(_ => Task.Run(() => store.UpdateAsync(session =>

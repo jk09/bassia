@@ -206,6 +206,8 @@ internal static class ConfigFile
 			"Structural merge driver tried where git's merge conflicts (weave's weave-driver), used when installed; off disables it."),
 		new("depot.url", ["depot"], "url", "",
 			"The monorepo this one is a clone of (bassia clone sets it in the user layer): views import missing components from it, history only, and agentic runs push their results to it."),
+		new("server.url", ["server"], "url", "",
+			"The Bassia server this monorepo is a clone of (bassia clone -from https://<server> sets it in the user layer): its locks, jobs, run and integration records and registry are the server's."),
 		new("depot.lazy", ["depot"], "lazy", "false",
 			"Whether a clone imports a component's history only when a view maps it (true, bassia clone -lazy) or every component's at once (false).",
 			["false", "true"]),
