@@ -17,6 +17,10 @@ internal sealed class GitMetaStore(string root) : IMetaStore
 
 	public Task<IReadOnlyList<ComponentDefinition>> LoadAsync() => Task.FromResult(Read(Root));
 
+	/// <summary>The meta-repo's commits from its <c>HEAD</c> (or the tips asked for).</summary>
+	public Task<IReadOnlyList<LogEntry>> LogAsync(LogQuery query) =>
+		GitHistory.LogAsync(Location, query with { Tips = query.Tips ?? ["HEAD"] });
+
 	public Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync() => Task.FromResult(ReadBoundaries(Root));
 
 	public Task<IReadOnlyList<Core.ConformanceRule>> LoadConformanceAsync() => Task.FromResult(ReadConformance(Root));

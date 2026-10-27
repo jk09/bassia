@@ -320,7 +320,7 @@ public class AgentCommandTests
 			}
 		};
 
-		var outcome = await AgentCommand.StartRunAsync(git, Monorepo.Load(monorepo.Root), "example@v0", TestEnvironment.SleepCommand(60), context);
+		var outcome = await AgentCommand.StartRunAsync(Monorepo.Load(monorepo.Root), "example@v0", TestEnvironment.SleepCommand(60), context);
 
 		Assert.False(outcome.Ok);
 		Assert.Contains("was cancelled", outcome.Message);
@@ -357,7 +357,7 @@ public class AgentCommandTests
 			}
 		};
 
-		var outcome = await AgentCommand.StartRunAsync(new Bassia.Git.GitClient(monorepo.Root), Monorepo.Load(monorepo.Root),
+		var outcome = await AgentCommand.StartRunAsync(Monorepo.Load(monorepo.Root),
 			"example@v0", "echo hello-from-the-agent", context);
 
 		Assert.True(outcome.Ok);

@@ -1,3 +1,4 @@
+using Bassia.Storage;
 using System.Diagnostics;
 using Bassia.Integration;
 using Bassia.Locks;
@@ -175,7 +176,7 @@ public class LockTests
 	{
 		await using var monorepo = await MonorepoFixture.CreateAsync();
 		await monorepo.AddComponentAsync("example");
-		var table = new LockTable(Monorepo.Load(monorepo.Root));
+		var table = Monorepo.Load(monorepo.Root).Locks;
 		const string suspended = "agent-run-quiet-fern-a1b2c3";
 		const string crashed = "agent-run-brave-otter-d4e5f6";
 		using var gone = Process.Start(new ProcessStartInfo(OperatingSystem.IsWindows() ? "cmd.exe" : "true") { Arguments = OperatingSystem.IsWindows() ? "/c exit 0" : "", UseShellExecute = false })!;
@@ -198,21 +199,21 @@ public class LockTests
 			session.Save(dead);
 		});
 
-		Assert.Equal(LockState.Expired, table.StateOf(table.Find(suspended)!));
+		Assert.Equal(LockState.Expired, table.StateOf((await table.FindAsync(suspended))!));
 		var check = await OkAsync(monorepo, "lock", "check", "example/a.txt,example/b.txt");
 		Assert.True((bool)check["free"]);
 		Assert.Equal([suspended], ((TomlArray)Tables(check, "path").First()["expired_holders"]).Cast<string>());
 
 		// The next decision drops the dead run's entry; the suspended one stays visible as expired.
 		await table.UpdateAsync(_ => { });
-		Assert.Null(table.Find(crashed));
+		Assert.Null((await table.FindAsync(crashed)));
 		var list = await OkAsync(monorepo, "lock", "list");
 		Assert.Equal("expired", Assert.Single(Tables(list, "hold"))["state"]);
 
 		// Not live, so a person breaks it without -force.
 		var release = await OkAsync(monorepo, "lock", "release", "-run", "quiet-fern", "-all");
 		Assert.Equal(["example/a.txt"], ((TomlArray)release["released"]).Cast<string>());
-		Assert.Null(table.Find(suspended));
+		Assert.Null((await table.FindAsync(suspended)));
 	}
 
 	[Fact]
@@ -222,26 +223,26 @@ public class LockTests
 		var recorded = "2026-10-24T10:12:00Z";
 		var reading = new DateTime(2026, 10, 24, 10, 12, 0, DateTimeKind.Utc);
 
-		Assert.True(JobRegistry.SameStart(reading.AddMilliseconds(999), recorded));
-		Assert.True(JobRegistry.SameStart(reading.AddMilliseconds(-3), recorded));
-		Assert.False(JobRegistry.SameStart(reading.AddSeconds(30), recorded));
-		Assert.False(JobRegistry.SameStart(reading, "not a stamp"));
+		Assert.True(LocalJobScheduler.SameStart(reading.AddMilliseconds(999), recorded));
+		Assert.True(LocalJobScheduler.SameStart(reading.AddMilliseconds(-3), recorded));
+		Assert.False(LocalJobScheduler.SameStart(reading.AddSeconds(30), recorded));
+		Assert.False(LocalJobScheduler.SameStart(reading, "not a stamp"));
 
 		// This process, as another process sees it, is alive.
-		Assert.True(JobRegistry.IsProcessAlive(Environment.ProcessId, JobRegistry.CurrentProcessStart()));
-		Assert.False(JobRegistry.IsProcessAlive(Environment.ProcessId, "2000-01-01T00:00:00Z"));
+		Assert.True(LocalJobScheduler.IsProcessAlive(Environment.ProcessId, LocalJobScheduler.CurrentProcessStart()));
+		Assert.False(LocalJobScheduler.IsProcessAlive(Environment.ProcessId, "2000-01-01T00:00:00Z"));
 	}
 
 	[Fact]
 	public async Task Table_AWaitThatClosesACycle_IsADeadlock()
 	{
 		using var temp = new TempDirectory();
-		var table = new LockTable(Path.Combine(temp.Path, LockTable.FolderName), TimeSpan.FromMinutes(2));
+		var table = new FileLockStore(Path.Combine(temp.Path, FileLockStore.FolderName), TimeSpan.FromMinutes(2));
 		const string r = "agent-run-red-fox-aaaaaa", s = "agent-run-sly-cat-bbbbbb";
 		var a = new LockKey("app", "a.cs", LockKind.File);
 		var b = new LockKey("app", "b.cs", LockKind.File);
 		var pid = Environment.ProcessId;
-		var start = JobRegistry.CurrentProcessStart();
+		var start = LocalJobScheduler.CurrentProcessStart();
 
 		await table.UpdateAsync(session =>
 		{
@@ -276,7 +277,7 @@ public class LockTests
 		var metadata = new RunMetadata { RunId = runId, Status = "started", Created = RunMetadata.Timestamp(), Select = "example", Command = "agent", WorkspacePath = monorepo.Workspace };
 		metadata.Components.Add(new ComponentRun { Name = "example", CommitIsh = "main", Commit = "0", Path = checkout, Branch = "agent-run/sleepy-owl-c0ffee" });
 		var monorepoModel = Monorepo.Load(monorepo.Root);
-		var table = new LockTable(monorepoModel);
+		var table = monorepoModel.Locks;
 		var lines = new List<string>();
 		var interval = RunLocks.Interval;
 		RunLocks.Interval = TimeSpan.FromHours(1);
@@ -284,7 +285,7 @@ public class LockTests
 		{
 			await using var locks = RunLocks.Start(monorepoModel, metadata, line => { lock (lines) { lines.Add(line); } });
 			await locks.PollAsync();
-			Assert.Equal("example/README.md", Assert.Single(table.Find(runId)!.Holds).Key.Display);
+			Assert.Equal("example/README.md", Assert.Single((await table.FindAsync(runId))!.Holds).Key.Display);
 
 			// The run's process sleeps past the TTL; meanwhile another run takes the file.
 			await table.UpdateAsync(session =>
@@ -292,13 +293,13 @@ public class LockTests
 				var mine = session.Find(runId)!;
 				mine.Heartbeat = DateTimeOffset.UtcNow.AddHours(-1).ToString("O");
 				session.Save(mine);
-				var taker = RunLocks.NewEntry(other, RunMetadata.Timestamp(), Environment.ProcessId, JobRegistry.CurrentProcessStart(), RunMetadata.Timestamp());
+				var taker = RunLocks.NewEntry(other, RunMetadata.Timestamp(), Environment.ProcessId, LocalJobScheduler.CurrentProcessStart(), RunMetadata.Timestamp());
 				taker.Holds.Add(new LockHold(new LockKey("example", "README.md", LockKind.File), LockHold.Changed, RunMetadata.Timestamp()));
 				session.Save(taker);
 			});
 
 			await locks.PollAsync();
-			var entry = table.Find(runId)!;
+			var entry = (await table.FindAsync(runId))!;
 			Assert.Empty(entry.Holds);
 			var conflict = Assert.Single(entry.Conflicts);
 			Assert.Equal((LockConflict.Held, other, "README.md"), (conflict.Kind, conflict.With, conflict.Path));
@@ -307,7 +308,7 @@ public class LockTests
 			await locks.StopAsync();
 			await locks.FinishAsync();
 			Assert.Single(metadata.Components[0].LockConflicts);
-			Assert.Null(table.Find(runId));
+			Assert.Null((await table.FindAsync(runId)));
 		}
 		finally
 		{

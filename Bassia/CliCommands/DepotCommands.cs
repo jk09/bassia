@@ -36,10 +36,11 @@ internal static class DepotCommands
 			}
 
 			Directory.CreateDirectory(Path.Combine(root, Monorepo.DefaultWorkspaceFolderName));
-			ConfigFile.Set(root, ConfigFile.Find("depot.url"), url, ConfigLayer.User);
+			var settings = new LocalConfigStore(root);
+			await settings.SetAsync(ConfigFile.Find("depot.url"), url, ConfigLayer.User);
 			if (lazy)
 			{
-				ConfigFile.Set(root, ConfigFile.Find("depot.lazy"), "true", ConfigLayer.User);
+				await settings.SetAsync(ConfigFile.Find("depot.lazy"), "true", ConfigLayer.User);
 			}
 
 			var monorepo = Monorepo.Load(root);

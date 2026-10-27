@@ -37,6 +37,9 @@ internal interface IComponentStore
 
 	Task<StoredTag?> GetTagAsync(string name);
 
+	/// <summary>The whole message of the annotated tag <paramref name="name"/>; null for a lightweight tag or none.</summary>
+	Task<string?> TagMessageAsync(string name);
+
 	/// <summary>Creates the annotated tag <paramref name="name"/> on <paramref name="commit"/>; throws when it already exists.</summary>
 	Task CreateTagAsync(string name, string commit, string message);
 
@@ -133,6 +136,17 @@ internal interface IComponentStore
 
 	/// <summary>A unified diff (patch text) from <paramref name="from"/> to <paramref name="to"/>, for people and agents to read.</summary>
 	Task<string> DiffAsync(string from, string to);
+
+	/// <summary>Lines added and removed per file from <paramref name="from"/> (null: nothing) to <paramref name="to"/>, in path order.</summary>
+	Task<IReadOnlyList<FileStat>> DiffStatAsync(string? from, string to);
+
+	// ----- history for people -----
+
+	/// <summary>
+	/// History as people read it (see <see cref="LogQuery"/>): newest first by commit date, a commit always before its
+	/// parents. An empty store has none.
+	/// </summary>
+	Task<IReadOnlyList<LogEntry>> LogAsync(LogQuery query);
 
 	// ----- working copies -----
 
@@ -232,4 +246,7 @@ internal interface IComponentWorkspace
 
 	/// <summary>A unified diff from <paramref name="from"/> to <paramref name="to"/>, two commits the working copy has.</summary>
 	Task<string> DiffAsync(string from, string to);
+
+	/// <summary>Lines added and removed per file between two commits the working copy has.</summary>
+	Task<IReadOnlyList<FileStat>> DiffStatAsync(string from, string to);
 }

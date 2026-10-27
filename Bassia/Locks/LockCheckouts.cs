@@ -55,10 +55,10 @@ internal static class LockCheckouts
 	/// The released holds of other runs that overlap <paramref name="keys"/> in <paramref name="component"/>, whose
 	/// result there the checkout does not contain yet, oldest release first.
 	/// </summary>
-	public static async Task<IReadOnlyList<LockBehind>> BehindAsync(IComponentStorage storage, LockTable table, string runId, string component, string checkout, IReadOnlyList<LockKey> keys)
+	public static async Task<IReadOnlyList<LockBehind>> BehindAsync(IComponentStorage storage, Storage.ILockStore table, string runId, string component, string checkout, IReadOnlyList<LockKey> keys)
 	{
 		var behind = new List<LockBehind>();
-		var released = table.ReadAll()
+		var released = (await table.ReadAllAsync())
 			.Where(entry => entry.RunId != runId && table.StateOf(entry) == LockState.Released)
 			.OrderBy(entry => entry.Released, StringComparer.Ordinal);
 		foreach (var entry in released)
@@ -113,10 +113,10 @@ internal static class LockCheckouts
 	/// Forgets released results that landed on their component's default branch: from there every run starting on the
 	/// branch has them. An entry with nothing left to remember goes.
 	/// </summary>
-	public static async Task ForgetLandedAsync(MonorepoGraph graph, LockTable table)
+	public static async Task ForgetLandedAsync(MonorepoGraph graph, Storage.ILockStore table)
 	{
 		var landed = new HashSet<(string RunId, string Component)>();
-		foreach (var entry in table.ReadAll().Where(entry => table.StateOf(entry) == LockState.Released))
+		foreach (var entry in (await table.ReadAllAsync()).Where(entry => table.StateOf(entry) == LockState.Released))
 		{
 			foreach (var result in entry.Results)
 			{

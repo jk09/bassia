@@ -38,7 +38,6 @@ internal static class IntegrationRunner
 	public const string NeedsAttentionStatus = "needs_attention";
 
 	public static Task<IntegrationOutcome> RunAsync(
-		GitClient git,
 		Monorepo monorepo,
 		IReadOnlyList<RunMetadata> runs,
 		IReadOnlyList<ComponentIntegration> plan,
@@ -46,7 +45,7 @@ internal static class IntegrationRunner
 		IntegrationContext? context = null,
 		string? id = null,
 		StructuralMerge? structural = null) =>
-		RunAsync(monorepo.Graph(), IntegrationSettings.For(monorepo), new RunMetadataStore(git, monorepo.RunsRepoDir), runs, plan, resolver, context, id, structural);
+		RunAsync(monorepo.Graph(), IntegrationSettings.For(monorepo), monorepo.RunRecords(), runs, plan, resolver, context, id, structural);
 
 	/// <summary>Executes <paramref name="plan"/> on <paramref name="graph"/>, recording the integration in <paramref name="records"/>.</summary>
 	public static async Task<IntegrationOutcome> RunAsync(
@@ -165,8 +164,8 @@ internal static class IntegrationRunner
 	/// Fast-forwards every integrated component's base branch to the integration result, but only if the branch has
 	/// not moved since the integration started (a compare-and-swap on the ref). A base given as a tag is never moved.
 	/// </summary>
-	public static Task<IntegrationOutcome> AdvanceAsync(GitClient git, Monorepo monorepo, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null) =>
-		AdvanceAsync(monorepo.Graph(), new RunMetadataStore(git, monorepo.RunsRepoDir), record, which);
+	public static Task<IntegrationOutcome> AdvanceAsync(Monorepo monorepo, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null) =>
+		AdvanceAsync(monorepo.Graph(), monorepo.RunRecords(), record, which);
 
 	public static async Task<IntegrationOutcome> AdvanceAsync(MonorepoGraph graph, IRecordStore records, IntegrationRecord record, Func<ComponentIntegration, bool>? which = null)
 	{

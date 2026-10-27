@@ -1,3 +1,4 @@
+using Bassia.Storage;
 using System.Net;
 using Bassia.CliCommands.Agent;
 using Bassia.Core;
@@ -288,8 +289,8 @@ public class DashboardTests
 	{
 		await using var fixture = await ThreeComponentsAsync();
 		var monorepo = Monorepo.Load(fixture.Root);
-		var jobs = new JobRegistry(monorepo);
-		var log = Path.Combine(jobs.Dir, "agent-run-quiet-fern-91ab22.log");
+		var jobs = new LocalJobScheduler(monorepo.WorkspaceDir);
+		var log = jobs.LogPath("agent-run-quiet-fern-91ab22");
 		using var job = jobs.Attach("agent-run-quiet-fern-91ab22", RunCommands.JobKind, log, detached: true);
 		await File.WriteAllTextAsync(log, "bassia: preparing\nhello from the agent\n");
 		await using var host = await Host.StartAsync(fixture);
@@ -352,8 +353,8 @@ public class DashboardTests
 		await using var fixture = await ThreeComponentsAsync();
 		Assert.Equal(0, (await fixture.BassiaAsync("config", "set", "lock.folders", "-value", "src/*")).ExitCode);
 		const string holder = "agent-run-brave-otter-3f2a91", waiter = "agent-run-quiet-fern-91ab22";
-		var start = JobRegistry.CurrentProcessStart();
-		await new Bassia.Locks.LockTable(Monorepo.Load(fixture.Root)).UpdateAsync(session =>
+		var start = LocalJobScheduler.CurrentProcessStart();
+		await Monorepo.Load(fixture.Root).Locks.UpdateAsync(session =>
 		{
 			var holding = Bassia.Locks.RunLocks.NewEntry(holder, RunMetadata.Timestamp(), Environment.ProcessId, start, RunMetadata.Timestamp());
 			holding.Holds.Add(new Bassia.Locks.LockHold(new Bassia.Locks.LockKey("app", "src/api", Bassia.Locks.LockKind.Folder), Bassia.Locks.LockHold.Changed, RunMetadata.Timestamp()));

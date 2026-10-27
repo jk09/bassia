@@ -2,6 +2,7 @@ namespace Bassia;
 
 using System.Diagnostics;
 using System.Text;
+using Bassia.Storage;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Core;
@@ -16,7 +17,7 @@ internal static class IntegrationCommands
 {
 	public const string JobKind = "integration";
 
-	private sealed record Choices(IReadOnlyList<RunMetadata> Runs, IReadOnlyList<ComponentIntegration> Plan, RunMetadataStore Store, StructuralMerge? Structural, string StructuralStatus);
+	private sealed record Choices(IReadOnlyList<RunMetadata> Runs, IReadOnlyList<ComponentIntegration> Plan, Storage.IRunRecordStore Store, StructuralMerge? Structural, string StructuralStatus);
 
 	/// <summary>
 	/// The runs <c>-runs</c> names and the triage of them under the merge policy (<c>merge.*</c>), <c>-onto</c>,
@@ -24,7 +25,7 @@ internal static class IntegrationCommands
 	/// </summary>
 	private static async Task<Choices> PlanAsync(Invocation invocation, Monorepo monorepo)
 	{
-		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
+		var store = monorepo.RunRecords();
 		var runs = await IntegrationSupport.SelectRunsAsync(store, string.Join(",", invocation.List("runs")));
 
 		var onto = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -100,7 +101,7 @@ internal static class IntegrationCommands
 			}
 
 			var id = invocation.Get("id") is { } given ? IntegrationRecord.NormalizeId(given) : IntegrationRecord.NewId();
-			var jobs = new JobRegistry(monorepo);
+			var jobs = monorepo.Jobs;
 			using var job = jobs.Attach(id, JobKind, log, detached: log is not null);
 			ConsoleCancelEventHandler stop = (_, args) =>
 			{
@@ -127,7 +128,7 @@ internal static class IntegrationCommands
 				IntegrationOutcome outcome;
 				try
 				{
-					outcome = await IntegrationRunner.RunAsync(new GitClient(monorepo.Root), monorepo, runs, plan, resolver, context, id, structural);
+					outcome = await IntegrationRunner.RunAsync(monorepo, runs, plan, resolver, context, id, structural);
 				}
 				catch (OperationCanceledException)
 				{
@@ -136,7 +137,7 @@ internal static class IntegrationCommands
 					return RunCommands.Finish(output, false, invocation.Command, message, data);
 				}
 
-				var result = IntegrationSupport.RecordData(outcome, store.RepoDir);
+				var result = IntegrationSupport.RecordData(outcome, store.Location);
 				result["steps"] = new TomlText(Steps(outcome.Record.Components));
 				return RunCommands.Finish(output, outcome.Ok, invocation.Command, outcome.Message, result);
 			}
@@ -158,27 +159,27 @@ internal static class IntegrationCommands
 	private static async Task<int> DetachAsync(Invocation invocation, Monorepo monorepo, IReadOnlyList<RunMetadata> runs, string resolver, StructuralMerge? structural)
 	{
 		var id = IntegrationRecord.NewId();
-		var jobs = new JobRegistry(monorepo);
-		Directory.CreateDirectory(jobs.Dir);
-		var log = jobs.LogPath(id);
-		await File.WriteAllTextAsync(log, "");
+		var jobs = monorepo.Jobs;
 
 		// The background process plans again from the same choices; the runs are passed by their full ids.
-		var arguments = new List<string> { "integration", "start", "-id", id, "-log", log, "-runs", string.Join(",", runs.Select(run => run.RunId)) };
-		foreach (var name in new[] { "onto", "semantic", "skip" }.Where(invocation.Has))
+		var started = await jobs.StartDetachedAsync(id, monorepo.Root, log =>
 		{
-			arguments.AddRange([$"-{name}", string.Join(",", invocation.List(name))]);
-		}
+			var arguments = new List<string> { "integration", "start", "-id", id, "-log", log, "-runs", string.Join(",", runs.Select(run => run.RunId)) };
+			foreach (var name in new[] { "onto", "semantic", "skip" }.Where(invocation.Has))
+			{
+				arguments.AddRange([$"-{name}", string.Join(",", invocation.List(name))]);
+			}
 
-		// The structural merge as this process found it, so the background process cannot come to another conclusion.
-		arguments.AddRange(["-weave", structural?.Command ?? StructuralMerge.Off]);
-		arguments.AddRange(["-resolve", resolver]);
-		using var process = DetachedProcess.Start(monorepo.Root, arguments);
-		var job = await RunCommands.WaitForRegistrationAsync(jobs, id, process);
+			// The structural merge as this process found it, so the background process cannot come to another conclusion.
+			arguments.AddRange(["-weave", structural?.Command ?? StructuralMerge.Off]);
+			arguments.AddRange(["-resolve", resolver]);
+			return arguments;
+		});
+		var (job, log) = (started.Job, started.Log);
 		if (job is null)
 		{
 			return ProgramCli.WriteResult(false, invocation.Command,
-				$"The background process for integration '{id}' did not start. {RunCommands.Tail(log, 20)}".Trim(),
+				$"The background process for integration '{id}' did not start. {started.Failure}".Trim(),
 				new Dictionary<string, object?> { ["integration_id"] = id, ["log"] = log });
 		}
 
@@ -194,7 +195,7 @@ internal static class IntegrationCommands
 				["detached"] = true,
 				["pid"] = job.Pid,
 				["log"] = log,
-				["result_file"] = jobs.ResultPath(id),
+				["result_file"] = jobs.ResultLocation(id),
 				["runs"] = runs.Select(run => run.RunId).ToList(),
 				["resolver"] = resolver,
 				["structural_driver"] = structural?.Command
@@ -203,9 +204,9 @@ internal static class IntegrationCommands
 
 	// ----- finding an integration -----
 
-	private sealed record Found(Monorepo Monorepo, IntegrationStore Store, JobRegistry Jobs, string Id, IntegrationRecord? Record, JobInfo? Job)
+	private sealed record Found(Monorepo Monorepo, IntegrationStore Store, Storage.IJobScheduler Jobs, string Id, IntegrationRecord? Record, JobInfo? Job)
 	{
-		public bool Alive => JobRegistry.IsAlive(Job);
+		public bool Alive => Jobs.IsAlive(Job);
 		public bool Live => Alive && (Record is null || Record.Status == "started");
 		public bool Stale => !Alive && Record?.Status == "started";
 		public string Status => Record?.Status ?? (Alive ? "preparing" : "unknown");
@@ -214,13 +215,13 @@ internal static class IntegrationCommands
 	private static async Task<Found> FindAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var runs = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
-		var store = new IntegrationStore(runs);
-		var jobs = new JobRegistry(monorepo);
+		var runs = monorepo.RunRecords();
+		var store = monorepo.Integrations();
+		var jobs = monorepo.Jobs;
 		var name = IntegrationRecord.NormalizeId(invocation.Require("id"));
 		var key = IntegrationRecord.Key(name);
 		var candidates = (await runs.ListKeysAsync(IntegrationRecord.RefPrefix)).Select(IntegrationRecord.NormalizeId)
-			.Concat(jobs.List(JobKind).Select(job => job.Id))
+			.Concat((await jobs.ListAsync(JobKind)).Select(job => job.Id))
 			.Distinct(StringComparer.Ordinal)
 			.Where(id => key.Length >= 4 && IntegrationRecord.Key(id).StartsWith(key, StringComparison.OrdinalIgnoreCase))
 			.ToList();
@@ -232,22 +233,23 @@ internal static class IntegrationCommands
 			_ => throw new IntegrationException($"'{invocation.Get("id")}' names more than one integration; give more of its id.")
 		};
 
-		return new Found(monorepo, store, jobs, id, await store.LoadLatestAsync(id), jobs.Find(id));
+		return new Found(monorepo, store, jobs, id, await store.LoadLatestAsync(id), await jobs.FindAsync(id));
 	}
 
 	private static async Task<Found> ReloadAsync(Found found) =>
-		found with { Record = await found.Store.LoadLatestAsync(found.Id), Job = found.Jobs.Find(found.Id) };
+		found with { Record = await found.Store.LoadLatestAsync(found.Id), Job = await found.Jobs.FindAsync(found.Id) };
 
 	// ----- bassia integration list -----
 
 	public static async Task<int> ListAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var store = new IntegrationStore(new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir));
-		var jobs = new JobRegistry(monorepo);
+		var store = monorepo.Integrations();
+		var jobs = monorepo.Jobs;
 		var limit = invocation.Int("limit", 20, 1);
 		var records = await store.ListLatestAsync();
-		var rows = records.Select(record => new Found(monorepo, store, jobs, record.IntegrationId, record, jobs.Find(record.IntegrationId))).ToList();
+		var registered = (await jobs.ListAsync(JobKind)).ToDictionary(job => job.Id, StringComparer.Ordinal);
+		var rows = records.Select(record => new Found(monorepo, store, jobs, record.IntegrationId, record, registered.GetValueOrDefault(record.IntegrationId))).ToList();
 		var shown = rows.Take(limit).ToList();
 
 		return ProgramCli.WriteResult(true, invocation.Command,
@@ -285,7 +287,7 @@ internal static class IntegrationCommands
 	public static async Task<int> ShowAsync(Invocation invocation)
 	{
 		var found = await FindAsync(invocation);
-		return ProgramCli.WriteResult(true, invocation.Command, Describe(found), Details(found));
+		return ProgramCli.WriteResult(true, invocation.Command, Describe(found), await DetailsAsync(found));
 	}
 
 	private static string Describe(Found found) =>
@@ -294,7 +296,7 @@ internal static class IntegrationCommands
 		: found.Record is null ? $"Integration '{found.Id}' never got past preparing; it has no record."
 		: $"Integration '{found.Id}' is {found.Status}.";
 
-	private static Dictionary<string, object?> Details(Found found)
+	private static async Task<Dictionary<string, object?>> DetailsAsync(Found found)
 	{
 		var data = new Dictionary<string, object?>
 		{
@@ -305,7 +307,7 @@ internal static class IntegrationCommands
 			["stale"] = found.Stale,
 			["pid"] = found.Alive ? found.Job?.Pid : null,
 			["log"] = found.Job?.Log,
-			["last_output"] = found.Live && found.Job?.Log is { } log ? RunCommands.LastLine(log) : null
+			["last_output"] = found.Live ? await RunCommands.LastLineAsync(found.Jobs, found.Job) : null
 		};
 
 		if (found.Record is { } record)
@@ -329,12 +331,11 @@ internal static class IntegrationCommands
 	{
 		var found = await FindAsync(invocation);
 		var tail = invocation.Int("tail", 50, 0);
-		if (found.Job?.Log is not { } log || !File.Exists(log))
+		if (await RunCommands.OutputAsync(found.Jobs, found.Job) is not { } lines)
 		{
 			throw new IntegrationException($"Integration '{found.Id}' was not started with -detach, so its output went to the terminal or frontend that started it.");
 		}
 
-		var lines = RunCommands.ReadLines(log);
 		var shown = tail == 0 ? lines : lines.TakeLast(tail).ToList();
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"{shown.Count} of {lines.Count} line(s) of the output of integration '{found.Id}' ({(found.Live ? "live" : found.Status)}).",
@@ -343,7 +344,7 @@ internal static class IntegrationCommands
 				["integration_id"] = found.Id,
 				["status"] = found.Status,
 				["live"] = found.Live,
-				["log"] = log,
+				["log"] = found.Job?.Log,
 				["lines"] = lines.Count,
 				["output"] = new TomlText(shown.Count == 0 ? "(no output yet)" : string.Join("\n", shown))
 			});
@@ -358,7 +359,7 @@ internal static class IntegrationCommands
 		{
 			if (timeout > 0 && clock.Elapsed.TotalSeconds >= timeout)
 			{
-				var data = Details(found);
+				var data = await DetailsAsync(found);
 				data["timed_out"] = true;
 				return ProgramCli.WriteResult(false, invocation.Command, $"Integration '{found.Id}' is still running after {timeout}s.", data);
 			}
@@ -368,7 +369,7 @@ internal static class IntegrationCommands
 		}
 
 		found = await ReloadAsync(found);
-		return ProgramCli.WriteResult(found.Record?.Status is "completed" or IntegrationRunner.NeedsAttentionStatus, invocation.Command, Describe(found), Details(found));
+		return ProgramCli.WriteResult(found.Record?.Status is "completed" or IntegrationRunner.NeedsAttentionStatus, invocation.Command, Describe(found), await DetailsAsync(found));
 	}
 
 	public static async Task<int> StopAsync(Invocation invocation)
@@ -385,10 +386,10 @@ internal static class IntegrationCommands
 			await RecordCancelledAsync(found);
 			found = await ReloadAsync(found);
 			return ProgramCli.WriteResult(true, invocation.Command,
-				$"Integration '{found.Id}' was no longer running (its process is gone); it is now recorded as cancelled.", Details(found));
+				$"Integration '{found.Id}' was no longer running (its process is gone); it is now recorded as cancelled.", await DetailsAsync(found));
 		}
 
-		found.Jobs.RequestStop(found.Id);
+		await found.Jobs.RequestStopAsync(found.Id);
 		var clock = Stopwatch.StartNew();
 		while (found.Live && clock.Elapsed.TotalSeconds < timeout)
 		{
@@ -399,14 +400,14 @@ internal static class IntegrationCommands
 		var killed = false;
 		if (found.Live && found.Job is { Hosted: false } job)
 		{
-			JobRegistry.Kill(job);
+			await found.Jobs.KillAsync(job);
 			killed = true;
 			found = await ReloadAsync(found);
 		}
 
 		if (found.Live)
 		{
-			return ProgramCli.WriteResult(false, invocation.Command, $"Integration '{found.Id}' did not stop within {timeout}s.", Details(found));
+			return ProgramCli.WriteResult(false, invocation.Command, $"Integration '{found.Id}' did not stop within {timeout}s.", await DetailsAsync(found));
 		}
 
 		if (found.Record?.Status == "started")
@@ -415,8 +416,8 @@ internal static class IntegrationCommands
 			found = await ReloadAsync(found);
 		}
 
-		found.Jobs.ClearStop(found.Id);
-		var data = Details(found);
+		await found.Jobs.ClearStopAsync(found.Id);
+		var data = await DetailsAsync(found);
 		data["killed"] = killed;
 		return ProgramCli.WriteResult(true, invocation.Command,
 			found.Record is null ? $"Integration '{found.Id}' was stopped before it started; nothing was recorded." : $"Integration '{found.Id}' stopped; it is recorded as {found.Record.Status}.",
@@ -442,7 +443,7 @@ internal static class IntegrationCommands
 			throw new IntegrationException($"Integration '{found.Id}' is still running; wait for it with 'bassia integration wait {IntegrationRecord.Key(found.Id)}'.");
 		}
 
-		var outcome = await IntegrationRunner.AdvanceAsync(new GitClient(found.Monorepo.Root), found.Monorepo, record);
+		var outcome = await IntegrationRunner.AdvanceAsync(found.Monorepo, record);
 		return ProgramCli.WriteResult(outcome.Ok, invocation.Command, outcome.Message, IntegrationSupport.RecordData(outcome, found.Store.RepoDir));
 	}
 

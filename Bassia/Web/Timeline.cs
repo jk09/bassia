@@ -1,7 +1,6 @@
 namespace Bassia.Web;
 
-using System.Globalization;
-using Bassia.Git;
+using Bassia.Storage;
 
 /// <summary>One commit on the timeline, from the component it belongs to.</summary>
 internal sealed record TimelineEntry(string Component, string Hash, DateTimeOffset Date, string Author, string Subject, IReadOnlyList<string> Refs,
@@ -22,9 +21,6 @@ internal static class Timeline
 {
 	public const int DefaultPageSize = 50;
 	public const int MaxPageSize = 500;
-
-	private const char Separator = '\u001f';
-	private const char RecordEnd = '\u001e';
 
 	/// <summary>The unit of the chosen components: them plus their reference closure, in dependency order.</summary>
 	public static IReadOnlyList<string> Unit(Monorepo monorepo, IEnumerable<string> chosen)
@@ -49,17 +45,18 @@ internal static class Timeline
 		var skip = (page - 1) * pageSize;
 		var limit = skip + pageSize + 1; // one more than the page tells whether another page follows
 
+		var storage = monorepo.Backend.Components;
 		var entries = new List<TimelineEntry>();
 		foreach (var component in unit)
 		{
-			var sourceDir = monorepo.SourceRepoDir(component);
-			if (!Directory.Exists(sourceDir))
+			if (!storage.Exists(component))
 			{
 				continue;
 			}
 
-			var scope = await ScopeAsync(GitClient.In(sourceDir), component, branch);
-			entries.AddRange(await LogAsync(sourceDir, component, ["--date-order", $"-n{limit}", .. scope]));
+			var store = storage.Open(component);
+			var scope = await ScopeAsync(store, $"Component '{component}'", branch);
+			entries.AddRange(await LogAsync(store, component, new LogQuery(scope, Limit: limit)));
 		}
 
 		var ordered = Order(entries);
@@ -67,67 +64,42 @@ internal static class Timeline
 	}
 
 	/// <summary>
-	/// Newest first, ties broken by component. Within a component the order git listed the commits in is kept (the
-	/// sort is stable): commit dates have one-second resolution, and git's order puts a merge above what it merges.
+	/// Newest first, ties broken by component. Within a component the order its history came in is kept (the sort is
+	/// stable): commit dates have one-second resolution, and that order puts a merge above what it merges.
 	/// </summary>
 	public static List<TimelineEntry> Order(IEnumerable<TimelineEntry> entries) => entries
 		.OrderByDescending(entry => entry.Date)
 		.ThenBy(entry => entry.Component, StringComparer.Ordinal)
 		.ToList();
 
-	/// <summary>What a component's log covers: <c>--branches --tags</c>, or the one branch asked for.</summary>
-	public static async Task<IReadOnlyList<string>> ScopeAsync(GitClient git, string label, string? branch)
+	/// <summary>What a component's history covers: every branch and tag (null), or the one branch asked for.</summary>
+	public static async Task<IReadOnlyList<string>?> ScopeAsync(IComponentStore store, string label, string? branch)
 	{
 		if (branch is null)
 		{
-			return ["--branches", "--tags"];
+			return null;
 		}
 
-		var exists = await git.RunAsync(["rev-parse", "--verify", "--quiet", $"refs/heads/{branch}"]);
-		return exists.ExitCode == 0
+		return await store.BranchTipAsync(branch) is not null
 			? [$"refs/heads/{branch}"]
 			: throw new MonorepoException($"{label} has no branch '{branch}'.");
 	}
 
-	/// <summary>
-	/// <c>git log</c> in <paramref name="repoDir"/> with <paramref name="arguments"/> (scope, limits, filters), each
-	/// commit with the provenance its message records. An empty repository has no commits; any other failure throws.
-	/// </summary>
-	public static async Task<IReadOnlyList<TimelineEntry>> LogAsync(string repoDir, string component, IReadOnlyList<string> arguments)
-	{
-		var log = await GitClient.In(repoDir).RunAsync(["log", $"--format=%H{Separator}%ct{Separator}%an{Separator}%s{Separator}%D{Separator}%b{RecordEnd}", .. arguments]);
-		if (log.ExitCode != 0)
-		{
-			// An empty repository has no commits to show; anything else is worth surfacing.
-			if (log.Error.Contains("does not have any commits", StringComparison.Ordinal))
-			{
-				return [];
-			}
+	/// <summary>A store's history (<paramref name="query"/>: scope, limits, filters), each commit with the provenance its message records.</summary>
+	public static async Task<IReadOnlyList<TimelineEntry>> LogAsync(IComponentStore store, string component, LogQuery query) =>
+		Entries(await store.LogAsync(query), component);
 
-			throw new GitException($"git log failed in '{repoDir}': {log.Error.Trim()}");
-		}
+	/// <summary>History as timeline entries: the refs are the branches and tags, as the decorations name them.</summary>
+	public static IReadOnlyList<TimelineEntry> Entries(IEnumerable<LogEntry> log, string component) => log
+		.Select(entry => new TimelineEntry(component, entry.Commit.Id, entry.Date, Author(entry.Commit.Author), entry.Commit.Subject,
+			[.. entry.Branches, .. entry.Tags], CommitProvenance.Parse(Body(entry.Commit.Message))))
+		.ToList();
 
-		var entries = new List<TimelineEntry>();
-		foreach (var record in log.Output.Replace("\r", "").Split(RecordEnd, StringSplitOptions.RemoveEmptyEntries))
-		{
-			var fields = record.TrimStart('\n').Split(Separator);
-			if (fields.Length < 6 || !long.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds))
-			{
-				continue;
-			}
+	/// <summary>The author's name, without the email.</summary>
+	private static string Author(string? author) =>
+		author is null ? "" : author.IndexOf(" <", StringComparison.Ordinal) is var at and >= 0 ? author[..at] : author;
 
-			entries.Add(new TimelineEntry(component, fields[0], DateTimeOffset.FromUnixTimeSeconds(seconds), fields[2], fields[3], Refs(fields[4]),
-				CommitProvenance.Parse(fields[5])));
-		}
-
-		return entries;
-	}
-
-	/// <summary><c>HEAD -> main, tag: v0, agent-run/x</c> -> <c>main</c>, <c>v0</c>, <c>agent-run/x</c>.</summary>
-	internal static IReadOnlyList<string> Refs(string decoration) =>
-		decoration.Split(", ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-			.Select(entry => entry.StartsWith("HEAD -> ", StringComparison.Ordinal) ? entry["HEAD -> ".Length..] : entry)
-			.Select(entry => entry.StartsWith("tag: ", StringComparison.Ordinal) ? entry["tag: ".Length..] : entry)
-			.Where(entry => entry != "HEAD")
-			.ToList();
+	/// <summary>A message without its subject line: what a run's or integration's commit records its provenance in.</summary>
+	private static string Body(string message) =>
+		message.IndexOf('\n') is var newline and >= 0 ? message[(newline + 1)..].TrimStart('\n') : "";
 }

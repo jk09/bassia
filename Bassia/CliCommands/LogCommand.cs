@@ -5,7 +5,7 @@ using System.Text;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
 using Bassia.Core;
-using Bassia.Git;
+using Bassia.Storage;
 using Bassia.Web;
 
 /// <summary>
@@ -38,7 +38,7 @@ internal static class LogCommand
 
 		if (chosen.Count == 0)
 		{
-			return await SingleRepoAsync(invocation, monorepo.MetaRepoDir, "meta-repo", null, branch, limit, page);
+			return await MetaRepoAsync(invocation, monorepo, branch, limit, page);
 		}
 
 		var unit = invocation.Has("only")
@@ -46,7 +46,8 @@ internal static class LogCommand
 			: Timeline.Unit(monorepo, chosen);
 		if (unit.Count == 1)
 		{
-			return await SingleRepoAsync(invocation, ComponentCommands.RequireRepo(monorepo, unit[0]), unit[0], unit, branch, limit, page);
+			ComponentCommands.RequireRepo(monorepo, unit[0]);
+			return await SingleComponentAsync(invocation, monorepo.Backend.Components.Open(unit[0]), unit[0], branch, limit, page);
 		}
 
 		var timeline = await Timeline.ReadAsync(monorepo, unit, page, limit, branch);
@@ -64,29 +65,47 @@ internal static class LogCommand
 			});
 	}
 
-	/// <summary>One repository's history: git's <c>--graph</c> drawing plus the commits as tables.</summary>
-	private static async Task<int> SingleRepoAsync(Invocation invocation, string repoDir, string label, IReadOnlyList<string>? unit, string? branch, int limit, int page)
+	/// <summary>The meta-repo's history: its revisions drawn as a graph plus the commits as tables.</summary>
+	private static async Task<int> MetaRepoAsync(Invocation invocation, Monorepo monorepo, string? branch, int limit, int page)
 	{
-		var git = GitClient.In(repoDir);
-		IReadOnlyList<string> scope = branch is not null
-			? await Timeline.ScopeAsync(git, unit is null ? "The meta-repo" : $"Component '{label}'", branch)
-			: unit is null ? ["HEAD"] : ["--branches", "--tags"];
-		var skip = (page - 1) * limit;
-		var drawing = await git.RunAsync(["log", "--graph", "--oneline", "--decorate", "--date-order", $"-n{limit}", $"--skip={skip}", .. scope]);
-		var entries = await Timeline.LogAsync(repoDir, label, ["--date-order", $"-n{limit + 1}", $"--skip={skip}", .. scope]);
-		var hasMore = entries.Count > limit;
-		var commits = entries.Take(limit).Select(entry => Commit(entry, unit is null ? null : label)).ToList();
+		IReadOnlyList<LogEntry> log;
+		try
+		{
+			log = await monorepo.Backend.Meta.LogAsync(new LogQuery(branch is null ? null : [$"refs/heads/{branch}"], (page - 1) * limit, limit + 1));
+		}
+		catch (StorageException) when (branch is not null)
+		{
+			throw new MonorepoException($"The meta-repo has no branch '{branch}'.");
+		}
+
+		return History(invocation, monorepo.Backend.Meta.Location, "meta-repo", null, branch, log, branch ?? log.FirstOrDefault()?.Branches.FirstOrDefault(), limit, page);
+	}
+
+	/// <summary>One component's history: its commit graph plus the commits as tables.</summary>
+	private static async Task<int> SingleComponentAsync(Invocation invocation, IComponentStore store, string component, string? branch, int limit, int page)
+	{
+		var scope = await Timeline.ScopeAsync(store, $"Component '{component}'", branch);
+		var log = await store.LogAsync(new LogQuery(scope, (page - 1) * limit, limit + 1));
+		return History(invocation, store.Location, component, [component], branch, log, await store.DefaultBranchAsync(), limit, page);
+	}
+
+	private static int History(Invocation invocation, string location, string label, IReadOnlyList<string>? unit, string? branch, IReadOnlyList<LogEntry> log,
+		string? defaultBranch, int limit, int page)
+	{
+		var shown = log.Take(limit).ToList();
+		var hasMore = log.Count > limit;
+		var commits = Timeline.Entries(shown, label).Select(entry => Commit(entry, unit is null ? null : label)).ToList();
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"{commits.Count} commit(s) of {label}{(branch is null ? "" : $" on {branch}")}, page {page}{(hasMore ? $"; more with -page {page + 1}" : "")}.",
 			new Dictionary<string, object?>
 			{
-				["repository"] = repoDir,
+				["repository"] = location,
 				["components"] = unit?.ToList(),
 				["branch"] = branch,
 				["page"] = page,
 				["limit"] = limit,
 				["has_more"] = hasMore,
-				["graph"] = new TomlText(drawing.ExitCode == 0 && drawing.Output.Trim().Length > 0 ? AsciiLines(drawing.Output) : "(no commits)"),
+				["graph"] = new TomlText(shown.Count > 0 ? AsciiLines(Graph.CommitGraph.Render(shown, defaultBranch)) : "(no commits)"),
 				["commit"] = commits
 			});
 	}
@@ -100,8 +119,8 @@ internal static class LogCommand
 	/// </summary>
 	private static async Task<int> RunsAsync(Invocation invocation, Monorepo monorepo, IReadOnlyList<string> chosen, int limit, int page)
 	{
-		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
-		var runs = (await IntegrationSupport.SelectRunsAsync(store, string.Join(",", invocation.List("run"))))
+		var records = monorepo.RunRecords();
+		var runs = (await IntegrationSupport.SelectRunsAsync(records, string.Join(",", invocation.List("run"))))
 			.DistinctBy(run => run.RunId).OrderBy(run => run.Created, StringComparer.Ordinal).ToList();
 		var runIds = runs.Select(run => run.RunId).ToHashSet(StringComparer.Ordinal);
 
@@ -114,24 +133,23 @@ internal static class LogCommand
 
 		var found = new List<(TimelineEntry Entry, bool OnDefault)>();
 		var defaults = new Dictionary<string, string?>(StringComparer.Ordinal);
+		var storage = monorepo.Backend.Components;
 		foreach (var component in components)
 		{
-			var repoDir = monorepo.SourceRepoDir(component);
-			if (!Directory.Exists(repoDir))
+			if (!storage.Exists(component))
 			{
 				defaults[component] = null;
 				continue;
 			}
 
-			var git = GitClient.In(repoDir);
-			var head = await git.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-			var defaultBranch = defaults[component] = head.ExitCode == 0 && head.Output.Trim().Length > 0 ? head.Output.Trim() : null;
-			var grep = runs.Select(run => $"--grep={run.RunId}").ToList();
-			foreach (var entry in await Timeline.LogAsync(repoDir, component, ["--branches", "--tags", "--date-order", "--fixed-strings", .. grep]))
+			var store = storage.Open(component);
+			var defaultBranch = defaults[component] = await store.DefaultBranchAsync();
+			var tip = defaultBranch is null ? null : await store.BranchTipAsync(defaultBranch);
+			foreach (var entry in await Timeline.LogAsync(store, component, new LogQuery(Grep: runs.Select(run => run.RunId).ToList())))
 			{
 				if (entry.Provenance is { } provenance && runIds.Contains(provenance.RunId))
 				{
-					found.Add((entry, defaultBranch is not null && await IsAncestorAsync(git, entry.Hash, defaultBranch)));
+					found.Add((entry, tip is not null && await store.IsAncestorAsync(entry.Hash, tip)));
 				}
 			}
 		}
@@ -150,10 +168,10 @@ internal static class LogCommand
 			foreach (var component in run.Components.Where(component => names.Contains(component.Name)))
 			{
 				var defaultBranch = defaults.GetValueOrDefault(component.Name);
-				var repoDir = monorepo.SourceRepoDir(component.Name);
 				var isResult = component.ResultStatus == ResultStatus.Pushed && component.ResultCommit is not null;
-				var hasLanded = isResult && defaultBranch is not null && Directory.Exists(repoDir)
-					&& await IsAncestorAsync(GitClient.In(repoDir), component.ResultCommit!, defaultBranch);
+				var hasLanded = isResult && defaultBranch is not null && storage.Exists(component.Name)
+					&& await storage.Open(component.Name).BranchTipAsync(defaultBranch) is { } tip
+					&& await storage.Open(component.Name).IsAncestorAsync(component.ResultCommit!, tip);
 				results += isResult ? 1 : 0;
 				landed += hasLanded ? 1 : 0;
 				entries.Add(new Dictionary<string, object?>
@@ -203,17 +221,6 @@ internal static class LogCommand
 				}).ToList(),
 				["run"] = summaries
 			});
-	}
-
-	private static async Task<bool> IsAncestorAsync(GitClient git, string ancestor, string descendant)
-	{
-		var result = await git.RunAsync(["merge-base", "--is-ancestor", ancestor, descendant]);
-		return result.ExitCode switch
-		{
-			0 => true,
-			1 => false,
-			_ => throw new GitException($"git merge-base --is-ancestor failed in '{git.WorkingDirectory}': {result.Error.Trim()}")
-		};
 	}
 
 	/// <summary>A commit as the log reports it, with the run (and integration) its message records.</summary>

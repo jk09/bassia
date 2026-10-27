@@ -1,5 +1,7 @@
 namespace Bassia.Locks;
 
+using Bassia.Storage;
+
 /// <summary>
 /// The locking side of one run while its agent works, kept by the bassia process that executes the run. Every few
 /// seconds it looks at what the agent changed in each component checkout: a change the run's filter covers is held
@@ -18,7 +20,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 	private readonly RunMetadata metadata;
 	private readonly IReadOnlyDictionary<string, LockFilter> filters;
 	private readonly Action<string> report;
-	private readonly LockTable table;
+	private readonly Storage.ILockStore table;
 	private readonly SemaphoreSlim gate = new(1, 1);
 	private readonly CancellationTokenSource stop = new();
 	private readonly List<LockConflict> stale = [];
@@ -33,13 +35,13 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 		this.metadata = metadata;
 		this.filters = filters;
 		this.report = report;
-		table = new LockTable(monorepo);
+		table = monorepo.Locks;
 	}
 
 	/// <summary>Whether the run itself holds anything it changes: its filter covers some path of some component.</summary>
 	public bool Locking => filters.Values.Any(filter => !filter.IsEmpty);
 
-	public LockTable Table => table;
+	public Storage.ILockStore Table => table;
 
 	/// <summary>The filter of every component of the run: the configured one plus the run's own patterns.</summary>
 	public static IReadOnlyDictionary<string, LockFilter> Filters(Monorepo monorepo, RunMetadata metadata)
@@ -106,7 +108,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 		await gate.WaitAsync();
 		try
 		{
-			if (finished || (!Locking && !table.HasEntries))
+			if (finished || (!Locking && !await table.HasEntriesAsync()))
 			{
 				return;
 			}
@@ -136,7 +138,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 		var stamp = RunMetadata.Timestamp();
 		var mine = session.Find(metadata.RunId);
 		var created = mine is null;
-		mine ??= NewEntry(metadata.RunId, metadata.Created, Environment.ProcessId, JobRegistry.CurrentProcessStart(), stamp);
+		mine ??= NewEntry(metadata.RunId, metadata.Created, Environment.ProcessId, LocalJobScheduler.CurrentProcessStart(), stamp);
 
 		// Back after the holds expired (the process was suspended, the machine slept): what another run took meanwhile
 		// is that run's now, and whatever this run changed there collides with it.
@@ -226,7 +228,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 	/// </summary>
 	public async Task CheckStaleAsync()
 	{
-		var released = table.ReadAll().Where(entry => entry.RunId != metadata.RunId && table.StateOf(entry) == LockState.Released).ToList();
+		var released = (await table.ReadAllAsync()).Where(entry => entry.RunId != metadata.RunId && table.StateOf(entry) == LockState.Released).ToList();
 		if (released.Count == 0)
 		{
 			return;
@@ -275,7 +277,7 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 			}
 
 			finished = true;
-			var entry = table.Find(metadata.RunId);
+			var entry = await table.FindAsync(metadata.RunId);
 			foreach (var component in metadata.Components)
 			{
 				var paths = changed.GetValueOrDefault(component.Name) ?? [];
@@ -303,45 +305,56 @@ internal sealed class RunLocks : Core.IAgentRunLocks
 	/// Releases a run's holds: an entry that held something in a component the run pushed a result to is kept as
 	/// released, with those results; anything else is removed.
 	/// </summary>
-	public static Task ReleaseAsync(LockTable table, RunMetadata metadata) => !table.Has(metadata.RunId) ? Task.CompletedTask : table.UpdateAsync(session =>
+	public static async Task ReleaseAsync(Storage.ILockStore table, RunMetadata metadata)
 	{
-		if (session.Find(metadata.RunId) is not { } mine)
+		if (!await table.HasAsync(metadata.RunId))
 		{
 			return;
 		}
 
-		var results = metadata.Components
-			.Where(component => component.ResultStatus == ResultStatus.Pushed && component.ResultTag is not null && component.ResultCommit is not null)
-			.Where(component => mine.Holds.Any(hold => hold.Key.Component == component.Name))
-			.Select(component => new LockResult(component.Name, component.ResultTag!, component.ResultCommit!))
-			.ToList();
-		if (results.Count == 0)
+		await table.UpdateAsync(session =>
 		{
-			session.Delete(metadata.RunId);
-			return;
-		}
+			if (session.Find(metadata.RunId) is not { } mine)
+			{
+				return;
+			}
 
-		mine.State = LockEntry.ReleasedState;
-		mine.Released = RunMetadata.Timestamp();
-		mine.Holds.RemoveAll(hold => results.All(result => result.Component != hold.Key.Component));
-		mine.Waits.Clear();
-		mine.Results.Clear();
-		mine.Results.AddRange(results);
-		session.Save(mine);
-	});
+			var results = metadata.Components
+				.Where(component => component.ResultStatus == ResultStatus.Pushed && component.ResultTag is not null && component.ResultCommit is not null)
+				.Where(component => mine.Holds.Any(hold => hold.Key.Component == component.Name))
+				.Select(component => new LockResult(component.Name, component.ResultTag!, component.ResultCommit!))
+				.ToList();
+			if (results.Count == 0)
+			{
+				session.Delete(metadata.RunId);
+				return;
+			}
+
+			mine.State = LockEntry.ReleasedState;
+			mine.Released = RunMetadata.Timestamp();
+			mine.Holds.RemoveAll(hold => results.All(result => result.Component != hold.Key.Component));
+			mine.Waits.Clear();
+			mine.Results.Clear();
+			mine.Results.AddRange(results);
+			session.Save(mine);
+		});
+	}
 
 	/// <summary>Removes everything a run holds or is remembered for (a stopped or abandoned run).</summary>
-	public static Task ForgetAsync(Monorepo monorepo, string runId)
+	public static async Task ForgetAsync(Monorepo monorepo, string runId)
 	{
-		var table = new LockTable(monorepo);
-		return table.Has(runId) ? table.UpdateAsync(session => session.Delete(runId)) : Task.CompletedTask;
+		var table = monorepo.Locks;
+		if (await table.HasAsync(runId))
+		{
+			await table.UpdateAsync(session => session.Delete(runId));
+		}
 	}
 
 	/// <summary>A new, live entry for a run executed by the given process on this machine.</summary>
 	public static LockEntry NewEntry(string runId, string started, int pid, string processStart, string heartbeat) => new()
 	{
 		RunId = runId,
-		Host = LockTable.ThisHost,
+		Host = FileLockStore.ThisHost,
 		Pid = pid,
 		ProcessStart = processStart,
 		Started = started,

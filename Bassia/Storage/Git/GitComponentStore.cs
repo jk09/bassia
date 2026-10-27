@@ -46,6 +46,11 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 
 	public async Task<StoredTag?> GetTagAsync(string name) => (await ReadTagsAsync($"refs/tags/{name}")).FirstOrDefault(tag => tag.Name == name);
 
+	public async Task<string?> TagMessageAsync(string name) =>
+		await GetTagAsync(name) is { Annotated: true }
+			? (await git.RunOrThrowAsync(["for-each-ref", "--format=%(contents)", $"refs/tags/{name}"])).TrimEnd('\n')
+			: null;
+
 	public async Task CreateTagAsync(string name, string commit, string message)
 	{
 		var result = await git.RunAsync(["tag", "-a", name, "-m", message, commit]);
@@ -463,6 +468,10 @@ internal sealed class GitComponentStore(string name, string repoDir) : IComponen
 
 	public async Task<string> DiffAsync(string from, string to) => (await git.RunAsync(["diff", "--no-color", from, to])).Output;
 
+	public Task<IReadOnlyList<FileStat>> DiffStatAsync(string? from, string to) => GitHistory.DiffStatAsync(Location, from, to);
+
+	public Task<IReadOnlyList<LogEntry>> LogAsync(LogQuery query) => GitHistory.LogAsync(Location, query);
+
 	internal static List<string> Lines(string text) =>
 		text.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
@@ -723,6 +732,8 @@ internal sealed class GitWorkspace(string directory, string sourceRepoDir) : ICo
 		GitComponentStore.ParseCommits((await checkout.RunAsync(["log", $"--format={GitComponentStore.CommitFormat}", $"{from}..{to}"])).Output);
 
 	public async Task<string> DiffAsync(string from, string to) => (await checkout.RunAsync(["diff", "--no-color", from, to])).Output;
+
+	public Task<IReadOnlyList<FileStat>> DiffStatAsync(string from, string to) => GitHistory.DiffStatAsync(Directory, from, to);
 }
 
 /// <summary>A <see cref="FileMergeDriver"/> as git configuration: the driver's definition and an attributes file assigning it its files.</summary>

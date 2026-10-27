@@ -25,6 +25,24 @@ internal sealed record StoredBranch(string Name, string Commit, string Subject);
 /// <remarks><paramref name="Tagger"/>: who made an annotated tag, as <c>Name &lt;email&gt;</c> (null for a lightweight one or when unknown).</remarks>
 internal sealed record StoredTag(string Name, string Commit, bool Annotated, string Subject, string Date, string? Tagger = null);
 
+/// <summary>
+/// What <see cref="IComponentStore.LogAsync"/> reads: the history reachable from <paramref name="Tips"/> (branch or tag
+/// names, full or short; null: every branch and tag), after skipping <paramref name="Skip"/> commits, at most
+/// <paramref name="Limit"/>; with <paramref name="Grep"/> only commits whose message contains one of the texts; with
+/// <paramref name="Paths"/> each with the paths it changed against its first parent.
+/// </summary>
+internal sealed record LogQuery(IReadOnlyList<string>? Tips = null, int Skip = 0, int? Limit = null, IReadOnlyList<string>? Grep = null, bool Paths = false);
+
+/// <summary>
+/// A commit as history shows it to people: the commit, when it was committed, the branches and tags pointing at it, and
+/// (when asked for) the paths it changed.
+/// </summary>
+internal sealed record LogEntry(StoredCommit Commit, DateTimeOffset Date, IReadOnlyList<string> Branches, IReadOnlyList<string> Tags,
+	IReadOnlyList<string>? Paths = null);
+
+/// <summary>Lines added and removed in one file between two commits; -1 for a binary file. A renamed file's path is <c>old =&gt; new</c>.</summary>
+internal sealed record FileStat(string Path, int Added, int Removed);
+
 /// <summary>A file of a commit: path (with <c>/</c>), mode, content object id and size in bytes.</summary>
 internal sealed record StoredFile(string Path, string Mode, string Object, long Size);
 

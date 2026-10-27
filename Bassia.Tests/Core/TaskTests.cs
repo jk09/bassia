@@ -190,7 +190,7 @@ public class TaskTests
 			Directory.CreateDirectory(Path.Combine(root, "third", "lib"));
 			await TaskRunner.RunAsync(plan, Path.Combine(root, "third"), Path.Combine(root, "third", "logs"), new Dictionary<string, string>(),
 				_ => Task.FromResult<int?>(1), caching: failing);
-			Assert.Equal(1, caching.Cache.Size().Entries);
+			Assert.Equal(1, (await caching.Cache.SizeAsync()).Entries);
 		}
 		finally
 		{

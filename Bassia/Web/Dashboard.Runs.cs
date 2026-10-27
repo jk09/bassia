@@ -54,8 +54,8 @@ internal sealed partial class Dashboard
 	private async Task<IResult> LiveFragmentAsync(HttpResponse response)
 	{
 		var monorepo = Current();
-		var runs = await new RunMetadataStore(new Git.GitClient(monorepo.Root), monorepo.RunsRepoDir).ListLatestAsync();
-		var live = LiveRuns.Read(monorepo, runs);
+		var runs = await monorepo.RunRecords().ListLatestAsync();
+		var live = await LiveRuns.ReadAsync(monorepo, runs);
 		response.Headers["X-Live"] = "1"; // keep following: a run started from a terminal shows up here
 		return Results.Content(LiveCards(live), "text/html; charset=utf-8");
 	}
@@ -235,8 +235,8 @@ internal sealed partial class Dashboard
 	private async Task<IResult> RunFragmentAsync(HttpResponse response, string id)
 	{
 		var monorepo = Current();
-		var runs = await new RunMetadataStore(new Git.GitClient(monorepo.Root), monorepo.RunsRepoDir).ListLatestAsync();
-		var live = LiveRuns.Read(monorepo, runs).FirstOrDefault(run => run.RunId == RunMetadata.NormalizeRunId(id));
+		var runs = await monorepo.RunRecords().ListLatestAsync();
+		var live = (await LiveRuns.ReadAsync(monorepo, runs)).FirstOrDefault(run => run.RunId == RunMetadata.NormalizeRunId(id));
 		response.Headers["X-Live"] = live is null ? "0" : "1";
 		var html = live is null
 			? $"{Charts.PhaseSteps(runs.FirstOrDefault(run => run.RunId == RunMetadata.NormalizeRunId(id))?.Status ?? "done", live: false)}<p class=\"muted\">The run is no longer live; reload for its record.</p>"

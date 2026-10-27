@@ -12,11 +12,13 @@ using Tomlyn.Model;
 /// <c>task.log</c> and the task's declared outputs under <c>outputs/</c>. Only tasks marked <c>cache = true</c> are
 /// looked up, and only passed runs are stored.
 /// </summary>
-internal sealed class TaskCache(string folder)
+internal sealed class TaskCache(string folder) : Storage.ITaskCache
 {
 	public const string FolderName = ".task-cache";
 
 	public string Folder { get; } = folder;
+
+	public string Location => Folder;
 
 	public static TaskCache In(string workspaceDir) => new(Path.Combine(workspaceDir, FolderName));
 
@@ -50,7 +52,10 @@ internal sealed class TaskCache(string folder)
 	/// The cached result under <paramref name="key"/>, with its outputs restored into <paramref name="componentFolder"/>
 	/// and its log copied to <paramref name="logPath"/>; null when there is none.
 	/// </summary>
-	public TaskResult? TryRestore(string key, PlannedTask task, string componentFolder, string logPath)
+	public Task<TaskResult?> TryRestoreAsync(string key, PlannedTask task, string componentFolder, string logPath) =>
+		Task.FromResult(TryRestore(key, task, componentFolder, logPath));
+
+	private TaskResult? TryRestore(string key, PlannedTask task, string componentFolder, string logPath)
 	{
 		var entry = Path.Combine(Folder, key);
 		var resultPath = Path.Combine(entry, "result.toml");
@@ -100,7 +105,13 @@ internal sealed class TaskCache(string folder)
 	/// <paramref name="componentFolder"/> its task's outputs match, leaving out <paramref name="nested"/> (the reference
 	/// paths). Written to a temporary folder first, so a reader never sees half an entry.
 	/// </summary>
-	public void Store(string key, PlannedTask task, TaskResult result, string componentFolder, IReadOnlyList<string> nested)
+	public Task StoreAsync(string key, PlannedTask task, TaskResult result, string componentFolder, IReadOnlyList<string> nested)
+	{
+		Store(key, task, result, componentFolder, nested);
+		return Task.CompletedTask;
+	}
+
+	private void Store(string key, PlannedTask task, TaskResult result, string componentFolder, IReadOnlyList<string> nested)
 	{
 		if (!result.Ok || result.Cached)
 		{
@@ -161,13 +172,21 @@ internal sealed class TaskCache(string folder)
 	}
 
 	/// <summary>How many entries the cache holds and their size in bytes.</summary>
-	public (int Entries, long Bytes) Size() =>
+	public Task<(int Entries, long Bytes)> SizeAsync() => Task.FromResult(Size());
+
+	private (int Entries, long Bytes) Size() =>
 		!Directory.Exists(Folder) ? (0, 0)
 		: (Directory.EnumerateDirectories(Folder).Count(entry => !Path.GetFileName(entry).StartsWith('.')),
 			Directory.EnumerateFiles(Folder, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length));
 
 	/// <summary>Removes every entry.</summary>
-	public void Clear()
+	public Task ClearAsync()
+	{
+		Clear();
+		return Task.CompletedTask;
+	}
+
+	private void Clear()
 	{
 		if (Directory.Exists(Folder))
 		{

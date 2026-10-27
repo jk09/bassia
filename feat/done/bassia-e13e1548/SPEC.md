@@ -36,30 +36,30 @@ to one machine, and so cannot be shared by many users and agents:
 
 ## Acceptance criteria
 
-- [ ] `ILockStore` replaces direct use of the `.locks` folder: it runs one lock decision atomically over the entries it
+- [x] `ILockStore` replaces direct use of the `.locks` folder: it runs one lock decision atomically over the entries it
       reads (the `LockSession` semantics: holds, waits, cycles, conflicts, catch-ups, release, forget) and judges
       liveness by lease (heartbeat + TTL) alone; process-id checks become an optimization of the local backend only.
       `FileLockStore` is today's behavior; `MemoryLockStore` serves the unit tests.
-- [ ] `IJobScheduler` replaces `JobRegistry` for callers: register, find, list, read the log (from an offset, for
+- [x] `IJobScheduler` replaces `JobRegistry` for callers: register, find, list, read the log (from an offset, for
       following), request a stop, record the result, and start a detached job. Stopping goes through the scheduler,
       never through a process id held by the caller. `LocalJobScheduler` is today's behavior (background process, stop
       file, log file).
-- [ ] `ITaskCache` replaces direct use of the cache folder (look up, restore, store by key); the local backend is today's.
-- [ ] `IIdentity` answers who the current user is and how that is known; the local backend is today's resolution
+- [x] `ITaskCache` replaces direct use of the cache folder (look up, restore, store by key); the local backend is today's.
+- [x] `IIdentity` answers who the current user is and how that is known; the local backend is today's resolution
       (`BASSIA_USER`, `user.id`, git email). Attribution (`Actor`) takes the user from it.
-- [ ] A `MonorepoBackend` (or equivalent) is the one place a command gets its storage, meta store, record stores, lock
+- [x] A `MonorepoBackend` (or equivalent) is the one place a command gets its storage, meta store, record stores, lock
       store, scheduler, task cache, identity and configuration from; `Monorepo.Load` builds the local one. No command or
       dashboard page constructs `RunMetadataStore`, `IntegrationStore`, `LockTable`, `JobRegistry` or `TaskCache`, or
       reads `components.toml`/`config*.toml`, itself.
-- [ ] `log`, `agent diff`, `component survey` and the dashboard's history views read through `IComponentStore` (adding
+- [x] `log`, `agent diff`, `component survey` and the dashboard's history views read through `IComponentStore` (adding
       the queries they need to the contract, e.g. history between two commits with changed paths), so they also work
       on a clone and on a remote backend. Commands that only make sense on git (`init`'s meta-repo, the meta-repo clone
       of `bassia clone`) are confined to the local backend.
-- [ ] Configuration is read and written through the backend (`IConfigStore`): the monorepo layer with the meta store,
+- [x] Configuration is read and written through the backend (`IConfigStore`): the monorepo layer with the meta store,
       the user layer stays a local file.
-- [ ] No behavior change: the whole existing suite passes unchanged, apart from tests that constructed the moved
+- [x] No behavior change: the whole existing suite passes unchanged, apart from tests that constructed the moved
       types; the unit tests of locks, jobs and runs also run against the memory backends.
-- [ ] `docs/reference.md` ("Architecture") describes the contracts and which state each holds.
+- [x] `docs/reference.md` ("Architecture") describes the contracts and which state each holds.
 
 ## Approach
 
@@ -75,16 +75,28 @@ switching `log`, `agent diff`, `survey` and the dashboard.
 - One record per deliverable: the contracts ship on their own (no behavior change) and unblock the cloud storage
   (`bassia-ce722c6c`) and the server (`bassia-f245cd5f`).
 - The contract test suites written here (one set of tests per contract, run against every backend) are what the cloud
-  and remote backends are checked with.
+  and remote backends are checked with: `BackendContractTests` (lock stores, the local scheduler, the history queries).
+- The contract is asynchronous throughout, so a remote backend never blocks; `Monorepo.Load` still waits for the meta
+  store in place, which costs nothing on the local backend, and becomes asynchronous with the remote one.
+- A detached job's log and result are files its own process writes on its machine; the local scheduler names them
+  (`StartDetachedAsync` hands the log location to the arguments it builds, `ResultLocation`), reads the log
+  (`ReadLogAsync`, from an offset or from the end) and stops jobs. A remote scheduler streams them (`bassia-f245cd5f`).
+  There is no memory scheduler: the run engine in Core does not use jobs, which belong to the commands.
+- History is drawn by Bassia, not by git: `Graph/CommitGraph` draws `bassia log`'s commit graph as git's
+  `--graph --oneline --decorate` does, `Cli/DiffStatText` draws `agent diff`'s and the commit page's stat as
+  `git diff --stat` does. The texts are close to git's but not byte for byte; the data fields are unchanged.
+- Beyond the listed views, `tag list|show|create` and the meta-repo head of `bassia status` also moved to the contract
+  (with `TagMessageAsync`). Working copies stay git checkouts on the client (`task run`'s fingerprint of a run folder),
+  and so does `bassia status`'s report of uncommitted meta-repo edits, now only on the local backend.
 - Lock liveness is a lease. Process ids cannot be checked across machines, so the contract never depends on them.
 - The user configuration layer stays local to each client; only the monorepo layer is shared.
 
 ## Progress
 
-- [ ] Contracts and local/memory implementations
-- [ ] Callers moved (commands, dashboard, integration, locks)
-- [ ] History queries in the storage contract; `log`, `agent diff`, `survey`, dashboard moved
-- [ ] Docs; full suite green
+- [x] Contracts and local/memory implementations
+- [x] Callers moved (commands, dashboard, integration, locks)
+- [x] History queries in the storage contract; `log`, `agent diff`, `survey`, tags, dashboard moved
+- [x] Docs; full suite green
 
 ## Validation
 
