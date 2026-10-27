@@ -181,6 +181,8 @@ internal sealed class MemoryComponentStorage(MemoryUpstreams? upstreams = null) 
 		}
 	}
 
+	public Task MoveBranchesAsync(IReadOnlyList<BranchMove> moves) => BranchMoves.InSequenceAsync(this, moves);
+
 	/// <summary>Remembers working copies by folder, so a retry can reopen them like git reopens a checkout.</summary>
 	internal void Track(MemoryWorkspace workspace)
 	{

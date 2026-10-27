@@ -144,7 +144,7 @@ public class BackendContractTests
 
 	// ----- history -----
 
-	public static TheoryData<string> Stores => new() { "memory", "git" };
+	public static TheoryData<string> Stores => new() { "memory", "git", "cloud" };
 
 	/// <summary>
 	/// main: create (empty), a (a.txt), merge of topic; topic: t (t.txt) off a. Tagged v1 at a. Returns the store and the
@@ -152,7 +152,7 @@ public class BackendContractTests
 	/// </summary>
 	private static async Task<(IComponentStore Store, IReadOnlyDictionary<string, string> Ids)> HistoryAsync(string kind, TempDirectory temp)
 	{
-		IComponentStorage storage = kind == "memory" ? new MemoryComponentStorage() : new GitComponentStorage(temp.Path);
+		var storage = StorageContractTests.Storage(kind, temp);
 		var store = await storage.CreateAsync("lib", "main", "", "create");
 		var ids = new Dictionary<string, string>(StringComparer.Ordinal) { ["create"] = (await store.BranchTipAsync("main"))! };
 
@@ -165,7 +165,7 @@ public class BackendContractTests
 			await workspace.PublishAsync(branch, []);
 
 			// Git's commit dates have one-second resolution: keep the order unambiguous.
-			if (kind == "git")
+			if (kind != "memory")
 			{
 				await Task.Delay(1100);
 			}

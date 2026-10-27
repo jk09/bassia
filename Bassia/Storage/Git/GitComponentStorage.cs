@@ -132,6 +132,8 @@ internal sealed class GitComponentStorage(string root) : IComponentStorage
 
 	public IComponentWorkspace OpenWorkspace(string name, string directory) => new GitWorkspace(directory, LocationOf(name));
 
+	public Task MoveBranchesAsync(IReadOnlyList<BranchMove> moves) => BranchMoves.InSequenceAsync(this, moves);
+
 	/// <summary>Deletes a folder tree, including the read-only pack files git leaves behind.</summary>
 	internal static void DeleteDirectory(string directory)
 	{

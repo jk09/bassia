@@ -1094,6 +1094,48 @@ its upstream on request (`HydrateAsync`) or when a file is read, and follows or 
 (`FetchUpstreamAsync`, `PushUpstreamAsync`). A checkout with load patterns is sparse and `IComponentWorkspace.LoadAsync`
 materializes more; views (`Core/Views`: `ConfigSpec`, `Views`, `ViewManifest`, `Depot`) and sparse runs build on that.
 
+### Cloud storage
+
+`Storage/Cloud` keeps component histories in AWS for a hosted Bassia: `CloudComponentStorage` implements the whole
+storage contract with S3 and DynamoDB as the durable truth, reached through two small interfaces - `IObjectStore`
+(`S3ObjectStore`; `MemoryObjectStore` for tests) and `IRecordTable` (`DynamoRecordTable`; `MemoryRecordTable`).
+
+- **Data model.** Objects are git objects with git's SHA-1 ids (SHA-256 repositories are refused), in self-contained
+  packs per component: `components/<component>/packs/<pack>.pack|.idx`, written once and never changed. One DynamoDB
+  table holds, in the partition `component#<name>`, the record `meta` (default branch, upstream), one `ref#<ref>` per
+  branch and tag (its object id) and one `pack#<pack>` per pack. Every record has a version.
+- **Consistency.** A write packs the objects its new ref values reach and the stored refs do not, uploads the pack,
+  then writes the pack's record and every ref in one transaction, each ref conditional on the version it was read at:
+  a ref never points at an object that is not stored, `SetBranchAsync(..., expected)` is a compare-and-swap without
+  locks, a tag is created only where none exists, and a working copy publishes its branch only as a fast-forward.
+  `MoveBranchesAsync` lands an integration on several components in one transaction - all or none; a batch larger
+  than one transaction (100 refs) is refused before anything moves. A write that loses a race changes nothing; its
+  uploaded pack is garbage for the collector.
+- **Cache.** Each node runs real git on a cache: a bare repository per component under the cache folder, brought up
+  to the table when a store is opened (missing packs downloaded, branches, tags and default branch set from the
+  records). Reads, merges, diffs, splits and checkouts run on it, so they equal what `Storage/Git` computes; deleting
+  the cache loses nothing. A store's location is its cache folder. Imports clone into the cache and publish
+  everything; a fork copies its parent's packs within S3 and writes its own refs; a store holds all content, so
+  hydration fetches nothing.
+- **Gateway.** `GitGateway` serves git's smart HTTP at `<prefix>/<component>`: clone and fetch over protocol v0 and v2,
+  filters and objects by id for partial clones (git's upload-pack on the cache), and push - receive-pack on a scratch
+  repository borrowing the cache's objects, then one publish of the refs it accepted, each still where the client saw
+  it; the gateway reports the outcome itself, so a push that loses a race is refused as a whole. Given a meta-repo
+  folder it serves it read-only at `<prefix>/.bassia`, which makes the prefix a depot for `bassia clone`.
+  Authentication is the server's (`bassia-f245cd5f`).
+- **Garbage collection.** `CloudGarbageCollector` repacks the objects a component's refs reach into one pack and marks
+  the other packs superseded; a later collection deletes the packs superseded longer than the grace period ago
+  (default 14 days) - records first, then files - and packs no record lists once first seen unlisted that long ago.
+  A write in flight relies only on packs listed when it started, so one shorter than the grace period never loses an
+  object. A lease record keeps two collections of one component apart.
+- **Limits.** 100 ref changes per atomic write (an import of more refs is written in parts before the component
+  exists); a cold node downloads a component's packs before serving it; pushes are buffered in memory on the gateway.
+- **Durability and restore.** `AwsCloudOptions.CheckAsync` requires versioning on the bucket and point-in-time recovery
+  on the table. To restore, pick one moment T: restore the table to T (point-in-time recovery into a new table, then
+  point the deployment at it), restore every object of the bucket to its version current at T (noncurrent versions,
+  e.g. with S3 Batch Operations), and delete the nodes' caches. Refs at T only reach packs listed at T, which the
+  bucket holds again.
+
 A replacement for git implements the storage contract; nothing in the component graph, the integration or locking
 changes, and `bassia log`, `agent diff`, `component survey`, the tag commands and the dashboard read history through it
 as well. A monorepo kept elsewhere - on a server - is another `IMonorepoBackend`. What stays tied to the machine is
@@ -1136,8 +1178,13 @@ and integration commands, including detached runs and stopping them, which start
 background process. `ComponentSplitTests` splits a component with a branchy history (moves into and between
 parts, a merge, tags, a dropped folder, a path reused after its file moved away) and checks every part's files,
 `git log --follow`, tags, record commit and registration, plus plan errors, dry runs, rollback and the survey.
-`BackendContractTests` holds the lock stores (memory and file), the local job scheduler and the history queries (memory
-and git) to the same behavior, as a new backend would be. `ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
+`BackendContractTests` holds the lock stores (memory and file), the local job scheduler and the history queries (memory,
+git and cloud) to the same behavior, as a new backend would be. `StorageContractTests` (`Category=StorageContract`) holds the storage contract to the same
+behavior on memory, git and the cloud storage - on the in-memory object store and table, or on emulators when
+`BASSIA_CLOUD_TEST_ENDPOINT` (DynamoDB, e.g. DynamoDB Local or moto) and `BASSIA_CLOUD_TEST_S3_ENDPOINT` (S3, e.g.
+MinIO or moto) are set - plus two nodes seeing each other's writes and racing for a branch, garbage collection, and the
+same operations giving the same ids, trees, merges and diffs on git and cloud. `GitGatewayTests` runs real git and
+`bassia clone` with a sparse run against the gateway on a local port. `ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
 store fetched so laziness is proven, and write-through with its retry; `ViewCommandTests` clones a local depot and checks
 with git which file contents each step downloaded. `LockTests` covers the lock filter and keys, the lock table's expiry, dead processes, deadlocks and a suspended run
 losing its holds, and - with a detached run holding while a second run starts - implicit holds, conflicts and what
