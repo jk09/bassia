@@ -15,7 +15,7 @@ internal sealed partial class Dashboard
 	{
 		var state = await LoadAsync();
 		var body = $"""
-			<div data-live-src="/fragment/live">{LiveCards(state.Live)}</div>
+			<div data-live-src="/fragment/live" data-live-on="run job log">{LiveCards(state.Live)}</div>
 			<div class="split"><section class="wide"><h2>Runs over time</h2>{Charts.RunTimeline(Bars(state, 40), DateTimeOffset.UtcNow)}</section>
 			<section><h2>By status</h2>{Charts.Donut(StatusSegments(state.Runs), "agentic runs")}</section></div>
 			<p>{Cmd("bassia agent start -select <component[@tag],...> -detach -prompt \"...\"")} {Cmd("bassia agent list -status live")}</p>
@@ -129,7 +129,7 @@ internal sealed partial class Dashboard
 		var body = new StringBuilder();
 		if (live is not null)
 		{
-			body.Append($"<div data-live-src=\"/fragment/run/{Url(runId)}\">{RunLive(live)}</div>");
+			body.Append($"<div data-live-src=\"/fragment/run/{Url(runId)}\" data-live-on=\"run job log lock\">{RunLive(live)}</div>");
 		}
 
 		if (metadata is not null)

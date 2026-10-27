@@ -118,6 +118,28 @@ internal sealed class ConfigSnapshot
 	public string Value(string key) => Resolve(ConfigFile.Find(key)).Value;
 
 	/// <summary>The per-component merge and lock keys set in either layer, in name order.</summary>
+	/// <summary>
+	/// The monorepo layer alone, without the per-component settings of components <paramref name="keep"/> rejects: the
+	/// settings as the server shows them to a user who may not read every component.
+	/// </summary>
+	public ConfigSnapshot Limited(Func<string, bool> keep)
+	{
+		var copy = TomlSerializer.Deserialize<TomlTable>(TomlSerializer.Serialize(monorepo)) ?? new TomlTable();
+		foreach (var (group, _) in ConfigFile.ComponentSettings)
+		{
+			if (copy.TryGetValue(group, out var groupValue) && groupValue is TomlTable groupTable
+				&& groupTable.TryGetValue("component", out var components) && components is TomlTable componentTables)
+			{
+				foreach (var component in componentTables.Keys.Where(name => !keep(name)).ToList())
+				{
+					componentTables.Remove(component);
+				}
+			}
+		}
+
+		return new ConfigSnapshot(copy, new TomlTable());
+	}
+
 	public IReadOnlyList<ConfigKey> ComponentKeys()
 	{
 		var keys = new SortedSet<string>(StringComparer.Ordinal);

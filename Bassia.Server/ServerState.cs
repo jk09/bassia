@@ -26,6 +26,7 @@ internal sealed class ServerState
 		Locks = new DbLockStore(database, lockTtl);
 		Jobs = new DbJobStore(database);
 		TaskCache = new DbTaskCache(database, blobs);
+		Changes = new ChangeFeed(database);
 		Storage = storage;
 		GitHost = gitHost;
 		Meta = meta;
@@ -49,6 +50,9 @@ internal sealed class ServerState
 	public DbJobStore Jobs { get; }
 
 	public DbTaskCache TaskCache { get; }
+
+	/// <summary>What changed, for the dashboards' live updates.</summary>
+	public ChangeFeed Changes { get; }
 
 	public IComponentStorage Storage { get; }
 
@@ -98,7 +102,8 @@ internal sealed class ServerState
 		else
 		{
 			var options = new AwsCloudOptions(config.Bucket!, config.Table!, config.Region, config.Prefix, config.S3Url, config.DynamoUrl);
-			var (objects, table) = cloud ?? (new S3ObjectStore(options.S3Client(), options.Bucket, options.Prefix), new DynamoRecordTable(options.DynamoClient(), options.Table));
+			var (rawObjects, rawTable) = cloud ?? (new S3ObjectStore(options.S3Client(), options.Bucket, options.Prefix), new DynamoRecordTable(options.DynamoClient(), options.Table));
+			var (objects, table) = ((IObjectStore)new TimedObjectStore(rawObjects), (IRecordTable)new TimedRecordTable(rawTable));
 			var cloudStorage = new CloudComponentStorage(objects, table, Path.Combine(config.State, "cache"));
 			storage = cloudStorage;
 			gitHost = new CloudGitHost(cloudStorage);

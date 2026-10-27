@@ -47,11 +47,19 @@ internal static class IdentityEndpoints
 	/// </summary>
 	private static async Task<TokenResponse> GitHubAsync(ServerState state, GitHubLogin login, HttpContext context)
 	{
+		var (user, account) = await GitHubUserAsync(state, login.AccessToken);
+		await state.Access.AuditAsync(user.Id, "login", "github", $"GitHub account {account}", ServerApp.RemoteOf(context));
+		return await IssueAsync(state, user.Id);
+	}
+
+	/// <summary>The registered user a GitHub access token's account is, and the account's id, checked with GitHub.</summary>
+	public static async Task<(Core.UserDefinition User, string Account)> GitHubUserAsync(ServerState state, string accessToken)
+	{
 		var github = state.Config.GitHub ?? throw new AuthException("This server does not accept GitHub logins.");
 		async Task<JsonElement> GetAsync(string path)
 		{
 			using var request = new HttpRequestMessage(HttpMethod.Get, github.ApiUrl + path);
-			request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
+			request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
 			request.Headers.UserAgent.Add(new ProductInfoHeaderValue("bassia-server", "1"));
 			request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
 			using var response = await state.Http.SendAsync(request);
@@ -69,9 +77,7 @@ internal static class IdentityEndpoints
 			.Where(email => email.TryGetProperty("verified", out var verified) && verified.GetBoolean())
 			.Select(email => email.GetProperty("email").GetString()!)
 			.ToList();
-		var user = await state.Authenticator.GitHubUserAsync(id, emails);
-		await state.Access.AuditAsync(user.Id, "login", "github", $"GitHub account {id}", ServerApp.RemoteOf(context));
-		return await IssueAsync(state, user.Id);
+		return (await state.Authenticator.GitHubUserAsync(id, emails), id);
 	}
 
 	private static async Task<TokenResponse> RefreshAsync(ServerState state, RefreshRequest request, HttpContext context)

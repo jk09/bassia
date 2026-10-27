@@ -13,7 +13,7 @@ using Microsoft.IdentityModel.Tokens;
 /// <summary>
 /// An identity provider for tests, on a local port: an OpenID Connect issuer (discovery, keys, the authorization code
 /// flow with PKCE - it logs in <see cref="Subject"/> at once - refresh tokens and client credentials) and GitHub (the
-/// device flow, approved at once, and the user API).
+/// device flow and the web flow, approved at once, and the user API).
 /// </summary>
 internal sealed class FakeIdentityProvider : IAsyncDisposable
 {
@@ -145,6 +145,8 @@ internal sealed class FakeIdentityProvider : IAsyncDisposable
 		});
 
 		web.MapPost("/github/login/device/code", () => Results.Json(new { device_code = "device-1", user_code = "ABCD-1234", verification_uri = $"{Url}/github/device", interval = 0, expires_in = 60 }));
+		web.MapGet("/github/login/oauth/authorize", (HttpContext context) =>
+			Results.Redirect($"{context.Request.Query["redirect_uri"]}?code=github-code&state={context.Request.Query["state"]}"));
 		web.MapPost("/github/login/oauth/access_token", () => Results.Json(new { access_token = GitHubToken, token_type = "bearer" }));
 		web.MapGet("/github-api/user", (HttpContext context) => context.Request.Headers.Authorization.ToString() == $"Bearer {GitHubToken}"
 			? Results.Json(new { id = 4242, login = "bob" })

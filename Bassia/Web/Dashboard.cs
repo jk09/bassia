@@ -8,6 +8,7 @@ using Bassia.Integration;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Logging;
 using static Bassia.Web.Html;
 
@@ -16,32 +17,44 @@ using static Bassia.Web.Html;
 /// components and how they relate, tags as units of progress, agentic runs as they happen, and the merge queue with
 /// its triage and the merges that need a human. Pages are rendered on the server, pictures included, and work without
 /// JavaScript; the script animates and refreshes the live parts. Nothing is changed from here: every page shows the
-/// <c>bassia</c> command that does what it describes, for a person or an agent to run.
+/// <c>bassia</c> command that does what it describes, for a person or an agent to run. The Bassia server serves the
+/// same pages to every signed-in user, over the monorepo as that user may see it.
 /// </summary>
 internal sealed partial class Dashboard
 {
-	private readonly string root;
+	/// <summary>The request being served: what <see cref="Current"/> returns and the frame's header show.</summary>
+	private static readonly AsyncLocal<DashboardScope?> Scope = new();
 
-	public Dashboard(Monorepo monorepo) => root = monorepo.Root;
+	private readonly Func<HttpContext, Task<DashboardScope>> open;
+
+	/// <summary>The dashboard of <c>bassia web</c>: the monorepo at <paramref name="monorepo"/>'s root, read anew for every request.</summary>
+	public Dashboard(Monorepo monorepo)
+		: this(_ => Task.FromResult(new DashboardScope(Monorepo.Load(monorepo.Root), monorepo.Root)))
+	{
+	}
+
+	/// <summary>
+	/// A dashboard whose monorepo <paramref name="open"/> gives for each request: the server's opens the monorepo as the
+	/// signed-in user may see it.
+	/// </summary>
+	public Dashboard(Func<HttpContext, Task<DashboardScope>> open) => this.open = open;
 
 	public WebApplication Build(string url)
 	{
-		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = root });
+		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
 		builder.Logging.ClearProviders();
 		builder.WebHost.UseUrls(url);
 		var app = builder.Build();
-		app.Use(GuardAsync);
+		app.Use(LoopbackAsync);
+		app.Use(ServeAsync);
 		Map(app);
 		return app;
 	}
 
 	// ----- request guard -----
 
-	/// <summary>
-	/// Only requests addressed to the loopback host are served (a DNS-rebinding page would send its own host name),
-	/// only reads are accepted, and an expected failure becomes an error page, not a dead server.
-	/// </summary>
-	private async Task GuardAsync(HttpContext context, RequestDelegate next)
+	/// <summary>Only requests addressed to the loopback host are served: a DNS-rebinding page would send its own host name.</summary>
+	private static async Task LoopbackAsync(HttpContext context, RequestDelegate next)
 	{
 		if (context.Request.Host.Host is not ("127.0.0.1" or "localhost" or "[::1]" or "::1"))
 		{
@@ -50,6 +63,15 @@ internal sealed partial class Dashboard
 			return;
 		}
 
+		await next(context);
+	}
+
+	/// <summary>
+	/// Serves a dashboard request: only reads are accepted, the monorepo is opened for it, and an expected failure becomes
+	/// an error page, not a dead server. The server puts this behind its sign-in, for the dashboard's paths only.
+	/// </summary>
+	public async Task ServeAsync(HttpContext context, RequestDelegate next)
+	{
 		if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
 		{
 			context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
@@ -57,11 +79,19 @@ internal sealed partial class Dashboard
 			return;
 		}
 
+		var label = "";
 		try
 		{
+			if (!IsAsset(context.Request.Path))
+			{
+				Scope.Value = await open(context);
+				label = Scope.Value.Label;
+			}
+
 			await next(context);
 		}
-		catch (Exception ex) when (ex is GitException or MonorepoException or AgentException or IntegrationException or IOException or UnauthorizedAccessException)
+		catch (Exception ex) when (ex is GitException or MonorepoException or AgentException or IntegrationException or IOException or UnauthorizedAccessException
+			or Storage.StorageException)
 		{
 			if (context.Response.HasStarted)
 			{
@@ -71,7 +101,7 @@ internal sealed partial class Dashboard
 			context.Response.Clear();
 			context.Response.StatusCode = ex is MonorepoException or IntegrationException or AgentException ? StatusCodes.Status400BadRequest : StatusCodes.Status500InternalServerError;
 			context.Response.ContentType = "text/html; charset=utf-8";
-			await context.Response.WriteAsync(Page(root, "", "Error", Error(ex.Message)));
+			await context.Response.WriteAsync(Page(label, "", "Error", Error(ex.Message), Scope.Value?.Account, Scope.Value?.Events));
 		}
 		catch (Exception ex) when (!context.Response.HasStarted)
 		{
@@ -79,11 +109,25 @@ internal sealed partial class Dashboard
 			context.Response.Clear();
 			context.Response.StatusCode = StatusCodes.Status500InternalServerError;
 			context.Response.ContentType = "text/html; charset=utf-8";
-			await context.Response.WriteAsync(Page(root, "", "Error", Error($"Unexpected error: {ex.GetType().Name}: {ex.Message}")));
+			await context.Response.WriteAsync(Page(label, "", "Error", Error($"Unexpected error: {ex.GetType().Name}: {ex.Message}"), Scope.Value?.Account, Scope.Value?.Events));
+		}
+		finally
+		{
+			Scope.Value = null;
 		}
 	}
 
-	private void Map(WebApplication app)
+	/// <summary>The stylesheet and the script: the same for everyone, served without opening the monorepo.</summary>
+	public static bool IsAsset(PathString path) => path == "/style.css" || path == "/app.js";
+
+	/// <summary>Whether <paramref name="path"/> is one of the dashboard's pages, fragments or assets.</summary>
+	public static bool IsDashboardPath(PathString path) =>
+		path == "/" || Paths.Any(prefix => path.StartsWithSegments(prefix));
+
+	private static readonly string[] Paths =
+		["/style.css", "/app.js", "/graph.svg", "/fragment", "/locks", "/components", "/tags", "/tag", "/runs", "/queue", "/integrations", "/timeline", "/commit", "/config"];
+
+	public void Map(IEndpointRouteBuilder app)
 	{
 		app.MapGet("/style.css", () => Results.Text(Stylesheet, "text/css"));
 		app.MapGet("/app.js", () => Results.Text(Script, "text/javascript"));
@@ -93,6 +137,7 @@ internal sealed partial class Dashboard
 		app.MapGet("/fragment/live", LiveFragmentAsync);
 		app.MapGet("/fragment/run/{id}", RunFragmentAsync);
 		app.MapGet("/fragment/locks", LocksFragmentAsync);
+		app.MapGet("/fragment/queue", QueueFragmentAsync);
 		app.MapGet("/locks", LocksAsync);
 		app.MapGet("/components", ComponentsAsync);
 		app.MapGet("/components/{name}", ComponentAsync);
@@ -110,13 +155,16 @@ internal sealed partial class Dashboard
 		app.MapGet("/config", ConfigPage);
 	}
 
-	/// <summary>The monorepo as it is now: components and configuration change under a running dashboard.</summary>
-	private Monorepo Current() => Monorepo.Load(root);
+	/// <summary>
+	/// The monorepo as it is now, for this request: components and configuration change under a running dashboard, and on
+	/// the server it is the monorepo as the signed-in user may see it.
+	/// </summary>
+	private static Monorepo Current() => (Scope.Value ?? throw new InvalidOperationException("No dashboard request is being served.")).Monorepo;
 
-	private IResult View(string active, string title, string body, int status = StatusCodes.Status200OK) =>
-		Results.Content(Page(root, active, title, body), "text/html; charset=utf-8", Encoding.UTF8, status);
+	private static IResult View(string active, string title, string body, int status = StatusCodes.Status200OK) =>
+		Results.Content(Page(Scope.Value?.Label ?? "", active, title, body, Scope.Value?.Account, Scope.Value?.Events), "text/html; charset=utf-8", Encoding.UTF8, status);
 
-	private IResult NotFound(string what) => View("", "Not found", Error(what), StatusCodes.Status404NotFound);
+	private static IResult NotFound(string what) => View("", "Not found", Error(what), StatusCodes.Status404NotFound);
 
 	private static string ComponentHref(string name) => $"/components/{Url(name)}";
 
@@ -179,7 +227,7 @@ internal sealed partial class Dashboard
 			.Append(Card("integrations", state.Integrations.Count, "/integrations"))
 			.Append("</div>");
 
-		body.Append("<div data-live-src=\"/fragment/live\">").Append(LiveCards(state.Live)).Append("</div>");
+		body.Append("<div data-live-src=\"/fragment/live\" data-live-on=\"run job log\">").Append(LiveCards(state.Live)).Append("</div>");
 
 		// The map on the left; beside it what asks for a decision, then where the monorepo stands.
 		body.Append("<div class=\"split\"><section class=\"fit\"><h2>Components and what they need</h2>")
@@ -602,3 +650,10 @@ internal sealed partial class Dashboard
 		return View("/timeline", $"Commit {Short(full)}", body);
 	}
 }
+
+/// <summary>
+/// What one dashboard request is served from: the monorepo, the label in the header (the monorepo's root, or the
+/// server), the signed-in account's part of the header (HTML, or null), and where live changes are pushed (or null:
+/// the live parts poll).
+/// </summary>
+internal sealed record DashboardScope(Monorepo Monorepo, string Label, string? Account = null, string? Events = null);

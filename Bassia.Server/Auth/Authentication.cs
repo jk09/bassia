@@ -40,12 +40,21 @@ internal sealed class ServerTokens(ServerConfig config)
 	private readonly SymmetricSecurityKey key = new(Encoding.UTF8.GetBytes(config.SigningKey));
 	private readonly JsonWebTokenHandler handler = new();
 
-	public string Issue(string user, TimeSpan lifetime, IReadOnlyList<string>? scope = null)
+	/// <summary>
+	/// A token for <paramref name="user"/>: scoped to components for a worker; with the identity provider's
+	/// <paramref name="groups"/> for a dashboard sign-in, which keeps them for as long as the sign-in lasts.
+	/// </summary>
+	public string Issue(string user, TimeSpan lifetime, IReadOnlyList<string>? scope = null, IReadOnlyList<string>? groups = null)
 	{
 		var claims = new Dictionary<string, object> { ["sub"] = user, ["typ"] = scope is null ? "access" : "worker" };
 		if (scope is not null)
 		{
 			claims["cmp"] = string.Join(" ", scope);
+		}
+
+		if (groups is { Count: > 0 })
+		{
+			claims["grp"] = string.Join(" ", groups);
 		}
 
 		return handler.CreateToken(new SecurityTokenDescriptor
@@ -59,8 +68,8 @@ internal sealed class ServerTokens(ServerConfig config)
 		});
 	}
 
-	/// <summary>The user and scope of a valid token of this server; null when it is not one (forged, expired).</summary>
-	public async Task<(string User, IReadOnlyList<string>? Scope)?> ValidateAsync(string token)
+	/// <summary>The user, scope and groups of a valid token of this server; null when it is not one (forged, expired).</summary>
+	public async Task<(string User, IReadOnlyList<string>? Scope, IReadOnlyList<string> Groups)?> ValidateAsync(string token)
 	{
 		var result = await handler.ValidateTokenAsync(token, new TokenValidationParameters
 		{
@@ -77,7 +86,8 @@ internal sealed class ServerTokens(ServerConfig config)
 		var scope = AuthException.Claim(result.Claims, "typ") as string == "worker"
 			? (AuthException.Claim(result.Claims, "cmp") as string ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries)
 			: null;
-		return (user, scope);
+		var groups = (AuthException.Claim(result.Claims, "grp") as string ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+		return (user, scope, groups);
 	}
 }
 
@@ -97,6 +107,9 @@ internal sealed class OidcValidator
 	}
 
 	public OidcProvider Provider => provider;
+
+	/// <summary>The issuer's discovery document: where the dashboard's sign-in sends the browser and exchanges the code.</summary>
+	public Task<OpenIdConnectConfiguration> DiscoverAsync() => configuration.GetConfigurationAsync(CancellationToken.None);
 
 	public async Task<IDictionary<string, object>?> ValidateAsync(string token)
 	{
@@ -137,6 +150,8 @@ internal sealed class OidcValidator
 internal sealed class Authenticator(ServerConfig config, ServerTokens tokens, AccessStore access, Func<Task<IReadOnlyList<UserDefinition>>> users,
 	IReadOnlyList<OidcValidator> issuers)
 {
+	public IReadOnlyList<OidcValidator> Issuers => issuers;
+
 	public static string? TokenOf(HttpRequest request)
 	{
 		if (!AuthenticationHeaderValue.TryParse(request.Headers.Authorization.FirstOrDefault(), out var header) || header.Parameter is null)
@@ -204,7 +219,7 @@ internal sealed class Authenticator(ServerConfig config, ServerTokens tokens, Ac
 			var user = registered.FirstOrDefault(candidate => candidate.Id == valid.User)
 				?? (config.Admins.Contains(valid.User, StringComparer.Ordinal) ? new UserDefinition(valid.User, valid.User, $"{valid.User}@localhost") : null)
 				?? throw new AuthException($"'{valid.User}' is no longer a registered user.");
-			return await CallerAsync(user, [], valid.Scope, ServerConfig.Issuer);
+			return await CallerAsync(user, valid.Groups, valid.Scope, ServerConfig.Issuer);
 		}
 
 		var validator = issuers.FirstOrDefault(candidate => candidate.Provider.Issuer == issuer) ?? throw new AuthException($"Tokens of '{issuer}' are not accepted here.");

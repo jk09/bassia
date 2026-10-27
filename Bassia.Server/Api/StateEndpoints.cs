@@ -239,7 +239,7 @@ internal static class StateEndpoints
 	/// The components a job works on: those it registered with, else those of the run or integration record of the same
 	/// id - a run's job registers before it knows them, so until its record exists it is visible to everyone allowed in.
 	/// </summary>
-	private static async Task<IReadOnlyList<string>> ComponentsOfJobAsync(ServerState state, string id, IReadOnlyList<string> registered)
+	internal static async Task<IReadOnlyList<string>> ComponentsOfJobAsync(ServerState state, string id, IReadOnlyList<string> registered)
 	{
 		if (registered.Count > 0)
 		{

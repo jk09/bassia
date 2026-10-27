@@ -50,6 +50,8 @@ internal sealed class DbRecordStore(ServerDatabase database) : IRunRecordStore
 			await ServerDatabase.ExecuteAsync(connection, transaction,
 				"INSERT INTO records (ref_base, lineage, file_name, content, message, created) VALUES (@ref, @lineage, @file, @content, @message, @created);",
 				("@ref", refBase), ("@lineage", lineage), ("@file", fileName), ("@content", content), ("@message", message), ("@created", ServerDatabase.Now()));
+			await ChangeFeed.AddAsync(connection, transaction, refBase.StartsWith(Bassia.Integration.IntegrationRecord.RefPrefix, StringComparison.Ordinal) ? "integration" : "run",
+				refBase, ServerState.ComponentsOfRecord(content));
 			return $"{refBase}/{lineage}";
 		});
 
@@ -102,13 +104,36 @@ internal sealed class DbLockStore(ServerDatabase database, TimeSpan ttl) : ILock
 			if (await ServerDatabase.ExecuteAsync(connection, transaction, "UPDATE lock_version SET version = version + 1 WHERE id = 1 AND version = @expected;",
 				("@expected", expected)) != 1)
 			{
+				ServerMetrics.LockDecisions.Add(1, ServerMetrics.Tag("result", "conflict"));
 				return false;
 			}
 
+			// The waits and conflicts a decision adds, against what the entries had before it.
+			var (waits, conflicts) = (0, 0);
+			foreach (var entry in saved)
+			{
+				var before = (await ServerDatabase.QueryAsync(connection, transaction, "SELECT entry FROM lock_entries WHERE run_id = @run;",
+					reader => LockEntry.FromToml(reader.GetString(0)), ("@run", entry.RunId))).FirstOrDefault();
+				waits += entry.Waits.Count(wait => before?.Waits.Any(old => old.Key == wait.Key) != true);
+				conflicts += Math.Max(0, entry.Conflicts.Count - (before?.Conflicts.Count ?? 0));
+			}
+
+			var components = saved.SelectMany(Bassia.Storage.Remote.Api.ComponentsOf).ToList();
 			foreach (var runId in deleted)
 			{
+				foreach (var entry in await ServerDatabase.QueryAsync(connection, transaction, "SELECT entry FROM lock_entries WHERE run_id = @run;",
+					reader => LockEntry.FromToml(reader.GetString(0)), ("@run", runId)))
+				{
+					components.AddRange(Bassia.Storage.Remote.Api.ComponentsOf(entry));
+				}
+
 				await ServerDatabase.ExecuteAsync(connection, transaction, "DELETE FROM lock_entries WHERE run_id = @run;", ("@run", runId));
 			}
+
+			await ChangeFeed.AddAsync(connection, transaction, "lock", "", components);
+			ServerMetrics.LockDecisions.Add(1, ServerMetrics.Tag("result", "committed"));
+			ServerMetrics.LockWaits.Add(waits);
+			ServerMetrics.LockConflicts.Add(conflicts);
 
 			foreach (var entry in saved)
 			{
@@ -149,15 +174,28 @@ internal sealed class DbJobStore(ServerDatabase database)
 	{
 		var info = new JobInfo(registration.Id, registration.Kind, registration.Pid, registration.ProcessStart, RunMetadata.Timestamp(), registration.Log,
 			registration.Detached, registration.Hosted, null, registration.Host);
-		return database.ExecuteAsync(
-			"""
-			INSERT INTO jobs (id, kind, owner, info, components, heartbeat, stop, finished, log)
-			VALUES (@id, @kind, @owner, @info, @components, @now, 0, NULL, '')
-			ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, owner = excluded.owner, info = excluded.info, components = excluded.components,
-				heartbeat = excluded.heartbeat, stop = 0, finished = NULL, log = '';
-			""",
-			("@id", registration.Id), ("@kind", registration.Kind), ("@owner", owner), ("@info", JsonSerializer.Serialize(info, Api.Json)),
-			("@components", string.Join(",", registration.Components ?? [])), ("@now", ServerDatabase.Now()));
+		return database.TransactAsync(async (connection, transaction) =>
+		{
+			await ServerDatabase.ExecuteAsync(connection, transaction,
+				"""
+				INSERT INTO jobs (id, kind, owner, info, components, heartbeat, stop, finished, log)
+				VALUES (@id, @kind, @owner, @info, @components, @now, 0, NULL, '')
+				ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, owner = excluded.owner, info = excluded.info, components = excluded.components,
+					heartbeat = excluded.heartbeat, stop = 0, finished = NULL, log = '';
+				""",
+				("@id", registration.Id), ("@kind", registration.Kind), ("@owner", owner), ("@info", JsonSerializer.Serialize(info, Api.Json)),
+				("@components", string.Join(",", registration.Components ?? [])), ("@now", ServerDatabase.Now()));
+			await ChangeFeed.AddAsync(connection, transaction, "job", registration.Id, registration.Components ?? []);
+			return true;
+		});
+	}
+
+	/// <summary>Adds the change of a job, with the components it registered with, in the transaction of the write.</summary>
+	private static async Task ChangedAsync(System.Data.Common.DbConnection connection, System.Data.Common.DbTransaction transaction, string kind, string id)
+	{
+		var components = (await ServerDatabase.QueryAsync(connection, transaction, "SELECT components FROM jobs WHERE id = @id;", reader => reader.GetString(0), ("@id", id)))
+			.FirstOrDefault() ?? "";
+		await ChangeFeed.AddAsync(connection, transaction, kind, id, components.Split(',', StringSplitOptions.RemoveEmptyEntries));
 	}
 
 	/// <summary>Renews the job's heartbeat; returns whether a stop was requested.</summary>
@@ -170,14 +208,14 @@ internal sealed class DbJobStore(ServerDatabase database)
 	/// <summary>Ends the registration: a detached job's stays, finished, so its output can be read; another's goes.</summary>
 	public async Task FinishAsync(string id)
 	{
-		if ((await FindAsync(id))?.Job is { Detached: true })
+		var detached = (await FindAsync(id))?.Job is { Detached: true };
+		await database.TransactAsync(async (connection, transaction) =>
 		{
-			await database.ExecuteAsync("UPDATE jobs SET finished = @now WHERE id = @id;", ("@now", RunMetadata.Timestamp()), ("@id", id));
-		}
-		else
-		{
-			await database.ExecuteAsync("DELETE FROM jobs WHERE id = @id;", ("@id", id));
-		}
+			await ChangedAsync(connection, transaction, "job", id);
+			await ServerDatabase.ExecuteAsync(connection, transaction,
+				detached ? "UPDATE jobs SET finished = @now WHERE id = @id;" : "DELETE FROM jobs WHERE id = @id;", ("@now", RunMetadata.Timestamp()), ("@id", id));
+			return true;
+		});
 	}
 
 	/// <summary>The job and the components it works on; a job whose heartbeat stopped reads as finished when it last beat.</summary>
@@ -198,7 +236,12 @@ internal sealed class DbJobStore(ServerDatabase database)
 	}
 
 	public Task AppendLogAsync(string id, string text) =>
-		database.ExecuteAsync("UPDATE jobs SET log = log || @text WHERE id = @id;", ("@text", text), ("@id", id));
+		database.TransactAsync(async (connection, transaction) =>
+		{
+			await ServerDatabase.ExecuteAsync(connection, transaction, "UPDATE jobs SET log = log || @text WHERE id = @id;", ("@text", text), ("@id", id));
+			await ChangedAsync(connection, transaction, "log", id);
+			return true;
+		});
 
 	public async Task<JobLog?> ReadLogAsync(string id, long offset)
 	{

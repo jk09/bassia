@@ -13,7 +13,7 @@ eu-central-1 (Frankfurt); another region is another configuration file.
 | --- | --- |
 | `<env>-network` | A VPC across three zones: public subnets (load balancer, NAT gateways), private compute subnets (the server, its tasks, workers), isolated data subnets (the database); gateway endpoints for S3 and DynamoDB, so history traffic never crosses a NAT gateway; flow logs of rejected traffic. |
 | `<env>-data` | One KMS key (rotated); the histories' bucket (versioned, KMS, private, TLS only, Intelligent-Tiering after 30 days, old versions expired after 35 days); the DynamoDB table (on demand, point-in-time recovery, KMS); Aurora PostgreSQL Serverless v2 (writer and reader in two zones, encrypted, TLS only, automated backups, point-in-time restore); the server's signing key and the database credentials in Secrets Manager; the image repositories (ECR, scanned, tags immutable in production); in production, a daily AWS Backup plan over the database, the table and the bucket (35 days). |
-| `<env>-server` | The ECS cluster; the server service (1 vCPU, 4 GiB, 100 GiB ephemeral storage for the git cache per task by default), rolling deployments that never drop below the desired count and roll back when new tasks do not get healthy; autoscaling on CPU (60%) and requests per task; the load balancer (HTTPS with an ACM certificate validated in Route 53, HTTP redirected; 15 minute idle timeout for long clones) with access logs; the WAF (a rate limit per address, AWS's IP reputation, known bad inputs and common rule sets, the body rules only counted since pushes carry binary packs); the DNS record; the garbage collection task on a schedule. |
+| `<env>-server` | The ECS cluster; the server service (1 vCPU, 4 GiB, 100 GiB ephemeral storage for the git cache per task by default), rolling deployments that never drop below the desired count and roll back when new tasks do not get healthy; autoscaling on CPU (60%) and requests per task; the load balancer (HTTPS with an ACM certificate validated in Route 53, HTTP redirected; 15 minute idle timeout for long clones) with access logs; the WAF (a rate limit per address, AWS's IP reputation, known bad inputs and common rule sets, the body rules only counted since pushes carry binary packs); the DNS record; the garbage collection task on a schedule; an OpenTelemetry collector (ADOT) beside the server in each task, writing the server's metrics to CloudWatch (namespace `Bassia`, as embedded metrics in `/<env>/metrics`). |
 | `<env>-workers` | The agent worker task (the `bassia` CLI, git and an agent; Fargate Spot by default) with ephemeral storage for working copies, and what `scripts/run-agent.sh` needs to start one. |
 | `<env>-observability` | A dashboard; alarms to an SNS topic with an email subscription; the monthly AWS Budget with alerts at 80% (actual) and 100% (forecast). |
 
@@ -46,7 +46,24 @@ machines and agent workers. The garbage collection of the histories is a schedul
 `deploy/aws/config/<environment>.json` describes an environment; `production.json` and `staging.json` are examples.
 Set at least the DNS name and hosted zone (`domainName`, `hostedZoneName`, `hostedZoneId`, or `certificateArn`), the
 admins (`admins`: user ids that hold every permission, even before they are registered), the identity providers
-(`oidc`, `githubClientId`), where alarms go (`alarmEmail`) and the budget (`monthlyBudgetUsd`). Sizes are in `server`,
+(`oidc`, `githubClientId`), where alarms go (`alarmEmail`) and the budget (`monthlyBudgetUsd`).
+
+The dashboard's sign-in in a browser (`https://<domainName>/login`) works with an OIDC provider's public client
+(PKCE) as it is. A confidential client, and GitHub's web flow, need a client secret. Keep the secrets in a Secrets
+Manager secret made outside the stacks, a JSON object with `github` for the GitHub OAuth app's secret and the name of
+an OIDC provider for that provider's client secret. Then name it and its keys in `webSignIn`:
+
+```sh
+aws secretsmanager create-secret --name bassia/web-sign-in --secret-string '{"github": "...", "sso": "..."}'
+```
+
+```json
+"webSignIn": { "secretName": "bassia/web-sign-in", "github": true, "oidc": ["sso"] }
+```
+
+Register `https://<domainName>/login/<name>/callback` (`github` for GitHub) as each client's redirect URL. The alarms
+on the server's own metrics take their thresholds from `metricAlarms` (`lockConflictsPer5Minutes`, default 50;
+`mergeQueueDepth`, default 20). Sizes are in `server`,
 `database` and `workers`. `retainData: true` (production) keeps the data, the image repositories and the logs when a
 stack is deleted, and turns on deletion protection; it also requires a domain, since production is served over HTTPS.
 `npm test` in `deploy/aws` checks the synthesized templates; `npx cdk synth -c env=<environment>` shows them.
@@ -120,11 +137,26 @@ travels as a task override, readable by whoever may describe the cluster's tasks
 ## Observe
 
 The dashboard (CloudWatch, named after the environment) shows requests, errors, response time, tasks, CPU and memory,
-database capacity and connections, table throttling and the bucket's size. Alarms go to the SNS topic
-`<env>-alarms`: server errors, latency (p99 above 10 s), unhealthy tasks, scaling at its maximum, server CPU, database
-capacity and CPU, table throttling and errors, and storage growth. Logs are in `/<env>/server` (one JSON line per
-request; the migrate and gc streams beside them) and `/<env>/workers`. Traces and the server's own metrics (queue
-depths, lock decisions) come with `bassia-d3c6cfe4`.
+database capacity and connections, table throttling and the bucket's size. It also shows the server's own metrics
+(see "Metrics" in [reference.md](reference.md)): response time, the merge queue (landings waiting and landing, and
+their wait), lock decisions (committed, decided again, waits, conflicts), git traffic (bytes pushed and fetched,
+fetches and pushes), database and storage latency, and the browsers following live changes.
+
+The server sends those metrics over OTLP every minute to the collector in its task (ADOT,
+`ServerStack.collectorImage`). The collector writes them as embedded metrics to `/<env>/metrics`, with the dimensions
+the dashboard and the alarms use (`ServerStack.metricDimensions`); the other labels stay in the log, for Logs
+Insights. The collector is not essential: without it, the server serves on without metrics.
+
+Alarms go to the SNS topic `<env>-alarms`:
+- the server: errors, latency (p99 above 10 s), unhealthy tasks, scaling at its maximum, CPU;
+- the database: capacity and CPU;
+- the table: throttling and errors;
+- storage growth;
+- lock conflicts (runs keep colliding on the same paths);
+- a long merge queue.
+
+Logs are in `/<env>/server` (one JSON line per request; the migrate, gc and otel-collector streams beside them) and
+`/<env>/workers`.
 
 ## Restore
 
@@ -179,9 +211,9 @@ Approximate list prices in eu-central-1, on demand, per month; check them with t
 | DynamoDB on demand (reads, transactional writes), point-in-time recovery | ~$20 |
 | S3: 200 GB of packs (1,000 components of ~200 MB), old versions, requests | ~$10 |
 | AWS Backup (database, table, bucket; 35 days) | ~$15 |
-| CloudWatch (logs ~30 GB, Container Insights, alarms, dashboard), KMS, Secrets Manager, ECR, Route 53 | ~$55 |
+| CloudWatch (logs ~30 GB, Container Insights, alarms, dashboard, ~70 custom metrics of the server at $0.30 each), KMS, Secrets Manager, ECR, Route 53 | ~$75 |
 | Data out to users outside AWS (~300 GB of clones and fetches) | ~$25 |
-| **Server side, for ~1,000 users** | **~$650** |
+| **Server side, for ~1,000 users** | **~$670** |
 
 Agent workers are priced by the hour they run: a worker of 2 vCPU and 8 GiB costs ~$0.13 an hour on demand and ~$0.04
 on Fargate Spot. The $1,500 budget leaves ~$850 for workers: ~21,000 agent-hours a month on Spot, e.g. 500 concurrent

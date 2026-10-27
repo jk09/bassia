@@ -30,7 +30,12 @@ internal static class Html
 
 	public static string Url(string text) => Uri.EscapeDataString(text);
 
-	public static string Page(string root, string active, string title, string body) => $$"""
+	/// <summary>
+	/// A whole page: <paramref name="label"/> names the monorepo in the header, <paramref name="account"/> (HTML) is the
+	/// signed-in user's part of it on the server, and <paramref name="events"/> is where the server pushes changes, which
+	/// the script follows instead of polling.
+	/// </summary>
+	public static string Page(string label, string active, string title, string body, string? account = null, string? events = null) => $$"""
 		<!DOCTYPE html>
 		<html lang="en">
 		<head>
@@ -40,8 +45,8 @@ internal static class Html
 		<link rel="stylesheet" href="/style.css">
 		<script src="/app.js" defer></script>
 		</head>
-		<body>
-		<header><span class="logo">Bassia</span> <span class="root">{{E(root)}}</span><span class="ro">read-only · change things with the bassia command line</span></header>
+		<body{{(events is null ? "" : $" data-events=\"{E(events)}\"")}}>
+		<header><span class="logo">Bassia</span> <span class="root">{{E(label)}}</span><span class="ro">read-only · change things with the bassia command line</span>{{account ?? ""}}</header>
 		<nav>{{string.Concat(Menu.Select(item => $"<a href=\"{item.Path}\"{(item.Path == active ? " class=\"active\"" : "")}>{E(item.Label)}</a>"))}}</nav>
 		<main>
 		<h1>{{E(title)}}</h1>
@@ -121,6 +126,7 @@ internal static class Html
 		header { background:var(--head); color:#fff; padding:10px 18px; display:flex; align-items:baseline; gap:12px; }
 		header .logo { font-weight:700; font-size:18px; letter-spacing:.5px; }
 		header .root { opacity:.75; font-family:ui-monospace, monospace; font-size:12px; }
+		header .who { font-size:12px; } header .who a { color:inherit; margin-left:8px; }
 		header .ro { margin-left:auto; font-size:12px; opacity:.75; }
 		nav { background:#e8ebf2; border-bottom:1px solid var(--line); padding:0 12px; display:flex; flex-wrap:wrap; }
 		nav a { padding:8px 12px; color:var(--fg); text-decoration:none; }
@@ -330,15 +336,39 @@ internal static class Html
 	public const string Script = """
 		// Progressive enhancement only: every page works without this script.
 		(function () {
-		  // Parts of a page that follow live work reload themselves until the server says nothing is live any more.
+		  // Parts of a page that follow live work reload themselves: on the server when it pushes a change they show
+		  // (data-live-on lists the kinds; none means every kind), at most once a second, and every 30 seconds in case a
+		  // push was lost; on its own, every 2 seconds until the server says nothing is live any more.
+		  var events = document.body.getAttribute('data-events');
+		  var lives = [];
 		  document.querySelectorAll('[data-live-src]').forEach(function (el) {
-		    var timer = setInterval(function () {
-		      fetch(el.getAttribute('data-live-src'), { headers: { 'X-Fragment': '1' } }).then(function (r) {
-		        var live = r.headers.get('X-Live') === '1';
-		        return r.text().then(function (html) { el.innerHTML = html; tick(); if (!live) clearInterval(timer); });
-		      }).catch(function () { clearInterval(timer); });
-		    }, 2000);
+		    var live = { el: el, kinds: (el.getAttribute('data-live-on') || '').split(' ').filter(Boolean), busy: false, again: false };
+		    live.load = function () {
+		      if (live.busy) { live.again = true; return Promise.resolve(true); }
+		      live.busy = true;
+		      return fetch(el.getAttribute('data-live-src'), { headers: { 'X-Fragment': '1' } }).then(function (r) {
+		        var more = r.headers.get('X-Live') === '1';
+		        return r.text().then(function (html) { el.innerHTML = html; tick(); return more; });
+		      }).finally(function () {
+		        setTimeout(function () { live.busy = false; if (live.again) { live.again = false; live.load(); } }, 1000);
+		      });
+		    };
+		    lives.push(live);
 		  });
+		  if (events && window.EventSource && lives.length > 0) {
+		    var source = new EventSource(events);
+		    source.addEventListener('change', function (e) {
+		      var kind = JSON.parse(e.data).kind;
+		      lives.forEach(function (live) { if (live.kinds.length === 0 || live.kinds.indexOf(kind) >= 0) live.load(); });
+		    });
+		    setInterval(function () { lives.forEach(function (live) { live.load(); }); }, 30000);
+		  } else {
+		    lives.forEach(function (live) {
+		      var timer = setInterval(function () {
+		        live.load().then(function (more) { if (!more) clearInterval(timer); }).catch(function () { clearInterval(timer); });
+		      }, 2000);
+		    });
+		  }
 
 		  // A filter form reloads the page as soon as a choice changes.
 		  document.querySelectorAll('form.autosubmit input[type=checkbox]').forEach(function (box) {

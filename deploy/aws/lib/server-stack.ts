@@ -10,6 +10,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { Construct } from 'constructs';
 import { EnvironmentConfig } from './config';
@@ -33,7 +34,50 @@ export class ServerStack extends cdk.Stack {
   public readonly loadBalancer: elbv2.ApplicationLoadBalancer;
   public readonly targetGroup: elbv2.ApplicationTargetGroup;
   public readonly url: string;
+  /** The AWS Distro for OpenTelemetry collector the server's tasks run beside the server. */
+  public static readonly collectorImage = 'public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0';
+
+  /** The metrics whose dimensions are kept, and those dimensions (every other label stays in the log only). */
+  public static readonly metricDimensions: Record<string, string[][]> = {
+    'bassia.server.request.duration': [[], ['route']],
+    'bassia.merge_queue.depth': [[], ['state']],
+    'bassia.merge_queue.wait': [[]],
+    'bassia.lock.decisions': [['result']],
+    'bassia.lock.waits': [[]],
+    'bassia.lock.conflicts': [[]],
+    'bassia.git.requests': [['service']],
+    'bassia.git.bytes': [['direction']],
+    'bassia.db.duration': [['operation']],
+    'bassia.storage.duration': [['store']],
+    'bassia.dashboard.streams': [[]],
+  };
+
+  /** The collector's configuration: OTLP over HTTP in, batched, to CloudWatch as embedded metrics. */
+  public static collectorConfig(namespace: string, logGroupName: string, region: string): string {
+    return JSON.stringify({
+      receivers: { otlp: { protocols: { http: { endpoint: '127.0.0.1:4318' } } } },
+      processors: { batch: { timeout: '60s' } },
+      exporters: {
+        awsemf: {
+          namespace,
+          log_group_name: logGroupName,
+          log_stream_name: '{TaskId}',
+          region,
+          dimension_rollup_option: 'NoDimensionRollup',
+          metric_declarations: Object.entries(ServerStack.metricDimensions).map(([name, dimensions]) => ({
+            dimensions,
+            metric_name_selectors: [`^${name.replace(/\./g, '\\.')}$`],
+          })),
+        },
+      },
+      service: { pipelines: { metrics: { receivers: ['otlp'], processors: ['batch'], exporters: ['awsemf'] } } },
+    });
+  }
+
   public readonly logGroup: logs.LogGroup;
+  /** Where the collector writes the server's metrics (embedded metric format), namespace {@link metricsNamespace}. */
+  public readonly metricsLogGroup: logs.LogGroup;
+  public readonly metricsNamespace: string;
 
   constructor(scope: Construct, id: string, props: ServerStackProps) {
     super(scope, id, props);
@@ -49,6 +93,14 @@ export class ServerStack extends cdk.Stack {
 
     this.logGroup = new logs.LogGroup(this, 'Logs', {
       logGroupName: `/${config.envName}/server`,
+      retention: config.retainData ? logs.RetentionDays.THREE_MONTHS : logs.RetentionDays.ONE_WEEK,
+      removalPolicy,
+    });
+
+    // The server's own metrics (Bassia.Server/ServerMetrics.cs), from the collector beside it.
+    this.metricsNamespace = 'Bassia';
+    this.metricsLogGroup = new logs.LogGroup(this, 'MetricsLogs', {
+      logGroupName: `/${config.envName}/metrics`,
       retention: config.retainData ? logs.RetentionDays.THREE_MONTHS : logs.RetentionDays.ONE_WEEK,
       removalPolicy,
     });
@@ -172,6 +224,11 @@ export class ServerStack extends cdk.Stack {
       ...(config.organization ? { BASSIA_ORGANIZATION: config.organization } : {}),
       ...(config.oidc.length > 0 ? { BASSIA_OIDC: JSON.stringify(config.oidc) } : {}),
       ...(config.githubClientId ? { BASSIA_GITHUB_CLIENT_ID: config.githubClientId } : {}),
+      // The metrics go over OTLP to the collector in the same task.
+      OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:4318',
+      OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
+      OTEL_METRIC_EXPORT_INTERVAL: '60000',
+      OTEL_SERVICE_NAME: `${config.envName}-server`,
     };
     const databaseSecret = data.database.secret!;
     const secrets: Record<string, ecs.Secret> = {
@@ -179,6 +236,16 @@ export class ServerStack extends cdk.Stack {
       BASSIA_DB_PASSWORD: ecs.Secret.fromSecretsManager(databaseSecret, 'password'),
       BASSIA_SERVER_SIGNING_KEY: ecs.Secret.fromSecretsManager(data.signingKey),
     };
+    if (config.webSignIn) {
+      const clientSecrets = secretsmanager.Secret.fromSecretNameV2(this, 'WebSignInSecrets', config.webSignIn.secretName);
+      if (config.webSignIn.github) {
+        secrets.BASSIA_GITHUB_CLIENT_SECRET = ecs.Secret.fromSecretsManager(clientSecrets, 'github');
+      }
+
+      for (const name of config.webSignIn.oidc) {
+        secrets[`BASSIA_OIDC_${name.toUpperCase()}_CLIENT_SECRET`] = ecs.Secret.fromSecretsManager(clientSecrets, name);
+      }
+    }
 
     // What the server and its tasks may do with the histories, and nothing else.
     const taskRole = (name: string) => {
@@ -218,6 +285,21 @@ export class ServerStack extends cdk.Stack {
       stopTimeout: cdk.Duration.seconds(60),
     });
     server.addContainerDependencies({ container: migrate, condition: ecs.ContainerDependencyCondition.SUCCESS });
+
+    // The OpenTelemetry collector: OTLP from the server to CloudWatch, as embedded metrics with the dimensions graphed
+    // and alarmed on. Not essential: without it the server serves on, without metrics.
+    task.addContainer('otel-collector', {
+      image: ecs.ContainerImage.fromRegistry(ServerStack.collectorImage),
+      essential: false,
+      environment: { AOT_CONFIG_CONTENT: ServerStack.collectorConfig(this.metricsNamespace, `/${config.envName}/metrics`, config.region) },
+      logging: ecs.LogDrivers.awsLogs({ logGroup: this.logGroup, streamPrefix: 'otel-collector' }),
+      memoryReservationMiB: 128,
+    });
+    this.metricsLogGroup.grantWrite(task.taskRole);
+    task.taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: ['logs:DescribeLogStreams', 'logs:DescribeLogGroups'],
+      resources: [this.metricsLogGroup.logGroupArn],
+    }));
 
     this.service = new ecs.FargateService(this, 'Service', {
       serviceName: `${config.envName}-server`,
