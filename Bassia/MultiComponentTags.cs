@@ -1,6 +1,5 @@
 namespace Bassia;
 
-using Bassia.Git;
 using Bassia.Integration;
 using Bassia.Unwind;
 
@@ -27,37 +26,23 @@ internal sealed record MultiComponentTag(string Name, IReadOnlyList<ComponentTag
 		: "other";
 
 	/// <summary>
-	/// Every tag of every component repository, grouped by name and sorted by it. The repositories are the only source:
+	/// Every tag of every component's store, grouped by name and sorted by it. The stores are the only source:
 	/// nothing else records which components a tag spans, so nothing can drift from them.
 	/// </summary>
 	public static async Task<IReadOnlyList<MultiComponentTag>> ReadAllAsync(Monorepo monorepo)
 	{
-		const string format = "%(refname:strip=2)%09%(objecttype)%09%(objectname)%09%(*objectname)%09%(creatordate:iso-strict)%09%(contents:subject)";
+		var storage = monorepo.Backend.Components;
 		var byName = new SortedDictionary<string, List<ComponentTag>>(StringComparer.Ordinal);
-		foreach (var component in monorepo.Components)
+		foreach (var component in monorepo.Components.Where(component => storage.Exists(component.Name)))
 		{
-			var sourceDir = monorepo.SourceRepoDir(component.Name);
-			if (!Directory.Exists(sourceDir))
+			foreach (var tag in await storage.Open(component.Name).ListTagsAsync())
 			{
-				continue;
-			}
-
-			var output = await GitClient.In(sourceDir).RunOrThrowAsync(["for-each-ref", $"--format={format}", "refs/tags"]);
-			foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-			{
-				var fields = line.TrimEnd('\r').Split('\t');
-				if (fields.Length < 6)
+				if (!byName.TryGetValue(tag.Name, out var list))
 				{
-					continue;
+					byName[tag.Name] = list = [];
 				}
 
-				var annotated = fields[1] == "tag";
-				if (!byName.TryGetValue(fields[0], out var list))
-				{
-					byName[fields[0]] = list = [];
-				}
-
-				list.Add(new ComponentTag(component.Name, annotated ? fields[3] : fields[2], annotated, fields[4], fields[5]));
+				list.Add(new ComponentTag(component.Name, tag.Commit, tag.Annotated, tag.Date, tag.Subject));
 			}
 		}
 

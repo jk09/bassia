@@ -17,7 +17,7 @@ internal static class ComponentCommands
 		var runs = await monorepo.RunRecords().ListLatestAsync();
 		var statuses = await ComponentStatus.ReadAllAsync(monorepo, runs);
 		var graph = new ComponentGraph(monorepo.Components);
-		var live = LiveRunsPerComponent(monorepo, runs);
+		var live = await LiveRunsPerComponentAsync(monorepo, runs);
 		var violations = monorepo.Registry.Violations();
 
 		var entries = statuses.Select(status => new Dictionary<string, object?>
@@ -392,7 +392,7 @@ internal static class ComponentCommands
 			case "board":
 				var runs = await monorepo.RunRecords().ListLatestAsync();
 				var statuses = (await ComponentStatus.ReadAllAsync(monorepo, runs)).Where(status => components.Contains(status.Definition)).ToList();
-				rendered = new ComponentBoard(statuses, graph, invocation.Int("width", 100, 30, 1000)).RenderAscii(LiveRunsPerComponent(monorepo, runs));
+				rendered = new ComponentBoard(statuses, graph, invocation.Int("width", 100, 30, 1000)).RenderAscii(await LiveRunsPerComponentAsync(monorepo, runs));
 				break;
 			case "tree":
 				rendered = graph.RenderText(ascii: true);
@@ -463,11 +463,12 @@ internal static class ComponentCommands
 	}
 
 	/// <summary>How many live runs work on each component: recorded runs still <c>started</c> whose process is alive.</summary>
-	internal static IReadOnlyDictionary<string, int> LiveRunsPerComponent(Monorepo monorepo, IReadOnlyList<RunMetadata> runs)
+	internal static async Task<IReadOnlyDictionary<string, int>> LiveRunsPerComponentAsync(Monorepo monorepo, IReadOnlyList<RunMetadata> runs)
 	{
-		var jobs = new JobRegistry(monorepo);
+		var jobs = monorepo.Jobs;
+		var registered = (await jobs.ListAsync(RunCommands.JobKind)).ToDictionary(job => job.Id, StringComparer.Ordinal);
 		var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-		foreach (var run in runs.Where(run => run.Status == "started" && JobRegistry.IsAlive(jobs.Find(run.RunId))))
+		foreach (var run in runs.Where(run => run.Status == "started" && jobs.IsAlive(registered.GetValueOrDefault(run.RunId))))
 		{
 			foreach (var component in run.Components)
 			{

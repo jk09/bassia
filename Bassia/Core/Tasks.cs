@@ -221,7 +221,7 @@ internal sealed record TaskResult(string Component, string Task, string Command,
 /// The cache a task run uses: the cache, the graph (for each task's closure) and each component's content fingerprint
 /// - its commit for a checkout made from one, a hash of its files for a working copy that may have changed.
 /// </summary>
-internal sealed record TaskCaching(TaskCache Cache, ComponentRegistry Registry, IReadOnlyDictionary<string, string> Fingerprints);
+internal sealed record TaskCaching(Storage.ITaskCache Cache, ComponentRegistry Registry, IReadOnlyDictionary<string, string> Fingerprints);
 
 /// <summary>Runs planned tasks in a materialized folder, one after another, until one fails.</summary>
 internal static class TaskRunner
@@ -263,7 +263,7 @@ internal static class TaskRunner
 			var log = Path.Combine(logFolder, $"{task.Component}-{task.Task.Name}.log");
 			var componentFolder = Path.Combine(folder, task.Component);
 			var key = caching is not null && task.Task.Cache ? TaskCache.Key(caching.Registry, task, caching.Fingerprints) : null;
-			var result = key is null ? null : caching!.Cache.TryRestore(key, task, componentFolder, log);
+			var result = key is null ? null : await caching!.Cache.TryRestoreAsync(key, task, componentFolder, log);
 			if (result is null)
 			{
 				var env = new Dictionary<string, string>(environment) { ["BASSIA_TASK"] = task.Task.Name, ["BASSIA_COMPONENT"] = task.Component };
@@ -273,7 +273,7 @@ internal static class TaskRunner
 				if (key is not null)
 				{
 					var nested = caching!.Registry.Find(task.Component)?.References.Select(reference => reference.Path).ToList() ?? [];
-					caching.Cache.Store(key, task, result, componentFolder, nested);
+					await caching.Cache.StoreAsync(key, task, result, componentFolder, nested);
 				}
 			}
 

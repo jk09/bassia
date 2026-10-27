@@ -1,33 +1,33 @@
 namespace Bassia;
 
+using Bassia.Storage;
+
 using System.Diagnostics;
 using System.Globalization;
 using Tomlyn;
 using Tomlyn.Model;
 
 /// <summary>
-/// A run or integration a <c>bassia</c> process is executing right now, as registered in the job folder. The record
-/// is what lets another <c>bassia</c> process - usually another agent - see that the work is live, read its output
-/// and stop it: the run records in <c>.agentic-runs</c> say what happened, a job says who is doing it.
-/// <see cref="Hosted"/> jobs run inside <c>bassia web</c>, whose process must never be killed to stop one of them; <see cref="Detached"/> ones in a background process of their own, with a log.
+/// The jobs of this machine (<see cref="Storage.IJobScheduler"/>): the job folder <c>&lt;workspace&gt;/.jobs</c>, per
+/// job a <c>&lt;id&gt;.toml</c> record, the <c>&lt;id&gt;.log</c> a detached job writes its output to, the
+/// <c>&lt;id&gt;.result.toml</c> it writes its result to, and the <c>&lt;id&gt;.stop</c> file another process creates to
+/// ask it to stop. A job is alive while its process is; detached jobs are background bassia processes. It is local,
+/// disposable state, which is why it sits in the workspace and not in the durable <c>.agentic-runs</c> record.
 /// </summary>
-internal sealed record JobInfo(string Id, string Kind, int Pid, string ProcessStart, string Started, string? Log, bool Detached, bool Hosted, string? Finished);
-
-/// <summary>
-/// The job folder <c>&lt;workspace&gt;/.jobs</c>: per job a <c>&lt;id&gt;.toml</c> record, the <c>&lt;id&gt;.log</c> a
-/// detached job writes its output to, the <c>&lt;id&gt;.result.toml</c> it writes its result to, and the
-/// <c>&lt;id&gt;.stop</c> file another process creates to ask it to stop. It is local, disposable state, which is
-/// why it sits in the workspace and not in the durable <c>.agentic-runs</c> record.
-/// </summary>
-internal sealed class JobRegistry(Monorepo monorepo)
+internal sealed class LocalJobScheduler(string workspaceDir) : Storage.IJobScheduler
 {
 	public const string FolderName = ".jobs";
 
-	public string Dir { get; } = Path.Combine(monorepo.WorkspaceDir, FolderName);
+	/// <summary>How long a detached job may take to register before it counts as failed to start.</summary>
+	private static readonly TimeSpan RegistrationTimeout = TimeSpan.FromSeconds(30);
+
+	public string Dir { get; } = Path.Combine(workspaceDir, FolderName);
+
+	public string Location => Dir;
 
 	public string LogPath(string id) => Path.Combine(Dir, id + ".log");
 
-	public string ResultPath(string id) => Path.Combine(Dir, id + ".result.toml");
+	public string ResultLocation(string id) => Path.Combine(Dir, id + ".result.toml");
 
 	private string RecordPath(string id) => Path.Combine(Dir, id + ".toml");
 
@@ -38,16 +38,18 @@ internal sealed class JobRegistry(Monorepo monorepo)
 	/// stop is requested and, when disposed, removes the registration - or, for a detached job, marks it finished
 	/// and keeps it, so its log can still be read.
 	/// </summary>
-	public JobHandle Attach(string id, string kind, string? log = null, bool detached = false, bool hosted = false)
+	public Storage.IJobHandle Attach(string id, string kind, string? log = null, bool detached = false, bool hosted = false)
 	{
 		Directory.CreateDirectory(Dir);
 		File.Delete(StopPath(id));
-		var job = new JobInfo(id, kind, Environment.ProcessId, CurrentProcessStart(), RunMetadata.Timestamp(), log, detached, hosted, null);
+		var job = new JobInfo(id, kind, Environment.ProcessId, CurrentProcessStart(), RunMetadata.Timestamp(), log, detached, hosted, null, Environment.MachineName);
 		Write(job);
 		return new JobHandle(this, job, StopPath(id));
 	}
 
-	public JobInfo? Find(string id)
+	public Task<JobInfo?> FindAsync(string id) => Task.FromResult(Find(id));
+
+	private JobInfo? Find(string id)
 	{
 		var path = RecordPath(id);
 		if (!File.Exists(path))
@@ -68,7 +70,8 @@ internal sealed class JobRegistry(Monorepo monorepo)
 				table.TryGetValue("log", out var log) ? log as string : null,
 				table.TryGetValue("detached", out var detached) && detached is true,
 				table.TryGetValue("hosted", out var hosted) && hosted is true,
-				table.TryGetValue("finished", out var finished) ? finished as string : null);
+				table.TryGetValue("finished", out var finished) ? finished as string : null,
+				table.TryGetValue("host", out var host) ? host as string : null);
 		}
 		catch (Exception ex) when (ex is IOException or TomlException or KeyNotFoundException or InvalidCastException)
 		{
@@ -77,8 +80,8 @@ internal sealed class JobRegistry(Monorepo monorepo)
 		}
 	}
 
-	/// <summary>Every registered job id of the given kind.</summary>
-	public IReadOnlyList<JobInfo> List(string kind) =>
+	/// <summary>Every registered job of the given kind.</summary>
+	public Task<IReadOnlyList<JobInfo>> ListAsync(string kind) => Task.FromResult<IReadOnlyList<JobInfo>>(
 		!Directory.Exists(Dir)
 			? []
 			: Directory.EnumerateFiles(Dir, "*.toml")
@@ -86,13 +89,68 @@ internal sealed class JobRegistry(Monorepo monorepo)
 				.Select(path => Find(Path.GetFileNameWithoutExtension(path)))
 				.OfType<JobInfo>()
 				.Where(job => job.Kind == kind)
-				.ToList();
+				.ToList());
 
 	/// <summary>
 	/// Whether the job's process is still running. The process's start time has to match the registration too, so a
 	/// recycled process id never makes a long-finished job look live.
 	/// </summary>
-	public static bool IsAlive(JobInfo? job) => job is not null && job.Finished is null && IsProcessAlive(job.Pid, job.ProcessStart);
+	public bool IsAlive(JobInfo? job) => job is not null && job.Finished is null && IsProcessAlive(job.Pid, job.ProcessStart);
+
+	/// <summary>
+	/// Starts the background bassia, its log created first, and waits until it has registered its job or has exited
+	/// without doing so; a process that failed leaves the end of its log for the caller to report.
+	/// </summary>
+	public async Task<Storage.DetachedJob> StartDetachedAsync(string id, string workingDirectory, Func<string, IReadOnlyList<string>> arguments)
+	{
+		Directory.CreateDirectory(Dir);
+		var log = LogPath(id);
+		await File.WriteAllTextAsync(log, "");
+		using var process = DetachedProcess.Start(workingDirectory, arguments(log));
+		JobInfo? job = null;
+		var clock = Stopwatch.StartNew();
+		while (clock.Elapsed < RegistrationTimeout)
+		{
+			if ((job = Find(id)) is not null)
+			{
+				break;
+			}
+
+			if (process.HasExited)
+			{
+				job = Find(id);
+				break;
+			}
+
+			await Task.Delay(50);
+		}
+
+		var failure = job is null && await ReadLogAsync(log, 0) is { } text
+			? string.Join(" | ", text.Lines.Where(line => line.Trim().Length > 0).TakeLast(20))
+			: "";
+		return new Storage.DetachedJob(job, log, ResultLocation(id), failure);
+	}
+
+	/// <summary>The log file from <paramref name="offset"/> on; a negative offset reads the last that many bytes.</summary>
+	public Task<Storage.JobLog?> ReadLogAsync(JobInfo job, long offset = 0) =>
+		job.Log is null ? Task.FromResult<Storage.JobLog?>(null) : ReadLogAsync(job.Log, offset);
+
+	private static async Task<Storage.JobLog?> ReadLogAsync(string path, long offset)
+	{
+		try
+		{
+			using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+			var start = offset < 0 ? Math.Max(0, stream.Length + offset) : Math.Min(offset, stream.Length);
+			stream.Seek(start, SeekOrigin.Begin);
+			using var reader = new StreamReader(stream);
+			var text = await reader.ReadToEndAsync();
+			return new Storage.JobLog(text, stream.Position);
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			return null;
+		}
+	}
 
 	/// <summary>Whether the process <paramref name="pid"/> runs and started at <paramref name="processStart"/> (as <see cref="CurrentProcessStart"/> records it).</summary>
 	public static bool IsProcessAlive(int pid, string processStart)
@@ -116,23 +174,36 @@ internal sealed class JobRegistry(Monorepo monorepo)
 	}
 
 	/// <summary>Asks the job's process to stop; it notices within a fraction of a second.</summary>
-	public void RequestStop(string id)
+	public Task RequestStopAsync(string id)
 	{
 		Directory.CreateDirectory(Dir);
 		File.WriteAllText(StopPath(id), RunMetadata.Timestamp());
+		return Task.CompletedTask;
+	}
+
+	public Task ClearStopAsync(string id)
+	{
+		ClearStop(id);
+		return Task.CompletedTask;
 	}
 
 	/// <summary>
 	/// Kills the job's process tree: the last resort when it does not stop on request. A hosted job is never killed,
 	/// since its process is the web dashboard serving everything else too.
 	/// </summary>
-	public static void Kill(JobInfo job)
+	public Task<bool> KillAsync(JobInfo job)
 	{
 		if (job.Hosted)
 		{
-			return;
+			return Task.FromResult(false);
 		}
 
+		Kill(job);
+		return Task.FromResult(true);
+	}
+
+	private static void Kill(JobInfo job)
+	{
 		try
 		{
 			using var process = Process.GetProcessById(job.Pid);
@@ -162,6 +233,7 @@ internal sealed class JobRegistry(Monorepo monorepo)
 		};
 		if (job.Log is not null) table["log"] = job.Log;
 		if (job.Finished is not null) table["finished"] = job.Finished;
+		if (job.Host is not null) table["host"] = job.Host;
 
 		// Written aside and moved into place, so a reader never sees half a record.
 		var path = RecordPath(job.Id);
@@ -198,15 +270,15 @@ internal sealed class JobRegistry(Monorepo monorepo)
 }
 
 /// <summary>The current process's registration as a job: its stop signal, and its removal when disposed.</summary>
-internal sealed class JobHandle : IDisposable
+internal sealed class JobHandle : Storage.IJobHandle
 {
-	private readonly JobRegistry registry;
+	private readonly LocalJobScheduler registry;
 	private readonly JobInfo job;
 	private readonly string stopPath;
 	private readonly CancellationTokenSource cancellation = new();
 	private readonly Timer watcher;
 
-	internal JobHandle(JobRegistry registry, JobInfo job, string stopPath)
+	internal JobHandle(LocalJobScheduler registry, JobInfo job, string stopPath)
 	{
 		this.registry = registry;
 		this.job = job;

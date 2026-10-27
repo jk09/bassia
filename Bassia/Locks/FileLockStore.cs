@@ -1,7 +1,6 @@
 namespace Bassia.Locks;
 
 using System.Diagnostics;
-using System.Globalization;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -189,21 +188,19 @@ internal sealed class LockEntry
 }
 
 /// <summary>
-/// The lock table: <c>&lt;root&gt;/.locks</c>, one <see cref="LockEntry"/> file per run, shared by every bassia process of
-/// the monorepo whatever its workspace. Anyone reads it at any time (each file is replaced atomically); every decision
-/// that depends on what others hold - taking a hold, waiting, releasing - is made while holding <c>.locks/.mutex</c>
-/// exclusively, an OS file lock that a crashed process gives up by itself.
+/// The lock table on disk (<see cref="Storage.ILockStore"/>): <c>&lt;root&gt;/.locks</c>, one <see cref="LockEntry"/> file
+/// per run, shared by every bassia process of the monorepo whatever its workspace. Anyone reads it at any time (each
+/// file is replaced atomically); every decision that depends on what others hold - taking a hold, waiting, releasing -
+/// is made while holding <c>.locks/.mutex</c> exclusively, an OS file lock that a crashed process gives up by itself.
+/// Besides the lease it knows the processes of its own machine: an entry or a wait whose process here is gone is over
+/// at once.
 /// </summary>
-internal sealed class LockTable
+internal sealed class FileLockStore : Storage.ILockStore
 {
 	public const string FolderName = ".locks";
 	private static readonly TimeSpan MutexTimeout = TimeSpan.FromSeconds(60);
 
-	public LockTable(Monorepo monorepo) : this(Path.Combine(monorepo.Root, FolderName), LockFilter.Ttl(monorepo.Config))
-	{
-	}
-
-	internal LockTable(string dir, TimeSpan ttl)
+	public FileLockStore(string dir, TimeSpan ttl)
 	{
 		Dir = dir;
 		Ttl = ttl;
@@ -211,50 +208,34 @@ internal sealed class LockTable
 
 	public string Dir { get; }
 
+	public string Location => Dir;
+
 	public TimeSpan Ttl { get; }
 
 	/// <summary>The machine name a lock entry records, which decides whether its process can be checked from here.</summary>
 	public static string ThisHost => Environment.MachineName;
 
-	/// <summary>Whether any run is in the table at all; when none is, a run that holds nothing has nothing to check.</summary>
-	public bool HasEntries => Directory.Exists(Dir) && Directory.EnumerateFiles(Dir, "*.toml").Any();
+	public Task<bool> HasEntriesAsync() => Task.FromResult(Directory.Exists(Dir) && Directory.EnumerateFiles(Dir, "*.toml").Any());
 
 	/// <summary>Every run's entry as it is right now; an entry being replaced or unreadable is left out.</summary>
-	public IReadOnlyList<LockEntry> ReadAll() =>
+	public Task<IReadOnlyList<LockEntry>> ReadAllAsync() => Task.FromResult(ReadAll());
+
+	private IReadOnlyList<LockEntry> ReadAll() =>
 		!Directory.Exists(Dir) ? [] : Directory.EnumerateFiles(Dir, "*.toml").Select(Read).OfType<LockEntry>().OrderBy(entry => entry.Started, StringComparer.Ordinal).ToList();
 
-	public LockEntry? Find(string runId) => Read(EntryPath(runId));
+	public Task<LockEntry?> FindAsync(string runId) => Task.FromResult(Read(EntryPath(runId)));
 
-	/// <summary>Whether the run has an entry at all; nothing to release or forget otherwise.</summary>
-	public bool Has(string runId) => File.Exists(EntryPath(runId));
+	/// <summary>The lease, and on this machine the entry's process: one that is gone can never renew its holds again.</summary>
+	public LockState StateOf(LockEntry entry, DateTimeOffset? now = null) =>
+		Storage.LockStores.ByLease(entry, Ttl, now) is var state && state == LockState.Live && IsDead(entry) ? LockState.Expired : state;
 
-	/// <summary>
-	/// Where an entry stands: released once its run finished; expired when its heartbeat is older than the TTL or, on
-	/// this machine, its process is gone; live otherwise.
-	/// </summary>
-	public LockState StateOf(LockEntry entry, DateTimeOffset? now = null)
-	{
-		if (entry.State == LockEntry.ReleasedState)
-		{
-			return LockState.Released;
-		}
-
-		return IsDead(entry) || Age(entry, now) > Ttl ? LockState.Expired : LockState.Live;
-	}
-
-	/// <summary>The entry's process ran on this machine and is gone: it can never renew its holds again.</summary>
+	/// <summary>The entry's process ran on this machine and is gone.</summary>
 	public static bool IsDead(LockEntry entry) =>
-		entry.State == LockEntry.LiveState && entry.Host == ThisHost && !JobRegistry.IsProcessAlive(entry.Pid, entry.ProcessStart);
-
-	/// <summary>How long ago the entry was last renewed.</summary>
-	public static TimeSpan Age(LockEntry entry, DateTimeOffset? now = null) =>
-		DateTimeOffset.TryParse(entry.Heartbeat, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var heartbeat)
-			? (now ?? DateTimeOffset.UtcNow) - heartbeat
-			: TimeSpan.MaxValue;
+		entry.State == LockEntry.LiveState && entry.Host == ThisHost && !LocalJobScheduler.IsProcessAlive(entry.Pid, entry.ProcessStart);
 
 	/// <summary>Whether a wait is still being waited: its process lives (on this machine), or its run's entry is live (elsewhere).</summary>
 	public bool IsWaiting(LockEntry entry, LockWait wait) =>
-		entry.Host == ThisHost ? JobRegistry.IsProcessAlive(wait.Pid, wait.ProcessStart) : StateOf(entry) == LockState.Live;
+		entry.Host == ThisHost ? LocalJobScheduler.IsProcessAlive(wait.Pid, wait.ProcessStart) : StateOf(entry) == LockState.Live;
 
 	/// <summary>
 	/// Reads every entry under the mutex, lets <paramref name="change"/> decide, and writes or deletes what it changed.
@@ -283,12 +264,6 @@ internal sealed class LockTable
 
 		return result;
 	}
-
-	public Task UpdateAsync(Action<LockSession> change) => UpdateAsync(session =>
-	{
-		change(session);
-		return true;
-	});
 
 	private async Task<FileStream> AcquireMutexAsync()
 	{
@@ -338,7 +313,7 @@ internal sealed class LockTable
 /// <summary>The lock table as one decision sees it, under the mutex: every entry, and what the decision changes.</summary>
 internal sealed class LockSession
 {
-	private readonly LockTable table;
+	private readonly Storage.ILockStore table;
 	private readonly List<LockEntry> entries;
 	private readonly HashSet<string> saved = new(StringComparer.Ordinal);
 	private readonly HashSet<string> deleted = new(StringComparer.Ordinal);
@@ -346,13 +321,11 @@ internal sealed class LockSession
 	// Checking a process is not free, and a decision asks about the same entries again and again.
 	private readonly Dictionary<string, LockState> states = new(StringComparer.Ordinal);
 
-	internal LockSession(LockTable table, List<LockEntry> entries)
+	internal LockSession(Storage.ILockStore table, List<LockEntry> entries)
 	{
 		this.table = table;
 		this.entries = entries;
 	}
-
-	public LockTable Table => table;
 
 	public IReadOnlyList<LockEntry> Entries => entries;
 

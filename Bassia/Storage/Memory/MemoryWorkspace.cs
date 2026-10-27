@@ -251,6 +251,8 @@ internal sealed class MemoryWorkspace : IComponentWorkspace
 
 	public Task<string> DiffAsync(string from, string to) => store.DiffAsync(from, to);
 
+	public Task<IReadOnlyList<FileStat>> DiffStatAsync(string from, string to) => store.DiffStatAsync(from, to);
+
 	/// <summary>
 	/// The working copy's files, hidden paths (nested components) left out. In a sparse working copy, a file of the head it
 	/// never materialized is as the head has it unless something wrote it.

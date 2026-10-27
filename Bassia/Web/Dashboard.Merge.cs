@@ -318,7 +318,7 @@ internal sealed partial class Dashboard
 	{
 		var monorepo = Current();
 		var ids = request.Query["run"].Select(value => value ?? "").Where(value => value.Length > 0).ToHashSet(StringComparer.Ordinal);
-		var store = new RunMetadataStore(new Git.GitClient(monorepo.Root), monorepo.RunsRepoDir);
+		var store = monorepo.RunRecords();
 		var runs = (await store.ListLatestAsync()).Where(run => ids.Contains(run.RunId)).ToList();
 		if (runs.Count == 0)
 		{
@@ -383,7 +383,7 @@ internal sealed partial class Dashboard
 	private async Task<IResult> BriefAsync(string id, HttpRequest request)
 	{
 		var monorepo = Current();
-		var store = new IntegrationStore(new RunMetadataStore(new Git.GitClient(monorepo.Root), monorepo.RunsRepoDir));
+		var store = monorepo.Integrations();
 		var record = IntegrationRecord.IsId(IntegrationRecord.NormalizeId(id)) ? await store.LoadLatestAsync(IntegrationRecord.NormalizeId(id)) : null;
 		var component = record?.Components.FirstOrDefault(candidate => candidate.Name == request.Query["c"].ToString());
 		var step = component is not null && int.TryParse(request.Query["i"], out var index) && index >= 0 && index < component.Steps.Count ? component.Steps[index] : null;

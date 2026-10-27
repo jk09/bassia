@@ -26,7 +26,7 @@ internal sealed class IntegrationSettings
 	public Func<Core.TaskRequest, Task<int?>> RunTask { get; init; } = Core.TaskRunner.RunShellAsync;
 
 	/// <summary>The task cache the verification gate restores unchanged tasks from; null runs every task.</summary>
-	public Core.TaskCache? TaskCache { get; init; }
+	public Storage.ITaskCache? TaskCache { get; init; }
 
 	/// <summary>Runs a resolver; returns its exit code, or null when it was cancelled. By default a shell command.</summary>
 	public Func<ResolverRequest, Task<int?>> RunResolver { get; init; } = request =>
@@ -36,7 +36,7 @@ internal sealed class IntegrationSettings
 	{
 		WorkspaceDir = monorepo.WorkspaceDir,
 		Root = monorepo.Root,
-		TaskCache = Core.TaskCache.In(monorepo.WorkspaceDir),
+		TaskCache = monorepo.TaskCache,
 		MergePolicyFor = monorepo.MergePolicyFor,
 		LockPolicyFor = component => LockFilter.ConflictPolicy(monorepo.Config, component)
 	};

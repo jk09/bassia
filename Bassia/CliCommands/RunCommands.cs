@@ -1,5 +1,6 @@
 namespace Bassia;
 
+using Bassia.Storage;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -16,9 +17,6 @@ using Bassia.Locks;
 internal static class RunCommands
 {
 	public const string JobKind = "run";
-
-	/// <summary>How long <c>agent start -detach</c> waits for the background process to register before giving up.</summary>
-	private static readonly TimeSpan RegistrationTimeout = TimeSpan.FromSeconds(30);
 
 	// ----- bassia agent start -----
 
@@ -46,7 +44,7 @@ internal static class RunCommands
 			}
 
 			var runId = invocation.Get("id") is { } id ? RunMetadata.NormalizeRunId(id) : RunMetadata.NewRunId();
-			var jobs = new JobRegistry(monorepo);
+			var jobs = monorepo.Jobs;
 			using var job = jobs.Attach(runId, JobKind, log, detached: log is not null);
 			ConsoleCancelEventHandler stop = (_, args) =>
 			{
@@ -74,7 +72,7 @@ internal static class RunCommands
 				AgentRunOutcome outcome;
 				try
 				{
-					outcome = await AgentCommand.StartRunAsync(new GitClient(monorepo.Root), monorepo, select, command, context, runId, lockFiles, lockFolders, load);
+					outcome = await AgentCommand.StartRunAsync(monorepo, select, command, context, runId, lockFiles, lockFolders, load);
 				}
 				catch (OperationCanceledException)
 				{
@@ -189,33 +187,32 @@ internal static class RunCommands
 
 		AgentCommand.CheckLockPatterns(monorepo, closure, lockFiles, lockFolders);
 		var runId = RunMetadata.NewRunId();
-		var jobs = new JobRegistry(monorepo);
-		Directory.CreateDirectory(jobs.Dir);
-		var log = jobs.LogPath(runId);
-		await File.WriteAllTextAsync(log, "");
-
-		List<string> arguments = ["agent", "start", "-id", runId, "-log", log, "-select", select];
-		if (lockFiles is not null)
+		var jobs = monorepo.Jobs;
+		var started = await jobs.StartDetachedAsync(runId, monorepo.Root, log =>
 		{
-			arguments.AddRange(["-lock-files", lockFiles]);
-		}
+			List<string> arguments = ["agent", "start", "-id", runId, "-log", log, "-select", select];
+			if (lockFiles is not null)
+			{
+				arguments.AddRange(["-lock-files", lockFiles]);
+			}
 
-		if (lockFolders is not null)
-		{
-			arguments.AddRange(["-lock-folders", lockFolders]);
-		}
+			if (lockFolders is not null)
+			{
+				arguments.AddRange(["-lock-folders", lockFolders]);
+			}
 
-		if (load is not null)
-		{
-			arguments.AddRange(["-load", string.Join(",", load)]);
-		}
+			if (load is not null)
+			{
+				arguments.AddRange(["-load", string.Join(",", load)]);
+			}
 
-		using var process = DetachedProcess.Start(monorepo.Root, [.. arguments, "-run", command]);
-		var job = await WaitForRegistrationAsync(jobs, runId, process);
+			return [.. arguments, "-run", command];
+		});
+		var (job, log) = (started.Job, started.Log);
 		if (job is null)
 		{
 			return ProgramCli.WriteResult(false, invocation.Command,
-				$"The background process for run '{runId}' did not start. {Tail(log, 20)}".Trim(),
+				$"The background process for run '{runId}' did not start. {started.Failure}".Trim(),
 				new Dictionary<string, object?> { ["run_id"] = runId, ["log"] = log });
 		}
 
@@ -231,7 +228,7 @@ internal static class RunCommands
 				["detached"] = true,
 				["pid"] = job.Pid,
 				["log"] = log,
-				["result_file"] = jobs.ResultPath(runId),
+				["result_file"] = jobs.ResultLocation(runId),
 				["select"] = select,
 				["agent_command"] = command,
 				["lock_files"] = lockFiles,
@@ -240,33 +237,11 @@ internal static class RunCommands
 			});
 	}
 
-	/// <summary>Waits until the background process has registered its job, or has exited without doing so.</summary>
-	internal static async Task<JobInfo?> WaitForRegistrationAsync(JobRegistry jobs, string id, Process process)
-	{
-		var clock = Stopwatch.StartNew();
-		while (clock.Elapsed < RegistrationTimeout)
-		{
-			if (jobs.Find(id) is { } job)
-			{
-				return job;
-			}
-
-			if (process.HasExited)
-			{
-				return jobs.Find(id);
-			}
-
-			await Task.Delay(50);
-		}
-
-		return null;
-	}
-
 	// ----- finding a run -----
 
-	private sealed record FoundRun(Monorepo Monorepo, RunMetadataStore Store, JobRegistry Jobs, string RunId, RunMetadata? Record, JobInfo? Job)
+	private sealed record FoundRun(Monorepo Monorepo, Storage.IRunRecordStore Store, Storage.IJobScheduler Jobs, string RunId, RunMetadata? Record, JobInfo? Job)
 	{
-		public bool Alive => JobRegistry.IsAlive(Job);
+		public bool Alive => Jobs.IsAlive(Job);
 
 		/// <summary>The process is live and the record (if any yet) has not reached a final status.</summary>
 		public bool Live => Alive && (Record is null || Record.Status == "started");
@@ -284,11 +259,11 @@ internal static class RunCommands
 	private static async Task<FoundRun> FindAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
-		var jobs = new JobRegistry(monorepo);
+		var store = monorepo.RunRecords();
+		var jobs = monorepo.Jobs;
 		var name = invocation.Require("id");
 		var candidates = (await store.ListKeysAsync(RunMetadata.RefPrefix)).Select(RunMetadata.NormalizeRunId)
-			.Concat(jobs.List(JobKind).Select(job => job.Id))
+			.Concat((await jobs.ListAsync(JobKind)).Select(job => job.Id))
 			.Distinct(StringComparer.Ordinal)
 			.Where(runId => IntegrationSupport.MatchesRun(runId, name))
 			.ToList();
@@ -300,27 +275,28 @@ internal static class RunCommands
 			_ => throw new AgentException($"'{name}' names more than one agentic run ({string.Join(", ", candidates.Select(RunMetadata.Key))}); give more of its id.")
 		};
 
-		return new FoundRun(monorepo, store, jobs, runId, await store.LoadLatestAsync(runId), jobs.Find(runId));
+		return new FoundRun(monorepo, store, jobs, runId, await store.LoadLatestAsync(runId), await jobs.FindAsync(runId));
 	}
 
 	private static async Task<FoundRun> ReloadAsync(FoundRun run) =>
-		run with { Record = await run.Store.LoadLatestAsync(run.RunId), Job = run.Jobs.Find(run.RunId) };
+		run with { Record = await run.Store.LoadLatestAsync(run.RunId), Job = await run.Jobs.FindAsync(run.RunId) };
 
 	// ----- bassia agent list -----
 
 	public static async Task<int> ListAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
-		var jobs = new JobRegistry(monorepo);
+		var store = monorepo.RunRecords();
+		var jobs = monorepo.Jobs;
 		var status = invocation.Get("status")?.ToLowerInvariant();
 		var component = invocation.Get("component");
 		var limit = invocation.Int("limit", 20, 1);
 
 		var recorded = await store.ListLatestAsync();
-		var preparing = jobs.List(JobKind).Where(job => JobRegistry.IsAlive(job) && recorded.All(run => run.RunId != job.Id));
+		var preparing = (await jobs.ListAsync(JobKind)).Where(job => jobs.IsAlive(job) && recorded.All(run => run.RunId != job.Id));
+		var registered = (await jobs.ListAsync(JobKind)).ToDictionary(job => job.Id, StringComparer.Ordinal);
 		var rows = preparing.Select(job => new FoundRun(monorepo, store, jobs, job.Id, null, job))
-			.Concat(recorded.Select(run => new FoundRun(monorepo, store, jobs, run.RunId, run, jobs.Find(run.RunId))))
+			.Concat(recorded.Select(run => new FoundRun(monorepo, store, jobs, run.RunId, run, registered.GetValueOrDefault(run.RunId))))
 			.Where(run => status is null || run.Status == status || (status == "live" && run.Live) || (status == "stale" && run.Stale))
 			.Where(run => component is null || run.Record?.Components.Any(entry => entry.Name == component) == true)
 			.ToList();
@@ -366,7 +342,7 @@ internal static class RunCommands
 	public static async Task<int> ShowAsync(Invocation invocation)
 	{
 		var run = await FindAsync(invocation);
-		return ProgramCli.WriteResult(true, invocation.Command, Describe(run), Details(run));
+		return ProgramCli.WriteResult(true, invocation.Command, Describe(run), await DetailsAsync(run));
 	}
 
 	private static string Describe(FoundRun run) =>
@@ -375,7 +351,7 @@ internal static class RunCommands
 		: run.Record is null ? $"Agentic run '{run.RunId}' never got past preparing; it has no record."
 		: $"Agentic run '{run.RunId}' is {run.Status}.";
 
-	private static Dictionary<string, object?> Details(FoundRun run)
+	private static async Task<Dictionary<string, object?>> DetailsAsync(FoundRun run)
 	{
 		var data = run.Record is null
 			? new Dictionary<string, object?> { ["run_id"] = run.RunId, ["status"] = run.Status }
@@ -388,26 +364,27 @@ internal static class RunCommands
 		data["pid"] = run.Alive ? run.Job?.Pid : null;
 		data["hosted"] = run.Job?.Hosted;
 		data["log"] = run.Job?.Log;
-		data["result_file"] = run.Job?.Log is null ? null : run.Jobs.ResultPath(run.RunId);
+		data["result_file"] = run.Job?.Log is null ? null : run.Jobs.ResultLocation(run.RunId);
 		data["created"] = run.Record?.Created ?? run.Job?.Started;
 		data["finished"] = run.Record?.Finished;
 		data["select"] = run.Record?.Select;
 		data["agent_command"] = run.Record?.Command;
 		data["summary"] = run.Record is null ? null : AgentCommand.SummarizeCommand(run.Record.Command);
-		data["last_output"] = run.Live && run.Job?.Log is { } log ? LastLine(log) : null;
+		var last = run.Live ? await LastLineAsync(run.Jobs, run.Job) : null;
+		data["last_output"] = last;
 
 		// What the run holds and waits for right now, as the lock table advertises it.
-		var table = new LockTable(run.Monorepo);
-		var entry = table.Find(run.RunId);
+		var table = run.Monorepo.Locks;
+		var entry = await table.FindAsync(run.RunId);
 		data["lock_state"] = entry is null ? null : table.StateOf(entry).ToString().ToLowerInvariant();
 		data["holding"] = entry?.Holds.Select(hold => hold.Key.Display).ToList() ?? [];
 		data["waiting_for"] = entry?.Waits.Where(wait => table.IsWaiting(entry, wait)).Select(wait => wait.Key.Display).ToList() ?? [];
-		data["card"] = new TomlText(Card(run, entry, table));
+		data["card"] = new TomlText(Card(run, entry, table, last));
 		return data;
 	}
 
 	/// <summary>The run as a card like the run board draws it, with a line per component result.</summary>
-	private static string Card(FoundRun run, LockEntry? entry, LockTable table)
+	private static string Card(FoundRun run, LockEntry? entry, Storage.ILockStore table, string? last)
 	{
 		const int width = 64;
 		var lines = new List<string>
@@ -420,7 +397,7 @@ internal static class RunCommands
 			lines.Add(AgentCommand.SummarizeCommand(run.Record.Command));
 		}
 
-		if (run.Live && run.Job?.Log is { } log && LastLine(log) is { } last)
+		if (last is not null)
 		{
 			lines.Add("> " + last);
 		}
@@ -470,14 +447,13 @@ internal static class RunCommands
 	{
 		var run = await FindAsync(invocation);
 		var tail = invocation.Int("tail", 50, 0);
-		if (run.Job?.Log is not { } log || !File.Exists(log))
+		if (await OutputAsync(run.Jobs, run.Job) is not { } lines)
 		{
 			throw new AgentException(
 				$"Agentic run '{run.RunId}' was not started with -detach, so its output went to the terminal or frontend that started it; " +
 				$"'bassia agent show {RunMetadata.Key(run.RunId)}' shows its record.");
 		}
 
-		var lines = ReadLines(log);
 		var shown = tail == 0 ? lines : lines.TakeLast(tail).ToList();
 		return ProgramCli.WriteResult(true, invocation.Command,
 			$"{shown.Count} of {lines.Count} line(s) of the output of run '{run.RunId}' ({(run.Live ? "live" : run.Status)}).",
@@ -486,7 +462,7 @@ internal static class RunCommands
 				["run_id"] = run.RunId,
 				["status"] = run.Status,
 				["live"] = run.Live,
-				["log"] = log,
+				["log"] = run.Job?.Log,
 				["lines"] = lines.Count,
 				["output"] = new TomlText(shown.Count == 0 ? "(no output yet)" : string.Join("\n", shown))
 			});
@@ -503,7 +479,7 @@ internal static class RunCommands
 		{
 			if (timeout > 0 && clock.Elapsed.TotalSeconds >= timeout)
 			{
-				var data = Details(run);
+				var data = await DetailsAsync(run);
 				data["timed_out"] = true;
 				return ProgramCli.WriteResult(false, invocation.Command,
 					$"Agentic run '{run.RunId}' is still running after {timeout}s; wait again, or stop it with 'bassia agent stop {RunMetadata.Key(run.RunId)}'.", data);
@@ -516,7 +492,7 @@ internal static class RunCommands
 		// A finished process writes its last record before it exits; read once more so it is never missed.
 		run = await ReloadAsync(run);
 		var ok = run.Record?.Status == "completed";
-		return ProgramCli.WriteResult(ok, invocation.Command, Describe(run), Details(run));
+		return ProgramCli.WriteResult(ok, invocation.Command, Describe(run), await DetailsAsync(run));
 	}
 
 	// ----- bassia agent stop -----
@@ -536,10 +512,10 @@ internal static class RunCommands
 			await RunLocks.ForgetAsync(run.Monorepo, run.RunId);
 			run = await ReloadAsync(run);
 			return ProgramCli.WriteResult(true, invocation.Command,
-				$"Agentic run '{run.RunId}' was no longer running (its process is gone); it is now recorded as cancelled and holds nothing any more.", Details(run));
+				$"Agentic run '{run.RunId}' was no longer running (its process is gone); it is now recorded as cancelled and holds nothing any more.", await DetailsAsync(run));
 		}
 
-		run.Jobs.RequestStop(run.RunId);
+		await run.Jobs.RequestStopAsync(run.RunId);
 		var clock = Stopwatch.StartNew();
 		while (run.Live && clock.Elapsed.TotalSeconds < timeout)
 		{
@@ -550,7 +526,7 @@ internal static class RunCommands
 		var killed = false;
 		if (run.Live && run.Job is { Hosted: false } job)
 		{
-			JobRegistry.Kill(job);
+			await run.Jobs.KillAsync(job);
 			killed = true;
 			run = await ReloadAsync(run);
 		}
@@ -559,7 +535,7 @@ internal static class RunCommands
 		{
 			return ProgramCli.WriteResult(false, invocation.Command,
 				$"Agentic run '{run.RunId}' did not stop within {timeout}s; it is running inside a frontend, which finishes the commit/push step before it stops.",
-				Details(run));
+				await DetailsAsync(run));
 		}
 
 		if (run.Record?.Status == "started")
@@ -574,8 +550,8 @@ internal static class RunCommands
 			await RunLocks.ForgetAsync(run.Monorepo, run.RunId);
 		}
 
-		run.Jobs.ClearStop(run.RunId);
-		var data = Details(run);
+		await run.Jobs.ClearStopAsync(run.RunId);
+		var data = await DetailsAsync(run);
 		data["killed"] = killed;
 		return ProgramCli.WriteResult(true, invocation.Command,
 			run.Record is null
@@ -641,36 +617,42 @@ internal static class RunCommands
 				["result_tag"] = entry.ResultTag
 			};
 
-			// A pushed result is in the source of truth; a committed one only in the run's checkout.
-			var repo = entry.ResultStatus == ResultStatus.Pushed ? run.Monorepo.SourceRepoDir(entry.Name) : entry.Path;
-			if (entry.ResultCommit is null || !Directory.Exists(repo))
+			// A pushed result is in the component's store; a committed one only in the run's working copy.
+			var storage = run.Monorepo.Backend.Components;
+			var pushed = entry.ResultStatus == ResultStatus.Pushed;
+			var reachable = pushed ? storage.Exists(entry.Name) : Directory.Exists(entry.Path);
+			if (entry.ResultCommit is null || !reachable)
 			{
 				data["files_changed"] = 0;
-				data["note"] = entry.ResultCommit is null ? "no result commit" : $"'{repo}' no longer exists";
+				data["note"] = entry.ResultCommit is null ? "no result commit" : $"'{(pushed ? storage.LocationOf(entry.Name) : entry.Path)}' no longer exists";
 				components.Add(data);
 				continue;
 			}
 
+			var store = pushed ? storage.Open(entry.Name) : null;
+			var workspace = pushed ? null : storage.OpenWorkspace(entry.Name, entry.Path);
+
 			// A run that brought other runs' results in (lock wait) committed its own change on top of them: the result
 			// commit's first parent is where its own work starts.
-			var from = entry.CaughtUp.Count > 0 ? await GitClient.In(repo).RunOrThrowAsync(["rev-parse", $"{entry.ResultCommit}^1"]) : entry.Commit;
+			var from = entry.Commit;
 			if (entry.CaughtUp.Count > 0)
 			{
+				from = store is not null
+					? (await store.GetCommitAsync(entry.ResultCommit))?.Parents.FirstOrDefault() ?? entry.Commit
+					: (await workspace!.LogAsync(entry.Commit, entry.ResultCommit)).FirstOrDefault()?.Parents.FirstOrDefault() ?? entry.Commit;
 				data["diff_from"] = from;
 				data["caught_up"] = entry.CaughtUp.Select(catchUp => catchUp.Tag).ToList();
 			}
 
-			var git = GitClient.In(repo);
-			var numstat = await git.RunOrThrowAsync(["diff", "--numstat", from, entry.ResultCommit]);
-			var files = numstat.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.Split('\t')).Where(fields => fields.Length >= 3).ToList();
+			var files = store is not null ? await store.DiffStatAsync(from, entry.ResultCommit) : await workspace!.DiffStatAsync(from, entry.ResultCommit);
 			data["files_changed"] = files.Count;
-			data["insertions"] = files.Sum(fields => int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var added) ? added : 0);
-			data["deletions"] = files.Sum(fields => int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var removed) ? removed : 0);
-			data["files"] = files.Select(fields => fields[2]).ToList();
-			data["stat"] = new TomlText(await git.RunOrThrowAsync(["diff", "--stat", from, entry.ResultCommit]));
+			data["insertions"] = files.Sum(file => Math.Max(0, file.Added));
+			data["deletions"] = files.Sum(file => Math.Max(0, file.Removed));
+			data["files"] = files.Select(file => file.Path).ToList();
+			data["stat"] = new TomlText(DiffStatText.Render(files));
 			if (invocation.Has("patch"))
 			{
-				data["patch"] = new TomlText(await git.RunOrThrowAsync(["diff", from, entry.ResultCommit]));
+				data["patch"] = new TomlText(store is not null ? await store.DiffAsync(from, entry.ResultCommit) : await workspace!.DiffAsync(from, entry.ResultCommit));
 			}
 
 			totalFiles += files.Count;
@@ -689,22 +671,30 @@ internal static class RunCommands
 
 	// ----- helpers -----
 
-	/// <summary>A log's lines, with any <c># bassia result</c> marker neutralized so the log never looks like a result.</summary>
-	internal static List<string> ReadLines(string path)
+	/// <summary>How much of the end of a job's output is read for its latest line.</summary>
+	private const long LastLineWindow = 64 * 1024;
+
+	/// <summary>
+	/// A job's output as lines (all of it, or from <paramref name="offset"/>; a negative offset is that many bytes from the
+	/// end), with any <c># bassia result</c> marker neutralized so the output never looks like a result. Null when the job
+	/// has no output of its own: it was not detached.
+	/// </summary>
+	internal static async Task<List<string>?> OutputAsync(Storage.IJobScheduler jobs, JobInfo? job, long offset = 0)
 	{
-		using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-		using var reader = new StreamReader(stream);
-		var text = reader.ReadToEnd().Replace("\r", "").TrimEnd('\n');
+		if (job is null || await jobs.ReadLogAsync(job, offset) is not { } log)
+		{
+			return null;
+		}
+
+		var text = log.Text.Replace("\r", "").TrimEnd('\n');
 		return text.Length == 0
 			? []
 			: text.Split('\n').Select(line => line.StartsWith(TomlResult.Marker, StringComparison.Ordinal) ? "#" + line : line).ToList();
 	}
 
-	internal static string? LastLine(string path) =>
-		File.Exists(path) ? ReadLines(path).LastOrDefault(line => line.Trim().Length > 0) is { } line ? AsciiTable.Ascii(line) : null : null;
-
-	internal static string Tail(string path, int count) =>
-		File.Exists(path) ? string.Join(" | ", ReadLines(path).Where(line => line.Trim().Length > 0).TakeLast(count)) : "";
+	/// <summary>The latest non-empty line of a job's output, or null.</summary>
+	internal static async Task<string?> LastLineAsync(Storage.IJobScheduler jobs, JobInfo? job) =>
+		(await OutputAsync(jobs, job, -LastLineWindow))?.LastOrDefault(line => line.Trim().Length > 0) is { } line ? AsciiTable.Ascii(line) : null;
 
 	private static string Fit(string text, int width)
 	{

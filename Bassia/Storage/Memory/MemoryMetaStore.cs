@@ -13,6 +13,18 @@ internal sealed class MemoryMetaStore : IMetaStore
 
 	public string Location => "memory:meta-repo";
 
+	private readonly List<DateTimeOffset> revisionDates = [];
+
+	/// <summary>The revisions, newest first, each a commit on top of the one before it.</summary>
+	public Task<IReadOnlyList<LogEntry>> LogAsync(LogQuery query) => Task.FromResult<IReadOnlyList<LogEntry>>(Revisions
+		.Select((revision, index) => new LogEntry(new StoredCommit(revision.Id, index == 0 ? [] : [Revisions[index - 1].Id], revision.Message),
+			revisionDates[index], index == Revisions.Count - 1 ? ["main"] : [], []))
+		.Where(entry => query.Grep is not { Count: > 0 } grep || grep.Any(text => entry.Commit.Message.Contains(text, StringComparison.Ordinal)))
+		.Reverse()
+		.Skip(query.Skip)
+		.Take(query.Limit ?? int.MaxValue)
+		.ToList());
+
 	public Task<IReadOnlyList<ComponentDefinition>> LoadAsync() => Task.FromResult<IReadOnlyList<ComponentDefinition>>(components.ToList());
 
 	public Task<IReadOnlyList<Core.BoundaryRule>> LoadBoundariesAsync() => Task.FromResult<IReadOnlyList<Core.BoundaryRule>>(boundaries.ToList());
@@ -85,6 +97,7 @@ internal sealed class MemoryMetaStore : IMetaStore
 
 		var id = $"r{Revisions.Count + 1}";
 		Revisions.Add((id, message, changes));
+		revisionDates.Add(DateTimeOffset.UtcNow);
 		return Task.FromResult<string?>(id);
 	}
 

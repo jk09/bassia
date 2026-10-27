@@ -1,5 +1,6 @@
 namespace Bassia.Tests;
 
+using Bassia.Storage;
 using Bassia.Core;
 using Bassia.Locks;
 
@@ -89,12 +90,12 @@ public class UserCommandTests
 	{
 		await using var monorepo = await WithUsersAsync();
 		Assert.Equal(0, (await monorepo.BassiaAsync("user", "use", "ann")).ExitCode);
-		var table = new LockTable(Monorepo.Load(monorepo.Root));
+		var table = Monorepo.Load(monorepo.Root).Locks;
 		using (Actor.Use(new Actor(new UserDefinition("jk", "Jozef Kosik", "jozef@example.com"))))
 		{
 			await table.UpdateAsync(session =>
 			{
-				var entry = RunLocks.NewEntry("agent-run-brave-otter-aaaaaa", RunMetadata.Timestamp(), Environment.ProcessId, JobRegistry.CurrentProcessStart(), RunMetadata.Timestamp());
+				var entry = RunLocks.NewEntry("agent-run-brave-otter-aaaaaa", RunMetadata.Timestamp(), Environment.ProcessId, LocalJobScheduler.CurrentProcessStart(), RunMetadata.Timestamp());
 				entry.Holds.Add(new LockHold(new LockKey("app", "README.md", LockKind.File), LockHold.Claimed, RunMetadata.Timestamp()));
 				session.Save(entry);
 			});

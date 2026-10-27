@@ -1,5 +1,6 @@
 namespace Bassia;
 
+using Bassia.Storage;
 using System.Reflection;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
@@ -17,21 +18,22 @@ internal static class MonorepoCommands
 	public static async Task<int> StatusAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var git = new GitClient(monorepo.Root);
-		var store = new RunMetadataStore(git, monorepo.RunsRepoDir);
+		var store = monorepo.RunRecords();
 		var runs = await store.ListLatestAsync();
-		var integrations = await new IntegrationStore(store).ListLatestAsync();
-		var jobs = new JobRegistry(monorepo);
-		var liveRuns = jobs.List("run").Where(JobRegistry.IsAlive).Select(job => job.Id).Distinct().ToList();
-		var liveIntegrations = jobs.List("integration").Where(JobRegistry.IsAlive).Select(job => job.Id).Distinct().ToList();
+		var integrations = await monorepo.Integrations().ListLatestAsync();
+		var jobs = monorepo.Jobs;
+		var liveRuns = (await jobs.ListAsync("run")).Where(jobs.IsAlive).Select(job => job.Id).Distinct().ToList();
+		var liveIntegrations = (await jobs.ListAsync("integration")).Where(jobs.IsAlive).Select(job => job.Id).Distinct().ToList();
 
-		var changes = await GitClient.In(monorepo.MetaRepoDir).RunAsync(["status", "--porcelain"]);
-		var changed = changes.Output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList();
-		var head = await GitClient.In(monorepo.MetaRepoDir).RunAsync(["log", "-1", "--format=%h %s"]);
+		// Hand edits not committed yet exist only where the meta-repo is a working tree on this machine.
+		var changed = monorepo.Backend is LocalBackend
+			? (await GitClient.In(monorepo.MetaRepoDir).RunAsync(["status", "--porcelain"])).Output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()
+			: [];
+		var head = (await monorepo.Backend.Meta.LogAsync(new Storage.LogQuery(Limit: 1))).FirstOrDefault();
 
 		var graph = new ComponentGraph(monorepo.Components);
-		var locks = new LockTable(monorepo);
-		var entries = locks.ReadAll();
+		var locks = monorepo.Locks;
+		var entries = (await locks.ReadAllAsync());
 		var held = entries.Where(entry => locks.StateOf(entry) == LockState.Live).Sum(entry => entry.Holds.Count);
 		var waiting = entries.Count(entry => entry.Waits.Any(wait => locks.IsWaiting(entry, wait)));
 		var violations = monorepo.Registry.Violations();
@@ -42,7 +44,7 @@ internal static class MonorepoCommands
 			{
 				["root"] = monorepo.Root,
 				["meta_repo"] = monorepo.MetaRepoDir,
-				["meta_repo_head"] = head.ExitCode == 0 ? head.Output.Trim() : null,
+				["meta_repo_head"] = head is null ? null : $"{head.Commit.Id[..Math.Min(7, head.Commit.Id.Length)]} {head.Commit.Subject}",
 				["meta_repo_clean"] = changed.Count == 0,
 				["meta_repo_changes"] = changed,
 				["workspace"] = monorepo.WorkspaceDir,
@@ -90,8 +92,8 @@ internal static class MonorepoCommands
 			$"{entries.Count(entry => entry.Layer == ConfigLayer.Monorepo)} from the monorepo, the rest default.",
 			new Dictionary<string, object?>
 			{
-				["path"] = ConfigFile.PathOf(monorepo.Root),
-				["user_path"] = ConfigFile.PathOf(monorepo.Root, ConfigLayer.User),
+				["path"] = monorepo.Backend.Config.LocationOf(ConfigLayer.Monorepo),
+				["user_path"] = monorepo.Backend.Config.LocationOf(ConfigLayer.User),
 				["table"] = new TomlText(AsciiTable.Render(["KEY", "VALUE", "SOURCE"],
 					entries.Select(entry => (IReadOnlyList<string>)[entry.Key.Key, entry.Value, entry.Source]), 72)),
 				["setting"] = entries.Select(entry => (IReadOnlyDictionary<string, object?>)Setting(monorepo, entry)).ToList()
@@ -111,8 +113,7 @@ internal static class MonorepoCommands
 		var key = ConfigKeyFor(monorepo, invocation.Require("key"));
 		var layer = invocation.Has("user") ? ConfigLayer.User : ConfigLayer.Monorepo;
 		var value = ConfigFile.Normalize(key, invocation.Require("value"));
-		ConfigFile.Set(monorepo.Root, key, value, layer);
-		var commit = layer == ConfigLayer.Monorepo ? await CommitMetaRepoAsync(monorepo.Root, $"Set {key.Key} = {value}") : null;
+		var commit = await monorepo.Backend.Config.SetAsync(key, value, layer);
 		var reloaded = Monorepo.Load(monorepo.Root);
 		return ProgramCli.WriteResult(true, invocation.Command, $"Set {key.Key} = {value} in the {Layer(layer)} layer.",
 			new Dictionary<string, object?>(Setting(reloaded, reloaded.Config.Resolve(key))) { ["meta_repo_commit"] = commit });
@@ -123,8 +124,7 @@ internal static class MonorepoCommands
 		var monorepo = AgentCommand.LoadMonorepo();
 		var key = ConfigFile.Find(invocation.Require("key"));
 		var layer = invocation.Has("user") ? ConfigLayer.User : ConfigLayer.Monorepo;
-		var removed = ConfigFile.Unset(monorepo.Root, key, layer);
-		var commit = removed && layer == ConfigLayer.Monorepo ? await CommitMetaRepoAsync(monorepo.Root, $"Unset {key.Key}") : null;
+		var (removed, commit) = await monorepo.Backend.Config.UnsetAsync(key, layer);
 		var reloaded = Monorepo.Load(monorepo.Root);
 		var now = reloaded.Config.Resolve(key);
 		return ProgramCli.WriteResult(true, invocation.Command,
@@ -156,8 +156,6 @@ internal static class MonorepoCommands
 		["description"] = value.Key.Description
 	};
 
-	/// <summary>Commits every change in the meta-repo and returns the new commit, or null when nothing changed.</summary>
-	internal static Task<string?> CommitMetaRepoAsync(string root, string message) => Storage.Git.GitMetaStore.CommitAllAsync(root, message);
 
 	// ----- bassia version -----
 

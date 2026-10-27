@@ -1063,7 +1063,18 @@ Bassia has three layers; each depends only on the ones below it.
    references) as revisions; `IRecordStore` keeps versioned records, and `IRunRecordStore` agentic runs on top of it.
    `Storage/Git` implements it on bare repositories next to `.bassia`, `components.toml` and `.agentic-runs`;
    `Storage/Memory` is the reference implementation, in memory with working copies in real folders, merging at file
-   granularity.
+   granularity. History as people read it is part of the contract too: `IComponentStore.LogAsync` (commits newest
+   first with their dates, branches and tags, optionally paged, filtered by message and with the paths each changed),
+   `DiffStatAsync` (lines per file), `TagMessageAsync`, and `IMetaStore.LogAsync` for the meta-repo's revisions.
+
+   The rest of a monorepo's state has contracts of its own: `ILockStore` (the lock table: one lock decision at a time
+   over every run's entry, liveness by lease), `IJobScheduler` (the live runs and integrations: register, find, list,
+   follow the output, stop, start detached), `ITaskCache` (task results by key), `IIdentity` (who acts) and
+   `IConfigStore` (the settings, layer by layer). `IMonorepoBackend` bundles them with the component storage, the meta
+   store and the record store; `Monorepo.Load(root)` builds `LocalBackend` - the monorepo on this machine's disk: git
+   repositories, the `.locks` folder, `<workspace>/.jobs` and `.task-cache`, the user's own word for who they are
+   (`BASSIA_USER`, `user.id`, the git email) and the `.bassia/config*.toml` files - and every command, the dashboard
+   and the integration get their stores from it. `Storage/Memory` has a lock store too (`MemoryLockStore`).
 2. **Component graph** (`Bassia/Core`) - `ComponentRegistry` is the immutable, validated graph of components and
    their references (unique valid names, references to registered components at paths inside the referrer, no
    cycles; closure and dependency order), with the components' tags, visibility and owners and the boundary rules
@@ -1084,8 +1095,10 @@ its upstream on request (`HydrateAsync`) or when a file is read, and follows or 
 materializes more; views (`Core/Views`: `ConfigSpec`, `Views`, `ViewManifest`, `Depot`) and sparse runs build on that.
 
 A replacement for git implements the storage contract; nothing in the component graph, the integration or locking
-changes. `bassia log`, `agent diff`, `component survey` and the dashboard's history views still read git directly; the
-lock table (`.locks`) is a file store for coordinating processes, not component history.
+changes, and `bassia log`, `agent diff`, `component survey`, the tag commands and the dashboard read history through it
+as well. A monorepo kept elsewhere - on a server - is another `IMonorepoBackend`. What stays tied to the machine is
+what lives on it: working copies (git checkouts, whatever the backend), `bassia init` and `bassia clone` (which create
+a local monorepo), and the uncommitted hand edits of the meta-repo that `bassia status` reports.
 
 ## Build
 
@@ -1123,7 +1136,8 @@ and integration commands, including detached runs and stopping them, which start
 background process. `ComponentSplitTests` splits a component with a branchy history (moves into and between
 parts, a merge, tags, a dropped folder, a path reused after its file moved away) and checks every part's files,
 `git log --follow`, tags, record commit and registration, plus plan errors, dry runs, rollback and the survey.
-`ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
+`BackendContractTests` holds the lock stores (memory and file), the local job scheduler and the history queries (memory
+and git) to the same behavior, as a new backend would be. `ViewTests` (on the in-memory storage) covers config specs, views and sparse runs in a clone, counting the content each
 store fetched so laziness is proven, and write-through with its retry; `ViewCommandTests` clones a local depot and checks
 with git which file contents each step downloaded. `LockTests` covers the lock filter and keys, the lock table's expiry, dead processes, deadlocks and a suspended run
 losing its holds, and - with a detached run holding while a second run starts - implicit holds, conflicts and what

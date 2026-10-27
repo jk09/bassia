@@ -104,6 +104,10 @@ internal static class MemoryMerge
 		return builder.ToString();
 	}
 
+	/// <summary>Lines added and removed per changed file, counted as <see cref="Diff"/> writes them (a changed file is replaced whole).</summary>
+	public static IReadOnlyList<FileStat> Stat(IReadOnlyDictionary<string, MemoryFile> from, IReadOnlyDictionary<string, MemoryFile> to) =>
+		Changed(from, to).Select(path => new FileStat(path, Lines(Text(to.GetValueOrDefault(path))).Count, Lines(Text(from.GetValueOrDefault(path))).Count)).ToList();
+
 	public static bool Same(MemoryFile? left, MemoryFile? right) => left?.Object == right?.Object;
 
 	private static string? Text(MemoryFile? file) => file is null ? null : Encoding.UTF8.GetString(file.Content);

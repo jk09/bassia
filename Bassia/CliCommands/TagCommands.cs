@@ -63,9 +63,9 @@ internal static class TagCommands
 		var entries = new List<IReadOnlyDictionary<string, object?>>();
 		foreach (var component in tag.Components)
 		{
-			var git = GitClient.In(monorepo.SourceRepoDir(component.Component));
-			var message = component.Annotated ? await git.RunOrThrowAsync(["for-each-ref", "--format=%(contents)", $"refs/tags/{name}"]) : null;
-			var commitSubject = await git.RunOrThrowAsync(["log", "-1", "--format=%s", component.Commit]);
+			var store = monorepo.Backend.Components.Open(component.Component);
+			var message = component.Annotated ? await store.TagMessageAsync(name) : null;
+			var commitSubject = (await store.GetCommitAsync(component.Commit))?.Subject;
 			entries.Add(new Dictionary<string, object?>
 			{
 				["name"] = component.Component,
@@ -106,7 +106,7 @@ internal static class TagCommands
 		}
 
 		// Resolve everything first: either every component gets the tag or none does.
-		var targets = new List<(string Component, string Ref, string Commit, GitClient Git)>();
+		var targets = new List<(string Component, string Ref, string Commit, Storage.IComponentStore Store)>();
 		foreach (var entry in selection)
 		{
 			var at = entry.IndexOf('@');
@@ -118,37 +118,37 @@ internal static class TagCommands
 				throw invocation.Usage($"-select names component '{component.Name}' more than once.");
 			}
 
-			var git = GitClient.In(ComponentCommands.RequireRepo(monorepo, component.Name));
-			if ((await git.RunAsync(["rev-parse", "--verify", "--quiet", $"refs/tags/{name}"])).ExitCode == 0)
+			ComponentCommands.RequireRepo(monorepo, component.Name);
+			var store = monorepo.Backend.Components.Open(component.Name);
+			if (await store.GetTagAsync(name) is not null)
 			{
 				throw new MonorepoException($"Component '{component.Name}' already has the tag '{name}'; no tag was created.");
 			}
 
-			var commit = await git.RunAsync(["rev-parse", "--verify", "--quiet", $"{target}^{{commit}}"]);
-			if (commit.ExitCode != 0)
-			{
-				throw new GitException($"'{target}' does not name a commit in component '{component.Name}'; no tag was created.");
-			}
-
-			targets.Add((component.Name, target, commit.Output.Trim(), git));
+			var commit = await CommitOfAsync(store, target)
+				?? throw new Storage.StorageException($"'{target}' does not name a commit in component '{component.Name}'; no tag was created.");
+			targets.Add((component.Name, target, commit, store));
 		}
 
 		var message = invocation.Get("message") ?? $"{name}: {string.Join(", ", targets.Select(item => $"{item.Component} {item.Commit[..10]}"))}";
-		var created = new List<GitClient>();
+		var created = new List<Storage.IComponentStore>();
 		foreach (var item in targets)
 		{
-			var result = await item.Git.RunAsync(["tag", "-a", name, "-m", message, item.Commit]);
-			if (result.ExitCode != 0)
+			try
 			{
-				foreach (var git in created)
+				await item.Store.CreateTagAsync(name, item.Commit, message);
+			}
+			catch (Storage.StorageException ex)
+			{
+				foreach (var store in created)
 				{
-					await git.RunAsync(["tag", "-d", name]);
+					await store.DeleteTagAsync(name);
 				}
 
-				throw new GitException($"git tag failed in component '{item.Component}': {result.Error.Trim()}; no tag was kept.");
+				throw new Storage.StorageException($"Tagging component '{item.Component}' failed: {ex.Message}; no tag was kept.");
 			}
 
-			created.Add(item.Git);
+			created.Add(item.Store);
 		}
 
 		var select = string.Join(",", targets.Select(item => $"{item.Component}@{name}"));
@@ -167,5 +167,21 @@ internal static class TagCommands
 					["commit"] = item.Commit
 				}).ToList()
 			});
+	}
+
+	/// <summary>The commit a target of <c>-select</c> names: <c>HEAD</c> (the default branch's tip), a branch or tag, or a commit hash.</summary>
+	private static async Task<string?> CommitOfAsync(Storage.IComponentStore store, string target)
+	{
+		if (target == "HEAD")
+		{
+			return await store.DefaultBranchAsync() is { } branch ? await store.BranchTipAsync(branch) : null;
+		}
+
+		if (await store.ResolveRefAsync(target) is { } resolved)
+		{
+			return resolved.Commit;
+		}
+
+		return target.Length >= 4 && target.All(Uri.IsHexDigit) && await store.FindObjectsAsync(target.ToLowerInvariant()) is [{ Kind: "commit" } commit] ? commit.Id : null;
 	}
 }

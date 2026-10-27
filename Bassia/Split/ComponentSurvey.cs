@@ -21,13 +21,14 @@ internal sealed record SurveyResult(
 /// <summary>
 /// What an LLM needs to propose a split of a component: its folders with their size and how often they change, the
 /// folders that change together (a split between them would turn one change into several), and a plan skeleton to
-/// fill in. Read in two passes over git (<c>ls-tree</c> of the tip, <c>log --name-only</c> of the history).
+/// fill in. Read in two passes over the component's store (the files of the tip, the paths each commit changed).
 /// </summary>
 internal static class ComponentSurvey
 {
-	public static async Task<SurveyResult> RunAsync(string repository, string component, string branch, int depth, int commitLimit, int pairLimit)
+	public static async Task<SurveyResult> RunAsync(Storage.IComponentStore store, string component, string branch, int depth, int commitLimit, int pairLimit)
 	{
-		var tip = await GitHistorySplitter.ListTipAsync(repository, branch);
+		var tipCommit = await store.BranchTipAsync(branch) ?? throw new MonorepoException($"Component '{component}' has no branch '{branch}'.");
+		var tip = (await store.ListFilesAsync(tipCommit)).Select(file => new TipFile(file.Path, file.Mode, file.Object, Math.Max(0, file.Size))).ToList();
 		var folders = new Dictionary<string, (int Files, long Bytes, int Commits)>(StringComparer.Ordinal);
 		foreach (var file in tip.Where(file => file.Path.Contains('/')))
 		{
@@ -36,18 +37,13 @@ internal static class ComponentSurvey
 			folders[key] = (entry.Files + 1, entry.Bytes + file.Size, entry.Commits);
 		}
 
-		var arguments = new List<string> { "log", "--no-renames", "--name-only", "-z", "--format=%x01%H", $"refs/heads/{branch}" };
-		if (commitLimit > 0)
-		{
-			arguments.Insert(1, $"--max-count={commitLimit}");
-		}
-
 		var pairs = new Dictionary<(string, string), int>();
 		var commits = 0;
-		var touched = new HashSet<string>(StringComparer.Ordinal);
-		void Flush()
+		foreach (var commit in await store.LogAsync(new Storage.LogQuery([$"refs/heads/{branch}"], Limit: commitLimit > 0 ? commitLimit : null, Paths: true)))
 		{
-			var list = touched.Where(folders.ContainsKey).OrderBy(folder => folder, StringComparer.Ordinal).ToList();
+			commits++;
+			var list = (commit.Paths ?? []).Where(path => path.Contains('/')).Select(path => FolderOf(path, depth)).Distinct(StringComparer.Ordinal)
+				.Where(folders.ContainsKey).OrderBy(folder => folder, StringComparer.Ordinal).ToList();
 			foreach (var folder in list)
 			{
 				var entry = folders[folder];
@@ -65,29 +61,6 @@ internal static class ComponentSurvey
 					}
 				}
 			}
-
-			touched.Clear();
-		}
-
-		foreach (var field in GitBinary.SplitNul(await GitBinary.RunAsync(repository, arguments)))
-		{
-			var value = field.TrimStart('\n');
-			if (value.StartsWith('\x01'))
-			{
-				if (commits++ > 0)
-				{
-					Flush();
-				}
-			}
-			else if (value.Contains('/'))
-			{
-				touched.Add(FolderOf(value, depth));
-			}
-		}
-
-		if (commits > 0)
-		{
-			Flush();
 		}
 
 		var surveyed = folders

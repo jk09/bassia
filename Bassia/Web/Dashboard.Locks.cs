@@ -1,5 +1,6 @@
 namespace Bassia.Web;
 
+using Bassia.Storage;
 using System.Text;
 using Bassia.Locks;
 using Microsoft.AspNetCore.Http;
@@ -145,7 +146,7 @@ internal sealed partial class Dashboard
 		body.Append("<table class=\"list\"><tr><th>Path</th><th>Kind</th><th>Held by</th><th>State</th><th>How</th><th>Since</th><th>Renewed</th><th>Waiting</th></tr>");
 		foreach (var row in board.Holds)
 		{
-			var renewed = LockTable.Age(row.Entry);
+			var renewed = Storage.LockStores.Age(row.Entry);
 			var result = row.Entry.Results.FirstOrDefault(result => result.Component == row.Hold.Key.Component);
 			body.Append($"<tr><td><span class=\"lockchip {LockCommands.StateName(row.State)}\">{E(row.Hold.Key.Display)}</span></td><td>{LockKey.KindName(row.Hold.Key.Kind)}</td>" +
 				$"<td>{RunLink(row.Entry.RunId)}</td>" +

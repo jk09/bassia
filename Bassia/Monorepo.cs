@@ -98,9 +98,13 @@ internal sealed class Monorepo
 	/// <summary>How the integration merges <paramref name="component"/>'s results: the <c>merge.*</c> settings for it.</summary>
 	public Integration.MergePolicy MergePolicyFor(string component) => Integration.MergePolicy.For(Config, component);
 
-	private Monorepo(string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand,
+	/// <summary>Where everything this monorepo keeps is stored (see <see cref="Storage.IMonorepoBackend"/>).</summary>
+	public Storage.IMonorepoBackend Backend { get; }
+
+	private Monorepo(Storage.IMonorepoBackend backend, string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand,
 		Core.ComponentRegistry registry, ConfigSnapshot config)
 	{
+		Backend = backend;
 		Config = config;
 		Root = root;
 		WorkspaceDir = workspaceDir;
@@ -125,10 +129,17 @@ internal sealed class Monorepo
 		return null;
 	}
 
-	public static Monorepo Load(string root)
+	/// <summary>The monorepo at <paramref name="root"/> on this machine's disk (<see cref="LocalBackend"/>).</summary>
+	public static Monorepo Load(string root) => Load(new LocalBackend(root));
+
+	/// <summary>
+	/// The monorepo <paramref name="backend"/> keeps: its settings and its registry as of now. It waits for the backend in
+	/// place, which costs nothing on the local backend, whose meta store reads files.
+	/// </summary>
+	public static Monorepo Load(Storage.IMonorepoBackend backend)
 	{
-		var metaRepoDir = Path.Combine(root, MetaRepoFolderName);
-		var config = ConfigSnapshot.Load(root);
+		var root = backend.Root;
+		var config = backend.Config.Read();
 		if (config.Problems() is { Count: > 0 } problems)
 		{
 			throw new MonorepoException($"Invalid configuration: {string.Join("; ", problems)}.");
@@ -137,9 +148,8 @@ internal sealed class Monorepo
 		var workspace = config.Resolve(ConfigFile.Find("workspace.path"));
 		var workspaceDir = Path.GetFullPath(workspace.Value, root);
 
-		var registry = Core.ComponentRegistry.FromDefinitions(Storage.Git.GitMetaStore.Read(root), Storage.Git.GitMetaStore.ReadBoundaries(root),
-			Storage.Git.GitMetaStore.ReadConformance(root), Storage.Git.GitMetaStore.ReadUsers(root));
-		return new Monorepo(root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
+		var registry = Core.MetaRepo.OpenAsync(backend.Meta).GetAwaiter().GetResult().Registry;
+		return new Monorepo(backend, root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
 			config.Value("integration.weave").Trim(), config.Value("agent.command"), registry, config);
 	}
 
@@ -159,11 +169,10 @@ internal sealed class Monorepo
 	public IReadOnlyList<ComponentDefinition> Closure(IEnumerable<string> roots) => Registry.Closure(roots);
 
 	/// <summary>
-	/// The component graph of this monorepo on its git storage: the meta-repo in <c>.bassia</c> and each component's
-	/// repository next to it. Commands change components and the registry through it.
+	/// The component graph of this monorepo on its backend's storage: the meta store and the component histories.
+	/// Commands change components and the registry through it.
 	/// </summary>
-	public Core.MonorepoGraph Graph() =>
-		new(Core.MetaRepo.Open(new Storage.Git.GitMetaStore(Root), Registry), new Storage.Git.GitComponentStorage(Root));
+	public Core.MonorepoGraph Graph() => new(Core.MetaRepo.Open(Backend.Meta, Registry), Backend.Components);
 
 	/// <summary>The monorepo this one is a clone of (<c>depot.url</c>), or null for a monorepo of its own.</summary>
 	public Core.Depot? Depot => Config.Value("depot.url").Trim() is { Length: > 0 } url ? new Core.Depot(url) : null;
@@ -171,6 +180,18 @@ internal sealed class Monorepo
 	/// <summary>The views of this monorepo (<c>bassia view</c>), importing missing components from the depot in a clone.</summary>
 	public Core.Views Views() => new(Graph(), Root, WorkspaceDir, Depot);
 
-	/// <summary>The store of the agentic run records (<see cref="RunsRepoDir"/>).</summary>
-	public RunMetadataStore RunRecords() => new(new Git.GitClient(Root), RunsRepoDir);
+	/// <summary>The lock table every run of the monorepo shares.</summary>
+	public Storage.ILockStore Locks => Backend.Locks;
+
+	/// <summary>The cache of task results.</summary>
+	public Storage.ITaskCache TaskCache => Backend.TaskCache;
+
+	/// <summary>The live jobs - runs and integrations being executed - of this monorepo.</summary>
+	public Storage.IJobScheduler Jobs => Backend.Jobs;
+
+	/// <summary>The store of the agentic run records.</summary>
+	public Storage.IRunRecordStore RunRecords() => Backend.Records;
+
+	/// <summary>The integration records, kept beside the run records.</summary>
+	public Integration.IntegrationStore Integrations() => new(RunRecords());
 }

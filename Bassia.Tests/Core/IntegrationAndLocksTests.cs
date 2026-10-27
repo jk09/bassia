@@ -1,5 +1,6 @@
 namespace Bassia.Tests.Core;
 
+using Bassia.Storage.Memory;
 using Bassia.Integration;
 using Bassia.Locks;
 using Bassia.Split;
@@ -215,9 +216,9 @@ public class IntegrationAndLocksTests
 	// ----- lock catch-up -----
 
 	/// <summary>A lock table in the monorepo's temporary folder, with the released holds and result of <paramref name="run"/> on lib.</summary>
-	private static async Task<LockTable> TableAsync(MemoryMonorepo monorepo, RunMetadata run, string path)
+	private static async Task<ILockStore> TableAsync(MemoryMonorepo monorepo, RunMetadata run, string path)
 	{
-		var table = new LockTable(Path.Combine(monorepo.WorkspaceDir, ".locks"), TimeSpan.FromMinutes(2));
+		var table = new MemoryLockStore(TimeSpan.FromMinutes(2));
 		var lib = run.Components.Single();
 		var entry = RunLocks.NewEntry(run.RunId, RunMetadata.Timestamp(), 1, "0", RunMetadata.Timestamp());
 		entry.State = LockEntry.ReleasedState;
@@ -277,10 +278,10 @@ public class IntegrationAndLocksTests
 		var table = await TableAsync(monorepo, holder, "a.txt");
 
 		await LockCheckouts.ForgetLandedAsync(monorepo.Graph, table);
-		Assert.True(table.Has(holder.RunId));
+		Assert.True(await table.HasAsync(holder.RunId));
 
 		await monorepo.Storage["lib"].SetBranchAsync("main", holder.Components.Single().ResultCommit!);
 		await LockCheckouts.ForgetLandedAsync(monorepo.Graph, table);
-		Assert.False(table.Has(holder.RunId));
+		Assert.False(await table.HasAsync(holder.RunId));
 	}
 }

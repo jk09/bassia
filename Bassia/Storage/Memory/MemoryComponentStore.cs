@@ -12,11 +12,16 @@ internal sealed record MemoryFile(string Mode, byte[] Content)
 	public static MemoryFile Text(string text) => new("100644", Encoding.UTF8.GetBytes(text));
 }
 
-/// <summary>An in-memory commit: its DAG node, its complete content and the units nested in it.</summary>
+/// <summary>
+/// An in-memory commit: its DAG node, its complete content and the units nested in it, when it was made and its place
+/// in the order commits are made in (a commit is always made after its parents).
+/// </summary>
 internal sealed record MemoryCommit(
 	StoredCommit Node,
 	IReadOnlyDictionary<string, MemoryFile> Files,
-	IReadOnlyDictionary<string, NestedUnit> Nested);
+	IReadOnlyDictionary<string, NestedUnit> Nested,
+	DateTimeOffset Date = default,
+	long Sequence = 0);
 
 /// <summary>
 /// The reference implementation of <see cref="IComponentStore"/>: a component history kept in memory. It implements the
@@ -169,7 +174,8 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 			held?.UnionWith(files.Values.Select(file => file.Object));
 			commits[id] = new MemoryCommit(new StoredCommit(id, parents.ToList(), message, Core.Actor.Current is { } actor ? $"{actor.Author.Name} <{actor.Author.Email}>" : null),
 				new SortedDictionary<string, MemoryFile>(files.ToDictionary(), StringComparer.Ordinal),
-				new SortedDictionary<string, NestedUnit>((nested ?? new Dictionary<string, NestedUnit>()).ToDictionary(), StringComparer.Ordinal));
+				new SortedDictionary<string, NestedUnit>((nested ?? new Dictionary<string, NestedUnit>()).ToDictionary(), StringComparer.Ordinal),
+				DateTimeOffset.UtcNow, number);
 			return id;
 		}
 	}
@@ -315,6 +321,14 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 		lock (gate)
 		{
 			return Task.FromResult(tags.TryGetValue(name, out var entry) ? entry.Tag : null);
+		}
+	}
+
+	public Task<string?> TagMessageAsync(string name)
+	{
+		lock (gate)
+		{
+			return Task.FromResult(tags.TryGetValue(name, out var entry) && entry.Tag.Annotated ? entry.Message : null);
 		}
 	}
 
@@ -565,6 +579,36 @@ internal sealed class MemoryComponentStore(string name, string location) : IComp
 	public Task<IReadOnlyList<string>> ChangedPathsAsync(string from, string to) => Task.FromResult(MemoryMerge.Changed(Get(from).Files, Get(to).Files));
 
 	public Task<string> DiffAsync(string from, string to) => Task.FromResult(MemoryMerge.Diff(Get(from).Files, Get(to).Files));
+
+	public Task<IReadOnlyList<FileStat>> DiffStatAsync(string? from, string to) =>
+		Task.FromResult(MemoryMerge.Stat(from is null ? new Dictionary<string, MemoryFile>() : Get(from).Files, Get(to).Files));
+
+	public async Task<IReadOnlyList<LogEntry>> LogAsync(LogQuery query)
+	{
+		var tips = new List<string>();
+		if (query.Tips is null)
+		{
+			tips.AddRange((await ListBranchesAsync()).Select(branch => branch.Commit));
+			tips.AddRange((await ListTagsAsync()).Select(tag => tag.Commit));
+		}
+		else
+		{
+			foreach (var tip in query.Tips)
+			{
+				tips.Add((await ResolveRefAsync(tip))?.Commit ?? Find(tip)?.Node.Id ?? throw new StorageException($"'{tip}' is no branch, tag or commit of component '{Name}'."));
+			}
+		}
+
+		var branchesAt = (await ListBranchesAsync()).ToLookup(branch => branch.Commit, branch => branch.Name);
+		var tagsAt = (await ListTagsAsync()).ToLookup(tag => tag.Commit, tag => tag.Name);
+		var commits = tips.Distinct(StringComparer.Ordinal).SelectMany(Ancestry).DistinctBy(commit => commit.Node.Id)
+			.Where(commit => query.Grep is not { Count: > 0 } grep || grep.Any(text => commit.Node.Message.Contains(text, StringComparison.Ordinal)))
+			.OrderByDescending(commit => commit.Date).ThenByDescending(commit => commit.Sequence)
+			.Skip(query.Skip)
+			.Take(query.Limit ?? int.MaxValue);
+		return commits.Select(commit => new LogEntry(commit.Node, commit.Date, branchesAt[commit.Node.Id].ToList(), tagsAt[commit.Node.Id].ToList(),
+			query.Paths ? MemoryMerge.Changed(commit.Node.Parents.Count == 0 ? new Dictionary<string, MemoryFile>() : Get(commit.Node.Parents[0]).Files, commit.Files) : null)).ToList();
+	}
 
 	/// <summary>The storage holding this store, which remembers its working copies; null for an upstream.</summary>
 	internal MemoryComponentStorage? Storage { get; set; }

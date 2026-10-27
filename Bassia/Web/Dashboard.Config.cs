@@ -13,8 +13,8 @@ internal sealed partial class Dashboard
 		var config = monorepo.Config;
 		var body = new StringBuilder($"""
 			<p class="muted">Each setting comes from the highest layer that sets it: <span class="layer user wins">user</span>
-			<code>{E(ConfigFile.PathOf(monorepo.Root, ConfigLayer.User))}</code> (yours, never committed) over
-			<span class="layer monorepo wins">monorepo</span> <code>{E(ConfigFile.PathOf(monorepo.Root))}</code> (committed, shared) over
+			<code>{E(monorepo.Backend.Config.LocationOf(ConfigLayer.User))}</code> (yours, never committed) over
+			<span class="layer monorepo wins">monorepo</span> <code>{E(monorepo.Backend.Config.LocationOf(ConfigLayer.Monorepo))}</code> (committed, shared) over
 			<span class="layer default wins">default</span>. Change them with {Cmd("bassia config set -key <key> -value <value> [-user]")} or {Cmd("bassia config unset -key <key> [-user]")}.</p>
 			<table class="list config"><tr><th>Key</th><th>Effective value</th><th>Layers</th><th>Allowed</th><th>Change</th></tr>
 			""");

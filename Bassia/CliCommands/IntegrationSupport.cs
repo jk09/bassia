@@ -12,7 +12,7 @@ using Bassia.Integration;
 internal static class IntegrationSupport
 {
 	/// <summary>The runs named by <c>-runs</c>; <c>all</c> is every recorded run with a pushed result.</summary>
-	internal static async Task<IReadOnlyList<RunMetadata>> SelectRunsAsync(RunMetadataStore store, string runs)
+	internal static async Task<IReadOnlyList<RunMetadata>> SelectRunsAsync(Storage.IRunRecordStore store, string runs)
 	{
 		var recorded = await store.ListLatestAsync();
 		if (runs.Trim().Equals("all", StringComparison.OrdinalIgnoreCase))

@@ -12,7 +12,7 @@ using Bassia.Git;
 internal static class UserCommands
 {
 	/// <summary>The environment variable naming the current user; it wins over every other source.</summary>
-	public const string Variable = "BASSIA_USER";
+	public const string Variable = LocalIdentity.Variable;
 
 	/// <summary>Commands that change the monorepo without a known user: becoming known, setting a monorepo up, the guide, feedback.</summary>
 	private static readonly IReadOnlySet<string> Unattributed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -22,35 +22,11 @@ internal static class UserCommands
 	};
 
 	/// <summary>
-	/// The current user of <paramref name="monorepo"/> and where it came from: <c>BASSIA_USER</c>, the <c>user.id</c> of the
-	/// user's own configuration layer, or the registered user whose email is the git email configured for the meta-repo.
-	/// Null when none applies; an id that is not registered is an error.
+	/// The current user of <paramref name="monorepo"/> and where it came from, as its backend's identity knows it (see
+	/// <see cref="LocalIdentity"/>). Null when none applies; an id that is not registered is an error.
 	/// </summary>
-	public static async Task<(UserDefinition? User, string Source)> ResolveAsync(Monorepo monorepo)
-	{
-		var users = monorepo.Registry.Users;
-		if (Environment.GetEnvironmentVariable(Variable) is { Length: > 0 } fromEnvironment)
-		{
-			return (Known(users, fromEnvironment.Trim(), Variable), Variable);
-		}
-
-		if (monorepo.Config.Raw(ConfigLayer.User, ConfigFile.Find("user.id")) is { Length: > 0 } configured)
-		{
-			return (Known(users, configured.Trim(), "user.id in config.user.toml"), "user.id in config.user.toml");
-		}
-
-		var email = await GitClient.In(monorepo.MetaRepoDir).RunAsync(["config", "user.email"]);
-		if (email.ExitCode == 0 && users.FindByEmail(email.Output.Trim()) is { } byEmail)
-		{
-			return (byEmail, $"git user.email {email.Output.Trim()}");
-		}
-
-		return (null, "none");
-	}
-
-	private static UserDefinition Known(UserDirectory users, string id, string source) =>
-		users.Find(id) ?? throw new MonorepoException($"{source} names '{id}', which is not a registered user" +
-			(users.IsEmpty ? "; register it with 'bassia user add'." : $"; registered: {string.Join(", ", users.Users.Select(user => user.Id))}."));
+	public static Task<(UserDefinition? User, string Source)> ResolveAsync(Monorepo monorepo) =>
+		monorepo.Backend.Identity.CurrentAsync(monorepo.Registry.Users);
 
 	/// <summary>
 	/// Who <paramref name="spec"/> acts for: the current user, when the monorepo has users. A command that changes the
@@ -179,14 +155,14 @@ internal static class UserCommands
 			new Dictionary<string, object?> { ["id"] = id, ["meta_repo_commit"] = revision });
 	}
 
-	public static Task<int> UseAsync(Invocation invocation)
+	public static async Task<int> UseAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var user = monorepo.Registry.Users.Require(invocation.Require("id"));
-		ConfigFile.Set(monorepo.Root, ConfigFile.Find("user.id"), user.Id, ConfigLayer.User);
-		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command,
+		await monorepo.Backend.Config.SetAsync(ConfigFile.Find("user.id"), user.Id, ConfigLayer.User);
+		return ProgramCli.WriteResult(true, invocation.Command,
 			$"You are {user.Id} in this monorepo from now on: {user.Display}. Your own layer (config.user.toml) records it; {Variable} overrides it.",
-			new Dictionary<string, object?>(Describe(user)) { ["config"] = ConfigFile.PathOf(monorepo.Root, ConfigLayer.User) }));
+			new Dictionary<string, object?>(Describe(user)) { ["config"] = monorepo.Backend.Config.LocationOf(ConfigLayer.User) });
 	}
 
 	internal static Dictionary<string, object?> Describe(UserDefinition user) => new()

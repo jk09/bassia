@@ -48,9 +48,9 @@ internal static class AgentCommand
 	/// <c>-lock-folders</c>), added to the configured ones.
 	/// </summary>
 	/// <paramref name="load"/> makes the run sparse (<c>-load</c>, or a config spec's load rules).
-	internal static Task<AgentRunOutcome> StartRunAsync(GitClient git, Monorepo monorepo, string select, string command, AgentRunContext? context = null, string? runId = null,
+	internal static Task<AgentRunOutcome> StartRunAsync(Monorepo monorepo, string select, string command, AgentRunContext? context = null, string? runId = null,
 		string? lockFiles = null, string? lockFolders = null, IReadOnlyList<string>? load = null) =>
-		Runs(monorepo, new RunMetadataStore(git, monorepo.RunsRepoDir)).StartAsync(select, command, context, runId, lockFiles, lockFolders,
+		Runs(monorepo, monorepo.RunRecords()).StartAsync(select, command, context, runId, lockFiles, lockFolders,
 			closure => CheckLockPatterns(monorepo, closure, lockFiles, lockFolders), load);
 
 	/// <summary>Checks a <c>-select</c> value and resolves it (see <see cref="AgentRuns.ResolveSelectionAsync"/>).</summary>

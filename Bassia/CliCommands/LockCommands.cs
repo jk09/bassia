@@ -1,5 +1,6 @@
 namespace Bassia;
 
+using Bassia.Storage;
 using System.Diagnostics;
 using Bassia.Cli;
 using Bassia.CliCommands.Agent;
@@ -18,9 +19,9 @@ internal static class LockCommands
 	internal static TimeSpan WaitInterval { get; set; } = TimeSpan.FromMilliseconds(500);
 
 	/// <summary>The run a lock command acts for: its id, folder, record and the process executing it.</summary>
-	private sealed record RunContext(string RunId, string RunDir, RunMetadata? Record, JobInfo? Job)
+	private sealed record RunContext(string RunId, string RunDir, RunMetadata? Record, JobInfo? Job, bool Alive)
 	{
-		public bool Live => JobRegistry.IsAlive(Job) && (Record is null || Record.Status == "started");
+		public bool Live => Alive && (Record is null || Record.Status == "started");
 
 		public string Checkout(string component) =>
 			Record?.Components.FirstOrDefault(entry => entry.Name == component)?.Path ?? Path.Combine(RunDir, component);
@@ -48,11 +49,11 @@ internal static class LockCommands
 	public static async Task<int> ListAsync(Invocation invocation)
 	{
 		var monorepo = LoadMonorepo();
-		var table = new LockTable(monorepo);
+		var table = monorepo.Locks;
 		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var component = invocation.Get("component");
 		var run = invocation.Get("run") is { } name ? (await FindRunAsync(monorepo, name)).RunId : null;
-		var entries = table.ReadAll();
+		var entries = (await table.ReadAllAsync());
 
 		var holds = entries
 			.Where(entry => run is null || entry.RunId == run)
@@ -72,7 +73,7 @@ internal static class LockCommands
 
 		return ProgramCli.WriteResult(true, invocation.Command, message, new Dictionary<string, object?>
 		{
-			["lock_table"] = table.Dir,
+			["lock_table"] = table.Location,
 			["ttl_seconds"] = (long)table.Ttl.TotalSeconds,
 			["live"] = states.Count(state => state == LockState.Live),
 			["released"] = states.Count(state => state == LockState.Released),
@@ -98,7 +99,7 @@ internal static class LockCommands
 		});
 	}
 
-	private static Dictionary<string, object?> HoldData(Monorepo monorepo, LockTable table, IReadOnlyList<LockEntry> entries, LockEntry entry, LockHold hold) => new()
+	private static Dictionary<string, object?> HoldData(Monorepo monorepo, Storage.ILockStore table, IReadOnlyList<LockEntry> entries, LockEntry entry, LockHold hold) => new()
 	{
 		["user"] = entry.User,
 		["contact"] = entry.User is null ? null : UserCommands.Reach(monorepo, entry.User),
@@ -118,7 +119,7 @@ internal static class LockCommands
 	};
 
 	/// <summary>The runs waiting for something <paramref name="hold"/> covers.</summary>
-	private static IEnumerable<string> Waiters(LockTable table, IReadOnlyList<LockEntry> entries, LockEntry holder, LockHold hold) => entries
+	private static IEnumerable<string> Waiters(Storage.ILockStore table, IReadOnlyList<LockEntry> entries, LockEntry holder, LockHold hold) => entries
 		.Where(entry => entry.RunId != holder.RunId && entry.Waits.Any(wait => table.IsWaiting(entry, wait) && wait.Key.Overlaps(hold.Key)))
 		.Select(entry => entry.RunId);
 
@@ -141,11 +142,11 @@ internal static class LockCommands
 	public static async Task<int> CheckAsync(Invocation invocation)
 	{
 		var monorepo = LoadMonorepo();
-		var table = new LockTable(monorepo);
+		var table = monorepo.Locks;
 		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var run = await RunOfAsync(invocation, monorepo, required: false);
 		var paths = Resolve(invocation, monorepo, run);
-		var entries = table.ReadAll();
+		var entries = (await table.ReadAllAsync());
 		var results = new List<IReadOnlyDictionary<string, object?>>();
 		var notes = new List<string>();
 		var free = true;
@@ -215,7 +216,7 @@ internal static class LockCommands
 	public static async Task<int> ClaimAsync(Invocation invocation)
 	{
 		var monorepo = LoadMonorepo();
-		var table = new LockTable(monorepo);
+		var table = monorepo.Locks;
 		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var run = await LiveRunAsync(invocation, monorepo);
 		var paths = Resolve(invocation, monorepo, run);
@@ -286,14 +287,14 @@ internal static class LockCommands
 	public static async Task<int> WaitAsync(Invocation invocation)
 	{
 		var monorepo = LoadMonorepo();
-		var table = new LockTable(monorepo);
+		var table = monorepo.Locks;
 		await LockCheckouts.ForgetLandedAsync(monorepo.Graph(), table);
 		var run = await LiveRunAsync(invocation, monorepo);
 		var paths = Resolve(invocation, monorepo, run);
 		var keys = paths.Select(path => path.Key).ToList();
 		var timeout = invocation.Int("timeout", 0, 0);
 		var pid = Environment.ProcessId;
-		var processStart = JobRegistry.CurrentProcessStart();
+		var processStart = LocalJobScheduler.CurrentProcessStart();
 		var waitedFor = new List<string>();
 		var clock = Stopwatch.StartNew();
 
@@ -436,7 +437,7 @@ internal static class LockCommands
 	public static async Task<int> ReleaseAsync(Invocation invocation)
 	{
 		var monorepo = LoadMonorepo();
-		var table = new LockTable(monorepo);
+		var table = monorepo.Locks;
 		var name = invocation.Get("run") ?? Environment.GetEnvironmentVariable("BASSIA_RUN_ID")
 			?? throw invocation.Usage("-run is required outside a run (inside one, BASSIA_RUN_ID names it).");
 		if (!invocation.Has("all") && !invocation.Has("path"))
@@ -445,7 +446,7 @@ internal static class LockCommands
 		}
 
 		var run = await FindRunAsync(monorepo, name);
-		var entry = table.Find(run.RunId);
+		var entry = await table.FindAsync(run.RunId);
 		if (entry is null)
 		{
 			return ProgramCli.WriteResult(true, invocation.Command, $"Run '{RunMetadata.Key(run.RunId)}' holds nothing.",
@@ -511,11 +512,11 @@ internal static class LockCommands
 
 	private static async Task<RunContext> FindRunAsync(Monorepo monorepo, string name)
 	{
-		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
-		var jobs = new JobRegistry(monorepo);
+		var store = monorepo.RunRecords();
+		var jobs = monorepo.Jobs;
 		var candidates = (await store.ListKeysAsync(RunMetadata.RefPrefix)).Select(RunMetadata.NormalizeRunId)
-			.Concat(jobs.List(RunCommands.JobKind).Select(job => job.Id))
-			.Concat(new LockTable(monorepo).ReadAll().Select(entry => entry.RunId))
+			.Concat((await jobs.ListAsync(RunCommands.JobKind)).Select(job => job.Id))
+			.Concat((await monorepo.Locks.ReadAllAsync()).Select(entry => entry.RunId))
 			.Distinct(StringComparer.Ordinal)
 			.Where(runId => IntegrationSupport.MatchesRun(runId, name))
 			.ToList();
@@ -530,7 +531,8 @@ internal static class LockCommands
 		var fromEnvironment = Environment.GetEnvironmentVariable("BASSIA_RUN_ID") is { } current && RunMetadata.NormalizeRunId(current) == runId
 			? Environment.GetEnvironmentVariable("BASSIA_RUN_DIR")
 			: null;
-		return new RunContext(runId, record?.WorkspacePath ?? fromEnvironment ?? Path.Combine(monorepo.WorkspaceDir, runId), record, jobs.Find(runId));
+		var job = await jobs.FindAsync(runId);
+		return new RunContext(runId, record?.WorkspacePath ?? fromEnvironment ?? Path.Combine(monorepo.WorkspaceDir, runId), record, job, jobs.IsAlive(job));
 	}
 
 	private static IReadOnlyList<LockPath> Resolve(Invocation invocation, Monorepo monorepo, RunContext? run)

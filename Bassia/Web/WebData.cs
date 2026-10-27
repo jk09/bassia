@@ -1,7 +1,7 @@
 namespace Bassia.Web;
 
+using Bassia.Storage;
 using System.Globalization;
-using Bassia.Git;
 using Bassia.Integration;
 using Bassia.Locks;
 
@@ -21,12 +21,13 @@ internal static class LiveRuns
 	public const int TailLines = 40;
 
 	/// <summary>Every live run, oldest first. A run whose process is gone is not live, whatever its record says.</summary>
-	public static IReadOnlyList<LiveRun> Read(Monorepo monorepo, IReadOnlyList<RunMetadata> recorded)
+	public static async Task<IReadOnlyList<LiveRun>> ReadAsync(Monorepo monorepo, IReadOnlyList<RunMetadata> recorded)
 	{
 		var live = new List<LiveRun>();
-		var table = new LockTable(monorepo);
-		var locks = table.ReadAll().ToDictionary(entry => entry.RunId, StringComparer.Ordinal);
-		foreach (var job in new JobRegistry(monorepo).List(RunCommands.JobKind).Where(JobRegistry.IsAlive))
+		var table = monorepo.Locks;
+		var locks = (await table.ReadAllAsync()).ToDictionary(entry => entry.RunId, StringComparer.Ordinal);
+		var jobs = monorepo.Jobs;
+		foreach (var job in (await jobs.ListAsync(RunCommands.JobKind)).Where(jobs.IsAlive))
 		{
 			var record = recorded.FirstOrDefault(run => run.RunId == job.Id);
 			if (record is not null && record.Status != "started")
@@ -34,7 +35,7 @@ internal static class LiveRuns
 				continue;
 			}
 
-			var tail = job.Log is null ? [] : Tail(job.Log, TailLines);
+			var tail = (await RunCommands.OutputAsync(jobs, job, -TailWindow))?.Where(line => line.Trim().Length > 0).TakeLast(TailLines).ToList() ?? [];
 			var started = Parse(record?.Created ?? job.Started) ?? DateTimeOffset.UtcNow;
 			var entry = locks.GetValueOrDefault(job.Id);
 			live.Add(new LiveRun(job.Id, record is null ? "preparing" : PhaseOf(tail), started, record, tail, job.Detached,
@@ -58,26 +59,8 @@ internal static class LiveRuns
 				: "agent";
 	}
 
-	/// <summary>The last non-empty lines of a log another process is still writing.</summary>
-	internal static IReadOnlyList<string> Tail(string path, int count)
-	{
-		try
-		{
-			using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-			const int window = 64 * 1024;
-			if (stream.Length > window)
-			{
-				stream.Seek(-window, SeekOrigin.End);
-			}
-
-			using var reader = new StreamReader(stream);
-			return reader.ReadToEnd().Replace("\r", "").Split('\n').Where(line => line.Trim().Length > 0).TakeLast(count).ToList();
-		}
-		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-		{
-			return [];
-		}
-	}
+	/// <summary>How much of the end of a live run's output is read for its tail.</summary>
+	private const long TailWindow = 64 * 1024;
 
 	public static DateTimeOffset? Parse(string? timestamp) =>
 		DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : null;
@@ -95,10 +78,10 @@ internal sealed record LockBoard(IReadOnlyList<LockBoard.Row> Holds, IReadOnlyLi
 
 	public static LockBoard Empty { get; } = new([], [], TimeSpan.Zero);
 
-	public static LockBoard Read(Monorepo monorepo)
+	public static async Task<LockBoard> ReadAsync(Monorepo monorepo)
 	{
-		var table = new LockTable(monorepo);
-		var entries = table.ReadAll();
+		var table = monorepo.Locks;
+		var entries = (await table.ReadAllAsync());
 		var states = entries.ToDictionary(entry => entry.RunId, entry => table.StateOf(entry), StringComparer.Ordinal);
 		var waits = entries.SelectMany(entry => entry.Waits.Where(wait => table.IsWaiting(entry, wait)).Select(wait => new Waiting(entry, wait,
 				entries.Where(other => other.RunId != entry.RunId && states[other.RunId] == LockState.Live && other.Holds.Any(hold => hold.Key.Overlaps(wait.Key)))
@@ -170,27 +153,26 @@ internal sealed class MergeQueue
 		var items = new List<QueueItem>();
 		var branches = new Dictionary<string, string>(StringComparer.Ordinal);
 		var heads = new Dictionary<string, string?>(StringComparer.Ordinal);
+		var storage = monorepo.Backend.Components;
 		foreach (var run in runs.Where(IntegrationPlanner.HasResults).OrderBy(run => run.Created, StringComparer.Ordinal))
 		{
 			foreach (var result in run.Components.Where(entry => entry.ResultStatus == ResultStatus.Pushed && entry.ResultCommit is not null && entry.ResultTag is not null))
 			{
-				var sourceDir = monorepo.SourceRepoDir(result.Name);
-				if (monorepo.FindComponent(result.Name) is null || !Directory.Exists(sourceDir))
+				if (monorepo.FindComponent(result.Name) is null || !storage.Exists(result.Name))
 				{
 					continue;
 				}
 
-				var git = GitClient.In(sourceDir);
+				var store = storage.Open(result.Name);
 				if (!heads.TryGetValue(result.Name, out var head))
 				{
-					var branch = await git.RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-					var name = branch.ExitCode == 0 ? branch.Output.Trim() : null;
+					var name = await store.DefaultBranchAsync();
 					if (name is not null)
 					{
 						branches[result.Name] = name;
 					}
 
-					heads[result.Name] = head = name is null ? null : await git.RunAsync(["rev-parse", "--quiet", "--verify", $"{name}^{{commit}}"]) is { ExitCode: 0 } resolved ? resolved.Output.Trim() : null;
+					heads[result.Name] = head = name is null ? null : await store.BranchTipAsync(name);
 				}
 
 				// The latest integration that took this result decides, unless the default branch already has it.
@@ -200,7 +182,7 @@ internal sealed class MergeQueue
 					.OrderByDescending(pair => pair.record.Created, StringComparer.Ordinal)
 					.FirstOrDefault();
 
-				var landed = head is not null && await IsAncestorAsync(git, result.ResultCommit!, head);
+				var landed = head is not null && await IsAncestorAsync(store, result.ResultCommit!, head);
 				var state = landed ? QueueState.Landed
 					: step is null || step.Outcome is StepOutcome.Pending or StepOutcome.Skipped ? QueueState.Waiting
 					: step.NeedsAttention ? QueueState.NeedsAttention
@@ -212,8 +194,9 @@ internal sealed class MergeQueue
 		return new MergeQueue(items, branches);
 	}
 
-	private static async Task<bool> IsAncestorAsync(GitClient git, string ancestor, string descendant) =>
-		(await git.RunAsync(["merge-base", "--is-ancestor", ancestor, descendant])).ExitCode == 0;
+	/// <summary>Whether a commit is in a branch's history; a commit the store does not have is not.</summary>
+	private static async Task<bool> IsAncestorAsync(Storage.IComponentStore store, string ancestor, string descendant) =>
+		await store.GetCommitAsync(ancestor) is not null && await store.IsAncestorAsync(ancestor, descendant);
 }
 
 /// <summary>

@@ -123,16 +123,16 @@ internal sealed partial class Dashboard
 	/// <summary>Everything most pages draw from, read once per request.</summary>
 	private sealed record State(Monorepo Monorepo, IReadOnlyList<RunMetadata> Runs, IReadOnlyList<IntegrationRecord> Integrations, IReadOnlyList<LiveRun> Live, MergeQueue Queue, LockBoard Locks)
 	{
-		public RunMetadataStore Store => new(new GitClient(Monorepo.Root), Monorepo.RunsRepoDir);
+		public Storage.IRunRecordStore Store => Monorepo.RunRecords();
 	}
 
 	private async Task<State> LoadAsync()
 	{
 		var monorepo = Current();
-		var store = new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir);
+		var store = monorepo.RunRecords();
 		var runs = await store.ListLatestAsync();
-		var integrations = await new IntegrationStore(store).ListLatestAsync();
-		return new State(monorepo, runs, integrations, LiveRuns.Read(monorepo, runs), await MergeQueue.ReadAsync(monorepo, runs, integrations), LockBoard.Read(monorepo));
+		var integrations = await monorepo.Integrations().ListLatestAsync();
+		return new State(monorepo, runs, integrations, await LiveRuns.ReadAsync(monorepo, runs), await MergeQueue.ReadAsync(monorepo, runs, integrations), await LockBoard.ReadAsync(monorepo));
 	}
 
 	/// <summary>What the component map shows on each node.</summary>
@@ -289,17 +289,20 @@ internal sealed partial class Dashboard
 
 	private static async Task<IReadOnlyList<GitRef>?> RefsAsync(Monorepo monorepo, string component)
 	{
-		var sourceDir = monorepo.SourceRepoDir(component);
-		if (!Directory.Exists(sourceDir))
+		var storage = monorepo.Backend.Components;
+		if (!storage.Exists(component))
 		{
 			return null;
 		}
 
 		try
 		{
-			return await GitRef.ListAsync(GitClient.In(sourceDir));
+			var store = storage.Open(component);
+			return (await store.ListBranchesAsync()).Select(branch => new GitRef(branch.Name, GitRefKind.Branch, branch.Commit, branch.Subject))
+				.Concat((await store.ListTagsAsync()).Select(tag => new GitRef(tag.Name, tag.Annotated ? GitRefKind.AnnotatedTag : GitRefKind.LightweightTag, tag.Commit, tag.Subject)))
+				.ToList();
 		}
-		catch (GitException)
+		catch (Storage.StorageException)
 		{
 			return null;
 		}
@@ -406,11 +409,8 @@ internal sealed partial class Dashboard
 			: made == 0 ? 2 : 2 + made;
 	}
 
-	private static async Task<string?> DefaultBranchAsync(Monorepo monorepo, string component)
-	{
-		var head = await GitClient.In(monorepo.SourceRepoDir(component)).RunAsync(["symbolic-ref", "--quiet", "--short", "HEAD"]);
-		return head.ExitCode == 0 ? head.Output.Trim() : null;
-	}
+	private static Task<string?> DefaultBranchAsync(Monorepo monorepo, string component) =>
+		monorepo.Backend.Components.Open(component).DefaultBranchAsync();
 
 	internal static string PolicyText(MergePolicy policy) =>
 		$"conflicts → <b>{(policy.ManualSemantic ? "a human" : "the resolver")}</b>, weave warnings → <b>{E(IntegrationRecord.Snake(policy.Warnings))}</b>, " +
@@ -572,21 +572,32 @@ internal sealed partial class Dashboard
 			return NotFound($"'{hash}' is not a commit hash.");
 		}
 
-		var git = GitClient.In(monorepo.SourceRepoDir(component));
-		var show = await git.RunAsync(["show", "--no-color", "--stat", "--format=fuller", hash, "--"]);
-		if (show.ExitCode != 0)
+		var storage = monorepo.Backend.Components;
+		var store = storage.Exists(component) ? storage.Open(component) : null;
+		var found = store is null ? [] : await store.FindObjectsAsync(hash.ToLowerInvariant());
+		if (store is null || found is not [{ Kind: "commit" } only])
 		{
 			return NotFound($"Commit {hash} does not exist in component '{component}'.");
 		}
 
-		var full = (await git.RunOrThrowAsync(["rev-parse", "--verify", $"{hash}^{{commit}}"])).Trim();
-		var refs = await git.RunAsync(["for-each-ref", "--format=%(refname:short)", "--points-at", full, "refs/heads", "refs/tags"]);
-		var chips = string.Concat(refs.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(Ref));
+		var full = only.Id;
+		var entry = (await store.LogAsync(new Storage.LogQuery([full], Limit: 1))).Single();
+		var stat = await store.DiffStatAsync(entry.Commit.Parents.FirstOrDefault(), full);
+		var chips = string.Concat(entry.Branches.Concat(entry.Tags).Order(StringComparer.Ordinal).Select(Ref));
+		var show = new StringBuilder()
+			.Append($"commit {full}\n")
+			.Append(entry.Commit.Parents.Count > 1 ? $"Merge: {string.Join(" ", entry.Commit.Parents.Select(parent => parent[..Math.Min(7, parent.Length)]))}\n" : "")
+			.Append($"Author: {entry.Commit.Author}\n")
+			.Append($"Date:   {entry.Date.ToUniversalTime():yyyy-MM-dd HH:mm:ss} UTC\n\n")
+			.Append(string.Concat(entry.Commit.Message.Replace("\r", "").TrimEnd('\n').Split('\n').Select(line => $"    {line}\n")))
+			.Append('\n')
+			.Append(Cli.DiffStatText.Render(stat))
+			.ToString();
 		var body = $"""
 			<table class="list facts"><tr><td>Component</td><td><a href="{ComponentHref(component)}">{E(component)}</a></td></tr>
 			<tr><td>Commit</td><td><code>{E(full)}</code></td></tr>
 			<tr><td>Refs</td><td>{(chips.Length == 0 ? "<span class=\"muted\">-</span>" : chips)}</td></tr></table>
-			<pre>{E(show.Output)}</pre>
+			<pre>{E(show)}</pre>
 			""";
 		return View("/timeline", $"Commit {Short(full)}", body);
 	}

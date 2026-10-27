@@ -70,6 +70,9 @@ internal interface IMetaStore
 	/// <summary>The registered users as of the latest revision, in registration order.</summary>
 	Task<IReadOnlyList<Core.UserDefinition>> LoadUsersAsync();
 
+	/// <summary>The meta-repo's revisions, newest first, as people read history (see <see cref="IComponentStore.LogAsync"/>).</summary>
+	Task<IReadOnlyList<LogEntry>> LogAsync(LogQuery query);
+
 	/// <summary>
 	/// Applies <paramref name="changes"/> (already validated) as one revision described by <paramref name="message"/>
 	/// and returns its id, or null when the store records nothing new. Either every change is applied or none.

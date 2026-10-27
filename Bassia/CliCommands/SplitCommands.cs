@@ -75,8 +75,8 @@ internal static class SplitCommands
 				});
 		}
 
-		var runs = await new RunMetadataStore(new GitClient(monorepo.Root), monorepo.RunsRepoDir).ListLatestAsync();
-		if (ComponentCommands.LiveRunsPerComponent(monorepo, runs).GetValueOrDefault(allocation.Source.Name) is > 0 and var live)
+		var runs = await monorepo.RunRecords().ListLatestAsync();
+		if ((await ComponentCommands.LiveRunsPerComponentAsync(monorepo, runs)).GetValueOrDefault(allocation.Source.Name) is > 0 and var live)
 		{
 			throw new MonorepoException($"{live} run(s) on '{allocation.Source.Name}' are live; wait for them or stop them before splitting it.");
 		}
@@ -155,20 +155,10 @@ internal static class SplitCommands
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
 		var component = ComponentCommands.RequireComponent(monorepo, invocation.Require("name"));
-		var repository = ComponentCommands.RequireRepo(monorepo, component.Name);
-		var branch = invocation.Get("branch");
-		if (branch is null)
-		{
-			var head = await GitClient.In(repository).RunAsync(["symbolic-ref", "--short", "HEAD"]);
-			branch = head.ExitCode == 0 ? head.Output.Trim() : "main";
-		}
-
-		if ((await GitClient.In(repository).RunAsync(["rev-parse", "--verify", "--quiet", $"refs/heads/{branch}^{{commit}}"])).ExitCode != 0)
-		{
-			throw new MonorepoException($"Component '{component.Name}' has no branch '{branch}'.");
-		}
-
-		var survey = await ComponentSurvey.RunAsync(repository, component.Name, branch,
+		ComponentCommands.RequireRepo(monorepo, component.Name);
+		var store = monorepo.Backend.Components.Open(component.Name);
+		var branch = invocation.Get("branch") ?? await store.DefaultBranchAsync() ?? "main";
+		var survey = await ComponentSurvey.RunAsync(store, component.Name, branch,
 			invocation.Int("depth", 2, 1, 10), invocation.Int("limit", 5000, 0), invocation.Int("pairs", 30, 0, 1000));
 
 		return ProgramCli.WriteResult(true, invocation.Command,

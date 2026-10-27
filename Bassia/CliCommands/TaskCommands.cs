@@ -102,7 +102,7 @@ internal static class TaskCommands
 		}, finished: result => Console.Error.WriteLine(result.Cached
 			? $"{result.Component}:{result.Task} restored from the cache"
 			: $"{result.Component}:{result.Task} exited {result.ExitCode?.ToString() ?? "(cancelled)"} in {result.Seconds}s"),
-			caching: invocation.Has("no-cache") ? null : new TaskCaching(TaskCache.In(monorepo.WorkspaceDir), monorepo.Registry, fingerprints));
+			caching: invocation.Has("no-cache") ? null : new TaskCaching(monorepo.TaskCache, monorepo.Registry, fingerprints));
 
 		var ok = results.Count == plan.Count && results.All(result => result.Ok);
 		var kept = !materialized || invocation.Has("keep") || !ok;
@@ -166,27 +166,27 @@ internal static class TaskCommands
 
 	// ----- bassia task cache -----
 
-	public static Task<int> CacheAsync(Invocation invocation)
+	public static async Task<int> CacheAsync(Invocation invocation)
 	{
 		var monorepo = AgentCommand.LoadMonorepo();
-		var cache = TaskCache.In(monorepo.WorkspaceDir);
-		var (entries, bytes) = cache.Size();
+		var cache = monorepo.TaskCache;
+		var (entries, bytes) = await cache.SizeAsync();
 		if (invocation.Has("clear"))
 		{
-			cache.Clear();
+			await cache.ClearAsync();
 		}
 
-		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command,
+		return ProgramCli.WriteResult(true, invocation.Command,
 			invocation.Has("clear")
 				? $"Cleared the task cache: {entries} entr{(entries == 1 ? "y" : "ies")}, {bytes} byte(s) removed."
 				: $"The task cache holds {entries} entr{(entries == 1 ? "y" : "ies")}, {bytes} byte(s).",
 			new Dictionary<string, object?>
 			{
-				["path"] = cache.Folder,
+				["path"] = cache.Location,
 				["entries"] = invocation.Has("clear") ? 0 : entries,
 				["bytes"] = invocation.Has("clear") ? 0 : bytes,
 				["cleared"] = invocation.Has("clear")
-			}));
+			});
 	}
 
 	// ----- bassia affected -----
@@ -206,7 +206,7 @@ internal static class TaskCommands
 		}
 		else
 		{
-			var runs = await IntegrationSupport.SelectRunsAsync(new RunMetadataStore(new Git.GitClient(monorepo.Root), monorepo.RunsRepoDir), invocation.Require("runs"));
+			var runs = await IntegrationSupport.SelectRunsAsync(monorepo.RunRecords(), invocation.Require("runs"));
 			changed = runs.SelectMany(run => run.Components).Where(component => component.ResultStatus == ResultStatus.Pushed)
 				.Select(component => component.Name).Distinct(StringComparer.Ordinal).Where(monorepo.Registry.Contains).ToList();
 		}
