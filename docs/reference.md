@@ -965,7 +965,8 @@ bassia -C R:\ web -port 9000 -no-open
 `web` serves a read-only dashboard over the monorepo, in the spirit of [Fossil](https://fossil-scm.org)'s built-in
 web interface: a place to look at the monorepo, while the command line changes it. Every page
 shows the `bassia` commands for what it describes (click one to copy it). It listens on 127.0.0.1 only and answers
-only GET requests. If the port is taken it uses the next free one, and it prints the URL. It runs until Ctrl-C.
+only GET requests. If the port is taken it uses the next free one, and it prints the URL. It runs until Ctrl-C. The
+Bassia server serves the same pages to every signed-in user (see "Bassia server").
 Pages and their pictures are drawn on the server (inline SVG and CSS, nothing loaded from elsewhere) and work
 without JavaScript; the script animates and refreshes the live parts.
 
@@ -1088,8 +1089,11 @@ issuer = "https://example.okta.com"
 audience = "bassia"
 client_id = "0oa..."               # the public client 'bassia login' uses (authorization code + PKCE)
 
+client_secret = "..."              # optional: the dashboard's sign-in sends it (or BASSIA_OIDC_OKTA_CLIENT_SECRET)
+
 [auth.github]                      # GitHub sign-in: an OAuth app with the device flow enabled
 client_id = "Iv1..."
+client_secret = "..."              # the dashboard's sign-in (GitHub's web flow) needs it; or BASSIA_GITHUB_CLIENT_SECRET
 ```
 
 - **State.** Records (runs, integrations), the lock table, jobs and their output, the task cache's index, identity
@@ -1136,8 +1140,48 @@ client_id = "Iv1..."
   `/access/grants|groups|identities|audit`. Errors are `{"error": "..."}` with 400, 401, 403, 404 or 409. `/healthz`
   and `/readyz` (database and meta-repo reachable) are for the load balancer; each request is logged as one JSON line.
 
-Deploying it on AWS - the stacks, images, upgrades, restores and costs - is [deploy-aws.md](deploy-aws.md). The
-dashboard for many users and metrics follow in `bassia-d3c6cfe4`.
+- **The dashboard.** The pages of `bassia web` are served at the server's root (`https://<server>/`) to every
+  signed-in user, each showing only what they may read. The dashboard reads the server's state through the same filter
+  as the API: the registry without the components the viewer may not read and without references to them, the
+  histories, records, holds and jobs of readable components only, and the per-component settings of those alone. A
+  component the viewer may not read appears nowhere: not in the overview, the graph, the component, run, lock, tag,
+  merge queue, timeline or configuration pages. It is read-only, as on a monorepo on disk.
+  - **Sign-in.** A browser signs in at `/login` with an OIDC provider whose client has a `client_id`, or with GitHub
+    when `[auth.github]` has the OAuth app's `client_secret`. Either way it is the authorization-code flow with PKCE,
+    and the server sends a confidential client's `client_secret` itself. The identity provider sends the browser back
+    to `<public_url>/login/<name>/callback` (`github` for GitHub): register that as the client's redirect URL. The
+    identity is mapped to a registered user as on `bassia login`. The browser then holds a session cookie (HttpOnly,
+    SameSite=Lax, Secure on https) with the server's own token and the identity provider's groups, for `session_hours`
+    (default 12). After that it signs in again. Every request is still checked against the registry and the grants,
+    so a user removed or a permission taken away takes effect at once. `/logout` ends the sign-in. A request with a
+    bearer token needs no cookie.
+  - **Live updates.** The stores record what changes in a `changes` table, in the same transaction as the write: run
+    and integration records, lock decisions, jobs registered or finished and their output, and landings. Every server
+    instance polls it about once a second and pushes the changes to the browsers connected to it as server-sent events
+    (`/events`). A change says only what kind of thing changed (`run`, `integration`, `lock`, `job`, `log`, `land`).
+    The page reloads the parts that show that kind, at most once a second: live runs and their output, locks, the
+    merge queue's counts. A browser is told about a change only when it may read every component the change touches,
+    and its permissions are read again every 30 seconds. A dropped stream reconnects, and the parts also reload every
+    30 seconds. `bassia web`, with no server, still polls.
+- **Metrics.** The `Bassia.Server` meter, exported over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (the
+  `OTEL_EXPORTER_OTLP_*` variables and `OTEL_METRIC_EXPORT_INTERVAL` configure it), together with ASP.NET Core's own
+  request metrics:
+
+  | Metric | Unit | What it counts | Labels |
+  |---|---|---|---|
+  | `bassia.server.request.duration` | s | Requests, giving rate and latency per endpoint | `method`, `route`, `status` |
+  | `bassia.merge_queue.depth` | | Landings on this instance; summed over instances, the merge queue | `state` (`waiting` for a component's slot, `landing`) |
+  | `bassia.merge_queue.wait` | s | How long a landing waited for its slots | |
+  | `bassia.lock.decisions` | | Lock table decisions | `result` (`committed`; `conflict`: the table moved, the run decides again) |
+  | `bassia.lock.waits` | | Waits for a path another run holds | |
+  | `bassia.lock.conflicts` | | Lock conflicts recorded | |
+  | `bassia.git.requests` | | Gateway requests | `service` (`upload-pack` is a fetch, `receive-pack` a push), `status` |
+  | `bassia.git.bytes` | By | Gateway bytes | `service`, `direction` (`in`, `out`) |
+  | `bassia.db.duration` | s | Database operations | `operation` (`query`, `execute`, `transaction`) |
+  | `bassia.storage.duration` | s | Cloud storage operations | `store` (`objects`, `table`), `operation` |
+  | `bassia.dashboard.streams` | | Browsers following live changes | |
+
+Deploying it on AWS - the stacks, images, upgrades, restores, metrics and costs - is [deploy-aws.md](deploy-aws.md).
 
 ## Architecture
 

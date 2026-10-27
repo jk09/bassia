@@ -265,6 +265,13 @@ public class ServerContractTests
 			}
 
 			Assert.True(handle.Cancellation.IsCancellationRequested);
+
+			// The output is uploaded with the heartbeats: the beat that saw the stop may have uploaded before "second".
+			while ((await theirs.ReadLogAsync(job))!.Lines.Count < 2 && clock.Elapsed < TimeSpan.FromSeconds(15))
+			{
+				await Task.Delay(100);
+			}
+
 			Assert.Equal(["first", "second"], (await theirs.ReadLogAsync(job))!.Lines);
 			Assert.Equal("second\n", (await theirs.ReadLogAsync(job, -7))!.Text);
 		}

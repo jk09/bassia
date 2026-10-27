@@ -38,7 +38,7 @@ internal sealed partial class Dashboard
 			""");
 
 		body.Append("<h2 id=\"holds\">Who holds what</h2>")
-			.Append("<div data-live-src=\"/fragment/locks\">").Append(Holdings(board)).Append("</div>");
+			.Append("<div data-live-src=\"/fragment/locks\" data-live-on=\"lock run\">").Append(Holdings(board)).Append("</div>");
 
 		body.Append("<h2 id=\"filter\">Lock filter per component</h2>")
 			.Append("<p class=\"muted\">What a run holds while its agent changes it: <code>lock.files</code> one by one, <code>lock.folders</code> as a whole " +

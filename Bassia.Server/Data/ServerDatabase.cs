@@ -59,11 +59,19 @@ internal sealed class ServerDatabase
 	/// <summary>Runs <paramref name="work"/> in one transaction, committed when it returns.</summary>
 	public async Task<T> TransactAsync<T>(Func<DbConnection, DbTransaction, Task<T>> work)
 	{
-		await using var connection = await ConnectAsync();
-		await using var transaction = await connection.BeginTransactionAsync();
-		var result = await work(connection, transaction);
-		await transaction.CommitAsync();
-		return result;
+		var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		try
+		{
+			await using var connection = await ConnectAsync();
+			await using var transaction = await connection.BeginTransactionAsync();
+			var result = await work(connection, transaction);
+			await transaction.CommitAsync();
+			return result;
+		}
+		finally
+		{
+			ServerMetrics.DatabaseDuration.Record(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds, ServerMetrics.Tag("operation", "transaction"));
+		}
 	}
 
 	public async Task<int> ExecuteAsync(string sql, params (string Name, object? Value)[] parameters)
@@ -81,21 +89,24 @@ internal sealed class ServerDatabase
 	public static async Task<int> ExecuteAsync(DbConnection connection, DbTransaction? transaction, string sql, params (string Name, object? Value)[] parameters)
 	{
 		await using var command = Command(connection, transaction, sql, parameters);
-		return await command.ExecuteNonQueryAsync();
+		return await ServerMetrics.TimeAsync(ServerMetrics.DatabaseDuration, () => command.ExecuteNonQueryAsync(), ServerMetrics.Tag("operation", "execute"));
 	}
 
 	public static async Task<IReadOnlyList<T>> QueryAsync<T>(DbConnection connection, DbTransaction? transaction, string sql, Func<DbDataReader, T> map,
 		params (string Name, object? Value)[] parameters)
 	{
 		await using var command = Command(connection, transaction, sql, parameters);
-		await using var reader = await command.ExecuteReaderAsync();
-		var rows = new List<T>();
-		while (await reader.ReadAsync())
+		return await ServerMetrics.TimeAsync<IReadOnlyList<T>>(ServerMetrics.DatabaseDuration, async () =>
 		{
-			rows.Add(map(reader));
-		}
+			await using var reader = await command.ExecuteReaderAsync();
+			var rows = new List<T>();
+			while (await reader.ReadAsync())
+			{
+				rows.Add(map(reader));
+			}
 
-		return rows;
+			return rows;
+		}, ServerMetrics.Tag("operation", "query"));
 	}
 
 	private static DbCommand Command(DbConnection connection, DbTransaction? transaction, string sql, (string Name, object? Value)[] parameters)
@@ -139,6 +150,10 @@ internal sealed class ServerDatabase
 		CREATE TABLE audit (seq {Serial}, time TEXT NOT NULL, user_id TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
 			detail TEXT NOT NULL, remote TEXT NOT NULL);
 		CREATE TABLE land_queue (component TEXT PRIMARY KEY, holder TEXT NOT NULL, expires TEXT NOT NULL);
+		""",
+		$"""
+		CREATE TABLE changes (seq {Serial}, kind TEXT NOT NULL, subject TEXT NOT NULL, components TEXT NOT NULL, created TEXT NOT NULL);
+		CREATE INDEX changes_created ON changes (created);
 		"""
 	];
 

@@ -7,10 +7,13 @@ using Bassia.Server.Auth;
 using Bassia.Storage;
 using Bassia.Storage.Cloud;
 using Bassia.Storage.Remote;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 
 /// <summary>
 /// The server as an ASP.NET Core app: health endpoints, the API (<c>/api/v1</c>, every request but <c>/info</c> and the
-/// login exchanges authenticated, every write replayed by its idempotency key), and the git gateway (<c>/git</c>).
+/// login exchanges authenticated, every write replayed by its idempotency key), the git gateway (<c>/git</c>), and the
+/// dashboard for every signed-in user (<c>/</c>, with <c>/login</c> and the live changes at <c>/events</c>).
 /// </summary>
 internal static class ServerApp
 {
@@ -22,6 +25,14 @@ internal static class ServerApp
 		builder.Logging.ClearProviders();
 		builder.WebHost.UseUrls(url ?? state.Config.Url);
 		builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = null);
+		if (Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") is { Length: > 0 })
+		{
+			// The OTLP exporter reads its endpoint, protocol and interval from the OTEL_* variables.
+			builder.Services.AddOpenTelemetry()
+				.ConfigureResource(resource => resource.AddService(Environment.GetEnvironmentVariable("OTEL_SERVICE_NAME") ?? "bassia-server"))
+				.WithMetrics(metrics => metrics.AddMeter(ServerMetrics.MeterName, "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Server.Kestrel").AddOtlpExporter());
+		}
+
 		var app = builder.Build();
 
 		app.Use((context, next) => LogAsync(state, context, next));
@@ -52,6 +63,10 @@ internal static class ServerApp
 		AccessEndpoints.Map(api, state);
 
 		new GitGateway(state.GitHost, new ServerGatewayPolicy(state)).Map(app);
+		Web.ServerDashboard.Map(app, state);
+
+		// Every instance follows the change table for the browsers connected to it.
+		app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(() => state.Changes.RunAsync(app.Lifetime.ApplicationStopping)));
 		return app;
 	}
 
@@ -175,16 +190,41 @@ internal static class ServerApp
 		await captured.CopyToAsync(original);
 	}
 
-	/// <summary>One JSON line per request: when, what, how it ended, how long it took, and for whom.</summary>
+	/// <summary>
+	/// One JSON line per request: when, what, how it ended, how long it took, and for whom; and the request's metrics -
+	/// its duration by route, and for the git gateway the bytes that went in and out.
+	/// </summary>
 	private static async Task LogAsync(ServerState state, HttpContext context, RequestDelegate next)
 	{
 		var clock = Stopwatch.StartNew();
+		var git = context.Request.Path.StartsWithSegments("/git");
+		CountingStream? received = null, sent = null;
+		Stream? body = null;
+		if (git)
+		{
+			context.Request.Body = received = new CountingStream(context.Request.Body);
+			body = context.Response.Body;
+			context.Response.Body = sent = new CountingStream(body);
+		}
+
 		try
 		{
 			await next(context);
 		}
 		finally
 		{
+			var status = context.Response.StatusCode;
+			ServerMetrics.RequestDuration.Record(clock.Elapsed.TotalSeconds, ServerMetrics.Tag("method", context.Request.Method),
+				ServerMetrics.Tag("route", ServerMetrics.RouteOf(context)), ServerMetrics.Tag("status", status));
+			if (git)
+			{
+				context.Response.Body = body!;
+				var service = ServerMetrics.GitServiceOf(context.Request);
+				ServerMetrics.GitRequests.Add(1, ServerMetrics.Tag("service", service), ServerMetrics.Tag("status", status));
+				ServerMetrics.GitBytes.Add(received!.Count, ServerMetrics.Tag("service", service), ServerMetrics.Tag("direction", "in"));
+				ServerMetrics.GitBytes.Add(sent!.Count, ServerMetrics.Tag("service", service), ServerMetrics.Tag("direction", "out"));
+			}
+
 			if (state.Config.RequestLog)
 			{
 				Console.Out.WriteLine(JsonSerializer.Serialize(new

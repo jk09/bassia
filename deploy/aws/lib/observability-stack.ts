@@ -16,9 +16,11 @@ export interface ObservabilityStackProps extends cdk.StackProps {
 }
 
 /**
- * What an operator watches: a dashboard of the load balancer, the service, the database, the table and the bucket;
- * alarms for errors, latency, unhealthy tasks, scaling at its maximum, database load, table throttling and storage
- * growth, sent to an SNS topic with an email subscription; and the monthly budget with alerts.
+ * What an operator watches: a dashboard of the load balancer, the service, the database, the table, the bucket and the
+ * server's own metrics (requests per route, the merge queue, lock decisions, git traffic, database and storage
+ * latency, live dashboards); alarms for errors, latency, unhealthy tasks, scaling at its maximum, database load, table
+ * throttling, storage growth, lock conflicts and a long merge queue, sent to an SNS topic with an email subscription;
+ * and the monthly budget with alerts.
  */
 export class ObservabilityStack extends cdk.Stack {
   public readonly topic: sns.Topic;
@@ -100,6 +102,29 @@ export class ObservabilityStack extends cdk.Stack {
     alarm('database-cpu', databaseCpu, 80, 'The database uses more than 80% of its CPU.');
     alarm('table-throttling', throttled, 0, 'Requests to the histories\' table were throttled.', 1);
     alarm('table-errors', systemErrors, 0, 'The histories\' table answered with system errors.', 1);
+    // The server's own metrics, which the collector beside it writes (dimensions: ServerStack.metricDimensions).
+    const own = (metricName: string, statistic: string, dimensionsMap: Record<string, string> = {}, label?: string) =>
+      new cloudwatch.Metric({ namespace: server.metricsNamespace, metricName, statistic, period, dimensionsMap, label });
+    const lockConflicts = own('bassia.lock.decisions', 'Sum', { result: 'conflict' }, 'decided again (table moved)');
+    const lockCommitted = own('bassia.lock.decisions', 'Sum', { result: 'committed' }, 'committed');
+    const lockWaits = own('bassia.lock.waits', 'Sum', {}, 'waits for a held path');
+    const recordedConflicts = own('bassia.lock.conflicts', 'Sum', {}, 'conflicts recorded');
+    const queueWaiting = own('bassia.merge_queue.depth', 'Sum', { state: 'waiting' }, 'waiting for a slot');
+    const queueLanding = own('bassia.merge_queue.depth', 'Sum', { state: 'landing' }, 'landing');
+    const queueWait = own('bassia.merge_queue.wait', 'Average', {}, 'wait (s)');
+    const requestTime = own('bassia.server.request.duration', 'Average', {}, 'all routes');
+    const gitIn = own('bassia.git.bytes', 'Sum', { direction: 'in' }, 'pushed (bytes)');
+    const gitOut = own('bassia.git.bytes', 'Sum', { direction: 'out' }, 'fetched (bytes)');
+    const fetches = own('bassia.git.requests', 'SampleCount', { service: 'upload-pack' }, 'fetches');
+    const pushes = own('bassia.git.requests', 'SampleCount', { service: 'receive-pack' }, 'pushes');
+    const databaseTime = ['query', 'execute', 'transaction'].map((operation) => own('bassia.db.duration', 'Average', { operation }, operation));
+    const storageTime = ['objects', 'table'].map((store) => own('bassia.storage.duration', 'Average', { store }, store));
+    const streams = own('bassia.dashboard.streams', 'Sum', {}, 'live dashboards');
+
+    alarm('lock-conflicts', recordedConflicts, config.metricAlarms?.lockConflictsPer5Minutes ?? 50,
+      `More than ${config.metricAlarms?.lockConflictsPer5Minutes ?? 50} lock conflicts were recorded in 5 minutes, three times in a row: runs keep colliding on the same paths.`);
+    alarm('merge-queue', queueWaiting, config.metricAlarms?.mergeQueueDepth ?? 20,
+      `More than ${config.metricAlarms?.mergeQueueDepth ?? 20} landings wait for a component's slot, three times in a row.`);
     alarm('storage-growth', bucketSize, config.storageAlarmGiB * 1024 ** 3, `The histories' bucket holds more than ${config.storageAlarmGiB} GiB.`, 1);
 
     new cloudwatch.Dashboard(this, 'Dashboard', {
@@ -118,6 +143,16 @@ export class ObservabilityStack extends cdk.Stack {
         [
           new cloudwatch.GraphWidget({ title: 'Table throttling and errors', left: [throttled, systemErrors], width: 12 }),
           new cloudwatch.GraphWidget({ title: 'Histories bucket (bytes)', left: [bucketSize], width: 12 }),
+        ],
+        [
+          new cloudwatch.GraphWidget({ title: 'Server: response time (s)', left: [requestTime], width: 8 }),
+          new cloudwatch.GraphWidget({ title: 'Merge queue', left: [queueWaiting, queueLanding], right: [queueWait], width: 8 }),
+          new cloudwatch.GraphWidget({ title: 'Lock decisions', left: [lockCommitted, lockConflicts], right: [lockWaits, recordedConflicts], width: 8 }),
+        ],
+        [
+          new cloudwatch.GraphWidget({ title: 'Git traffic', left: [gitIn, gitOut], right: [fetches, pushes], width: 8 }),
+          new cloudwatch.GraphWidget({ title: 'Database and storage latency (s)', left: databaseTime, right: storageTime, width: 8 }),
+          new cloudwatch.GraphWidget({ title: 'Live dashboards', left: [streams], width: 8 }),
         ],
         [new cloudwatch.AlarmStatusWidget({ title: 'Alarms', alarms: this.alarms, width: 24 })],
       ],

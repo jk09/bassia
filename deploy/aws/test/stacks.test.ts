@@ -149,6 +149,34 @@ describe('server', () => {
     }
   });
 
+  test('metrics go over OTLP to a collector beside the server, and on to CloudWatch with the dimensions the alarms use', () => {
+    const task = Object.values(server.findResources('AWS::ECS::TaskDefinition')).find((resource) => resource.Properties.Family === 'bassia-server')!;
+    const containers = task.Properties.ContainerDefinitions as { Name: string; Essential: boolean; Image: string; Environment: { Name: string; Value: string }[] }[];
+    const collector = containers.find((definition) => definition.Name === 'otel-collector')!;
+    expect(collector.Essential).toBe(false);
+    expect(collector.Image).toMatch(/aws-otel-collector:v\d+\.\d+\.\d+$/);
+    const settings = JSON.parse(collector.Environment.find((variable) => variable.Name === 'AOT_CONFIG_CONTENT')!.Value);
+    expect(settings.exporters.awsemf.namespace).toBe('Bassia');
+    expect(settings.exporters.awsemf.metric_declarations).toContainEqual({ dimensions: [['result']], metric_name_selectors: ['^bassia\\.lock\\.decisions$'] });
+    const variables = Object.fromEntries(containers.find((definition) => definition.Name === 'server')!.Environment.map((variable) => [variable.Name, variable.Value]));
+    expect(variables.OTEL_EXPORTER_OTLP_ENDPOINT).toBe('http://127.0.0.1:4318');
+    expect(JSON.stringify(server.findResources('AWS::IAM::Policy'))).toContain('logs:PutLogEvents');
+    server.hasResourceProperties('AWS::Logs::LogGroup', { LogGroupName: '/bassia/metrics' });
+  });
+
+  test('the dashboard\'s sign-in gets its client secrets from the configured secret', () => {
+    const signedIn = synthesize('production', (config) => {
+      config.githubClientId = 'gh-app';
+      config.webSignIn = { secretName: 'bassia/web-sign-in', github: true, oidc: [config.oidc[0].name] };
+    });
+    const task = Object.values(signedIn.templates.server.findResources('AWS::ECS::TaskDefinition')).find((resource) => resource.Properties.Family === 'bassia-server')!;
+    const container = task.Properties.ContainerDefinitions.find((definition: { Name: string }) => definition.Name === 'server');
+    expect(container.Secrets.map((secret: { Name: string }) => secret.Name)).toEqual(expect.arrayContaining([
+      'BASSIA_GITHUB_CLIENT_SECRET', `BASSIA_OIDC_${signedIn.config.oidc[0].name.toUpperCase()}_CLIENT_SECRET`]));
+    expect(() => synthesize('staging', (config) => { config.webSignIn = { secretName: 'x', github: true, oidc: [] }; })).toThrow('needs a githubClientId');
+    expect(() => synthesize('staging', (config) => { config.webSignIn = { secretName: 'x', github: false, oidc: ['nobody'] }; })).toThrow('not one of oidc');
+  });
+
   test('the database admits the server tasks only', () => {
     server.hasResourceProperties('AWS::EC2::SecurityGroupIngress', { FromPort: 5432, ToPort: 5432, IpProtocol: 'tcp' });
   });
@@ -185,12 +213,20 @@ describe('workers', () => {
 describe('observability', () => {
   const observability = production.templates.observability;
 
-  test('alarms on errors, latency, health, scaling, the database, the table and storage, to email', () => {
+  test('alarms on errors, latency, health, scaling, the database, the table, storage, lock conflicts and the merge queue, to email', () => {
     const names = Object.values(observability.findResources('AWS::CloudWatch::Alarm')).map((alarm) => alarm.Properties.AlarmName).sort();
     expect(names).toEqual([
-      'bassia-database-capacity', 'bassia-database-cpu', 'bassia-latency', 'bassia-scaling-at-maximum', 'bassia-server-cpu', 'bassia-server-errors',
-      'bassia-storage-growth', 'bassia-table-errors', 'bassia-table-throttling', 'bassia-unhealthy-tasks',
+      'bassia-database-capacity', 'bassia-database-cpu', 'bassia-latency', 'bassia-lock-conflicts', 'bassia-merge-queue', 'bassia-scaling-at-maximum',
+      'bassia-server-cpu', 'bassia-server-errors', 'bassia-storage-growth', 'bassia-table-errors', 'bassia-table-throttling', 'bassia-unhealthy-tasks',
     ]);
+    const metric = (properties: object) => [Match.objectLike({ MetricStat: Match.objectLike({ Metric: properties }) })];
+    observability.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'bassia-lock-conflicts', Threshold: 50, Metrics: metric({ Namespace: 'Bassia', MetricName: 'bassia.lock.conflicts' }),
+    });
+    observability.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmName: 'bassia-merge-queue', Threshold: 20,
+      Metrics: metric({ Namespace: 'Bassia', MetricName: 'bassia.merge_queue.depth', Dimensions: [{ Name: 'state', Value: 'waiting' }] }),
+    });
     observability.hasResourceProperties('AWS::SNS::Subscription', { Protocol: 'email', Endpoint: 'ops@example.com' });
     observability.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
   });

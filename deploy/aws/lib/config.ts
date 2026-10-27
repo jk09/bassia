@@ -62,6 +62,15 @@ export interface EnvironmentConfig {
   defaultPermission: 'none' | 'read';
   oidc: OidcProvider[];
   githubClientId?: string | null;
+  /**
+   * The client secrets of the dashboard's sign-in in a browser: a Secrets Manager secret (name), made outside the stacks,
+   * holding a JSON object - `github` for the GitHub OAuth app's secret (its web flow needs one), and an OIDC provider's
+   * name for that provider's client secret - and which of those keys it has. Null: browsers sign in only with OIDC
+   * providers whose client is public (PKCE).
+   */
+  webSignIn?: { secretName: string; github: boolean; oidc: string[] } | null;
+  /** Thresholds of the alarms on the server's own metrics (defaults: 50 lock conflicts in 5 minutes, 20 landings queued). */
+  metricAlarms?: { lockConflictsPer5Minutes?: number; mergeQueueDepth?: number };
   /** Where alarms and budget alerts are sent. */
   alarmEmail: string;
   monthlyBudgetUsd: number;
@@ -99,6 +108,10 @@ export function checkConfig(config: EnvironmentConfig): EnvironmentConfig {
   if (config.retainData && !config.domainName) problems.push('an environment that retains its data is production: it needs a domainName (HTTPS)');
   if (config.domainName && !(config.hostedZoneName && config.hostedZoneId) && !config.certificateArn) problems.push('a domainName needs a hostedZoneName and hostedZoneId, or a certificateArn');
   if (config.admins.length === 0) problems.push('admins must name at least one user');
+  if (config.webSignIn?.github && !config.githubClientId) problems.push('webSignIn.github needs a githubClientId');
+  for (const name of config.webSignIn?.oidc ?? []) {
+    if (!config.oidc.some((provider) => provider.name === name)) problems.push(`webSignIn.oidc names '${name}', which is not one of oidc`);
+  }
   if (problems.length > 0) {
     throw new Error(`Invalid configuration '${config.envName}': ${problems.join('; ')}.`);
   }

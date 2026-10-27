@@ -27,6 +27,7 @@ using Tomlyn.Model;
 /// signing_key = "..."                  # at least 32 characters; or BASSIA_SERVER_SIGNING_KEY
 /// token_minutes = 15
 /// refresh_days = 30
+/// session_hours = 12                   # how long a dashboard sign-in lasts
 ///
 /// [[auth.oidc]]
 /// name = "okta"
@@ -34,12 +35,16 @@ using Tomlyn.Model;
 /// audience = "bassia"                  # the access token's audience (default: client_id)
 /// client_id = "..."                    # the public client 'bassia login' uses (authorization code + PKCE)
 /// scopes = "openid email profile offline_access"
+/// client_secret = "..."                # optional; the dashboard's sign-in sends it when the client has one
 ///
 /// [auth.github]
 /// client_id = "..."                    # an OAuth app with the device flow enabled
 /// api_url = "https://api.github.com"
-/// device_url = "https://github.com"
+/// device_url = "https://github.com"   # also where the dashboard's sign-in sends the browser
+/// client_secret = "..."                # the OAuth app's secret: the dashboard's sign-in (web flow) needs it
 /// </code>
+/// The dashboard's sign-in sends the browser back to <c>&lt;public_url&gt;/login/&lt;name&gt;/callback</c>
+/// (<c>github</c> for GitHub): register that as the client's redirect URL.
 /// </summary>
 internal sealed record ServerConfig
 {
@@ -83,6 +88,9 @@ internal sealed record ServerConfig
 	public int TokenMinutes { get; init; } = 15;
 
 	public int RefreshDays { get; init; } = 30;
+
+	/// <summary>How long a dashboard sign-in lasts before the browser signs in again.</summary>
+	public int SessionHours { get; init; } = 12;
 
 	public IReadOnlyList<OidcProvider> Oidc { get; init; } = [];
 
@@ -161,19 +169,22 @@ internal sealed record ServerConfig
 			SigningKey = signingKey,
 			TokenMinutes = (int)(Number(auth, "token_minutes") ?? 15),
 			RefreshDays = (int)(Number(auth, "refresh_days") ?? 30),
+			SessionHours = (int)Math.Clamp(Number(auth, "session_hours") ?? 12, 1, 24 * 30),
 			Oidc = (auth.TryGetValue("oidc", out var oidc) ? oidc as TomlTableArray ?? throw new ServerConfigException("[[auth.oidc]] must be an array of tables.") : [])
 				.Select(item => new OidcProvider(
 					Text(item, "name") ?? Text(item, "issuer") ?? throw new ServerConfigException("[[auth.oidc]] needs an issuer."),
 					Text(item, "issuer") ?? throw new ServerConfigException("[[auth.oidc]] needs an issuer."),
 					Text(item, "audience") ?? Text(item, "client_id") ?? throw new ServerConfigException("[[auth.oidc]] needs an audience or a client_id."),
 					Text(item, "client_id"),
-					Text(item, "scopes") ?? "openid email profile offline_access"))
+					Text(item, "scopes") ?? "openid email profile offline_access",
+					Environment.GetEnvironmentVariable($"BASSIA_OIDC_{(Text(item, "name") ?? "").ToUpperInvariant()}_CLIENT_SECRET") is { Length: > 0 } secret ? secret : Text(item, "client_secret")))
 				.ToList(),
 			GitHub = auth.TryGetValue("github", out var github) && github is TomlTable githubTable
 				? new GitHubProvider(
 					Text(githubTable, "client_id") ?? throw new ServerConfigException("[auth.github] needs a client_id."),
 					(Text(githubTable, "api_url") ?? "https://api.github.com").TrimEnd('/'),
-					(Text(githubTable, "device_url") ?? "https://github.com").TrimEnd('/'))
+					(Text(githubTable, "device_url") ?? "https://github.com").TrimEnd('/'),
+					Environment.GetEnvironmentVariable("BASSIA_GITHUB_CLIENT_SECRET") is { Length: > 0 } secret ? secret : Text(githubTable, "client_secret"))
 				: null
 		};
 
@@ -196,8 +207,10 @@ internal sealed record ServerConfig
 	/// <c>BASSIA_STATE</c>; the database as <c>BASSIA_DB_HOST</c>, <c>BASSIA_DB_PORT</c>, <c>BASSIA_DB_NAME</c>,
 	/// <c>BASSIA_DB_USER</c>, <c>BASSIA_DB_PASSWORD</c> (PostgreSQL); the cloud storage as <c>BASSIA_BUCKET</c>,
 	/// <c>BASSIA_TABLE</c>, <c>BASSIA_REGION</c>, <c>BASSIA_PREFIX</c>; the logins as <c>BASSIA_OIDC</c> (a JSON array of
-	/// <c>{name, issuer, audience, client_id, scopes}</c>) and <c>BASSIA_GITHUB_CLIENT_ID</c>; the signing key as
-	/// <c>BASSIA_SERVER_SIGNING_KEY</c>.
+	/// <c>{name, issuer, audience, client_id, scopes}</c>, a client secret as <c>BASSIA_OIDC_&lt;NAME&gt;_CLIENT_SECRET</c>)
+	/// and <c>BASSIA_GITHUB_CLIENT_ID</c> (its secret as <c>BASSIA_GITHUB_CLIENT_SECRET</c>), the dashboard's sign-in
+	/// lifetime as <c>BASSIA_SESSION_HOURS</c>; the signing key as <c>BASSIA_SERVER_SIGNING_KEY</c>. The secrets are read
+	/// from the environment with a configuration file too.
 	/// </summary>
 	public static ServerConfig FromEnvironment()
 	{
@@ -250,6 +263,11 @@ internal sealed record ServerConfig
 		}
 
 		var auth = new TomlTable { ["signing_key"] = Get("BASSIA_SERVER_SIGNING_KEY") ?? "" };
+		if (long.TryParse(Get("BASSIA_SESSION_HOURS"), out var sessionHours))
+		{
+			auth["session_hours"] = sessionHours;
+		}
+
 		if (Get("BASSIA_OIDC") is { } oidc)
 		{
 			var providers = new TomlTableArray();
@@ -293,10 +311,16 @@ internal sealed record ServerConfig
 	private static string PathOf(string path, string directory) => Path.GetFullPath(path, directory);
 }
 
-/// <summary>An OpenID Connect issuer whose tokens the server accepts, and the public client <c>bassia login</c> uses with it.</summary>
-internal sealed record OidcProvider(string Name, string Issuer, string Audience, string? ClientId, string Scopes);
+/// <summary>
+/// An OpenID Connect issuer whose tokens the server accepts, and the client <c>bassia login</c> and the dashboard's
+/// sign-in use with it (public with PKCE, or confidential with <paramref name="ClientSecret"/>).
+/// </summary>
+internal sealed record OidcProvider(string Name, string Issuer, string Audience, string? ClientId, string Scopes, string? ClientSecret = null);
 
-/// <summary>The GitHub OAuth app <c>bassia login</c> uses (device flow), and where GitHub's API is.</summary>
-internal sealed record GitHubProvider(string ClientId, string ApiUrl, string DeviceUrl);
+/// <summary>
+/// The GitHub OAuth app <c>bassia login</c> uses (device flow) and the dashboard signs in with (web flow, which needs
+/// <paramref name="ClientSecret"/>), where GitHub's API is, and where its login pages are.
+/// </summary>
+internal sealed record GitHubProvider(string ClientId, string ApiUrl, string DeviceUrl, string? ClientSecret = null);
 
 internal sealed class ServerConfigException(string message) : Exception(message);

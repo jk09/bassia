@@ -11,6 +11,24 @@ using static Bassia.Web.Html;
 /// </summary>
 internal sealed partial class Dashboard
 {
+	/// <summary>Where the merge queue stands, in numbers.</summary>
+	private static string QueueCards(MergeQueue queue, int attention) => new StringBuilder("<div class=\"cards\">")
+		.Append(Card("waiting to be integrated", queue.Items.Count(item => item.State == QueueState.Waiting), "#plan"))
+		.Append(Card("integrated, base not advanced", queue.Items.Count(item => item.State == QueueState.Integrated), "#advance"))
+		.Append(Card("need attention", attention, "#attention", attention > 0 ? "alert" : null))
+		.Append(Card("landed on the default branch", queue.Items.Count(item => item.State == QueueState.Landed), "/runs"))
+		.Append("</div>")
+		.ToString();
+
+	private async Task<IResult> QueueFragmentAsync(HttpResponse response)
+	{
+		var state = await LoadAsync();
+		var next = await NextAsync(state);
+		// Pushed changes only: polling would plan the next integration every two seconds.
+		response.Headers["X-Live"] = Scope.Value?.Events is null ? "0" : "1";
+		return Results.Content(QueueCards(state.Queue, state.Queue.Attention.Count() + next.PlannedManual(state.Queue).Count()), "text/html; charset=utf-8");
+	}
+
 	private async Task<IResult> QueueAsync()
 	{
 		var state = await LoadAsync();
@@ -23,12 +41,7 @@ internal sealed partial class Dashboard
 		var (runs, plan, planError, structuralStatus) = (next.Runs, next.Plan, next.Error, next.StructuralStatus);
 		var attention = queue.Attention.Count() + next.PlannedManual(queue).Count();
 
-		body.Append("<div class=\"cards\">")
-			.Append(Card("waiting to be integrated", queue.Items.Count(item => item.State == QueueState.Waiting), "#plan"))
-			.Append(Card("integrated, base not advanced", queue.Items.Count(item => item.State == QueueState.Integrated), "#advance"))
-			.Append(Card("need attention", attention, "#attention", attention > 0 ? "alert" : null))
-			.Append(Card("landed on the default branch", queue.Items.Count(item => item.State == QueueState.Landed), "/runs"))
-			.Append("</div>");
+		body.Append("<div data-live-src=\"/fragment/queue\" data-live-on=\"run integration land\">").Append(QueueCards(queue, attention)).Append("</div>");
 
 		body.Append("<h2 id=\"plan\">The next integration</h2>");
 		if (runs.Count == 0)

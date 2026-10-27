@@ -94,6 +94,9 @@ internal static class ComponentEndpoints
 
 		var holder = $"{caller.Id}:{Guid.NewGuid():N}";
 		var taken = new List<string>();
+		var queued = System.Diagnostics.Stopwatch.StartNew();
+		ServerMetrics.MergeQueueDepth.Add(1, ServerMetrics.Tag("state", "waiting"));
+		var landing = false;
 		try
 		{
 			foreach (var component in components)
@@ -112,12 +115,18 @@ internal static class ComponentEndpoints
 				taken.Add(component);
 			}
 
+			ServerMetrics.MergeQueueWait.Record(queued.Elapsed.TotalSeconds);
+			ServerMetrics.MergeQueueDepth.Add(-1, ServerMetrics.Tag("state", "waiting"));
+			ServerMetrics.MergeQueueDepth.Add(1, ServerMetrics.Tag("state", "landing"));
+			landing = true;
 			await state.Storage.MoveBranchesAsync(request.Moves);
+			await state.Changes.AddAsync("land", string.Join(",", components), components);
 			await state.Access.AuditAsync(caller.Id, "land", string.Join(",", components),
 				string.Join(", ", request.Moves.Select(move => $"{move.Component}/{move.Branch} {move.Expected[..7]}..{move.Commit[..7]}")), ServerApp.RemoteOf(context));
 		}
 		finally
 		{
+			ServerMetrics.MergeQueueDepth.Add(-1, ServerMetrics.Tag("state", landing ? "landing" : "waiting"));
 			foreach (var component in taken)
 			{
 				await state.Access.ReleaseLandingAsync(component, holder);
