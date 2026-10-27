@@ -57,6 +57,66 @@ internal interface IComponentStorage
 
 	/// <summary>Reopens the working copy an earlier <see cref="IComponentStore.CheckoutAsync"/> of <paramref name="name"/> made in <paramref name="directory"/>.</summary>
 	IComponentWorkspace OpenWorkspace(string name, string directory);
+
+	/// <summary>
+	/// Moves branches of several components, each only while it still points at its expected commit: all of them, or -
+	/// when one has moved - none, with <see cref="BranchesMovedException"/> naming those that moved. A backend that cannot
+	/// move them in one step checks every expectation before it moves anything.
+	/// </summary>
+	Task MoveBranchesAsync(IReadOnlyList<BranchMove> moves);
+}
+
+/// <summary>A branch to move: the component, the branch, the commit it is to point at and the one it must point at now.</summary>
+internal sealed record BranchMove(string Component, string Branch, string Commit, string Expected);
+
+/// <summary>Branches that no longer point where <see cref="IComponentStorage.MoveBranchesAsync"/> expected; no branch was moved.</summary>
+internal sealed class BranchesMovedException(IReadOnlyList<BranchMove> moved)
+	: StorageException($"{string.Join(", ", moved.Select(move => $"'{move.Branch}' of component '{move.Component}'"))} moved meanwhile; no branch was moved.")
+{
+	public IReadOnlyList<BranchMove> Moved { get; } = moved;
+}
+
+internal static class BranchMoves
+{
+	/// <summary>
+	/// The move for a storage that changes one store at a time: every expectation is checked first; a branch that moves
+	/// in between is caught by its compare-and-swap, and the branches moved before it are put back.
+	/// </summary>
+	public static async Task InSequenceAsync(IComponentStorage storage, IReadOnlyList<BranchMove> moves)
+	{
+		var moved = new List<BranchMove>();
+		foreach (var move in moves)
+		{
+			if (!storage.Exists(move.Component) || await storage.Open(move.Component).BranchTipAsync(move.Branch) != move.Expected)
+			{
+				moved.Add(move);
+			}
+		}
+
+		if (moved.Count > 0)
+		{
+			throw new BranchesMovedException(moved);
+		}
+
+		var done = new List<BranchMove>();
+		foreach (var move in moves)
+		{
+			try
+			{
+				await storage.Open(move.Component).SetBranchAsync(move.Branch, move.Commit, move.Expected);
+				done.Add(move);
+			}
+			catch (StorageException)
+			{
+				foreach (var back in done)
+				{
+					await storage.Open(back.Component).SetBranchAsync(back.Branch, back.Expected, back.Commit);
+				}
+
+				throw new BranchesMovedException([move]);
+			}
+		}
+	}
 }
 
 /// <summary>

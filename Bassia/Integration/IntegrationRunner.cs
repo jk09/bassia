@@ -176,6 +176,7 @@ internal static class IntegrationRunner
 
 		var errors = new List<string>();
 		var advanced = new List<string>();
+		var ready = new List<ComponentIntegration>();
 		foreach (var component in record.Components.Where(component => component.ResultStatus == ResultStatus.Pushed && component.ResultCommit is not null && (which?.Invoke(component) ?? true)))
 		{
 			if (component.Advanced)
@@ -190,18 +191,27 @@ internal static class IntegrationRunner
 				continue;
 			}
 
-			try
-			{
-				await source.SetBranchAsync(component.BaseRef, component.ResultCommit!, component.BaseCommit);
-			}
-			catch (StorageException)
-			{
-				errors.Add($"'{component.Name}': '{component.BaseRef}' moved since the integration was built on {component.BaseCommit[..7]}; integrate again onto it");
-				continue;
-			}
+			ready.Add(component);
+		}
 
-			component.Advanced = true;
-			advanced.Add($"{component.Name}:{component.BaseRef}");
+		// The base branches move together or not at all: an integration lands as a whole.
+		try
+		{
+			await graph.Storage.MoveBranchesAsync(ready.Select(component => new BranchMove(component.Name, component.BaseRef, component.ResultCommit!, component.BaseCommit)).ToList());
+			foreach (var component in ready)
+			{
+				component.Advanced = true;
+				advanced.Add($"{component.Name}:{component.BaseRef}");
+			}
+		}
+		catch (BranchesMovedException ex)
+		{
+			errors.AddRange(ex.Moved.Select(move => ready.First(component => component.Name == move.Component))
+				.Select(component => $"'{component.Name}': '{component.BaseRef}' moved since the integration was built on {component.BaseCommit[..7]}; integrate again onto it"));
+			if (ready.Count > ex.Moved.Count)
+			{
+				errors.Add($"{string.Join(", ", ready.Where(component => ex.Moved.All(move => move.Component != component.Name)).Select(component => $"'{component.Name}'"))} not advanced either: an integration lands as a whole");
+			}
 		}
 
 		if (advanced.Count == 0 && errors.Count == 0)
