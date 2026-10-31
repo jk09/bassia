@@ -320,6 +320,48 @@ bassia-server gc -data /srv/bassia [-grace-hours 24] [-retention-days 14] [-dry-
 bassia-server scrub -data /srv/bassia [-sample 1000]
 ```
 
+### Azure: Blob Storage and Azure Database for PostgreSQL
+
+For several server nodes behind a load balancer, keep objects in Azure Blob Storage and heads, the path index and
+leases in Azure Database for PostgreSQL (flexible server):
+
+```sh
+bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https://bassia.example.com -token <shared-token> \
+  -storage azure -azure-url https://acmebassia.blob.core.windows.net/bassia \
+  -state postgres -postgres "Host=acme-bassia.postgres.database.azure.com;Database=bassia;Username=bassia;Password=...;SSL Mode=Require"
+```
+
+- **Blob Storage**: `-azure-url <container url>` authenticates with Microsoft Entra ID (`DefaultAzureCredential`: a
+  managed identity on Azure, else Azure CLI or environment credentials); the identity needs *Storage Blob Data
+  Contributor* on the container, and *Storage Blob Delegator* on the account to sign SAS URLs with a user delegation
+  key. `-azure-connection <string>` uses an account connection string instead (also Azurite's development string),
+  and creates the container (`-azure-container`, default `bassia`) if it is missing. Objects are block blobs under
+  `-azure-prefix` (default `objects/`), keyed by hash prefix. Chunks of 256 KiB and more move between clients and the
+  container directly on SAS URLs valid for 30 minutes; the server never proxies them.
+- **PostgreSQL**: `-state postgres -postgres <connection string>` (PostgreSQL 13 or later). The tables (`bassia_heads`,
+  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, sequence `bassia_fencing`) are created on start.
+  Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
+  transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
+  order from the operation log - so any number of nodes can share one database. Use `SSL Mode=Require` on Azure.
+- Every switch also comes from its environment variable (`BASSIA_SERVER_STORAGE`, `BASSIA_SERVER_AZURE_URL`,
+  `BASSIA_SERVER_AZURE_CONNECTION`, `BASSIA_SERVER_STATE`, `BASSIA_SERVER_POSTGRES`, ...). `bassia-server gc` and `scrub`
+  run against the same backends.
+
+### Client sync: what a clone downloads and uploads
+
+A clone only ever fetches the objects a command needs, and caches each forever (`.bassia/cache`, shared by every
+workspace on the machine: objects never change).
+
+| Operation | What travels |
+| --- | --- |
+| Status, diff, listing, `check` | Trees, from the cache or fetched level by level; no file content. |
+| Checkout, sync, undo | The trees that differ, one batched `/objects/fetch` per tree level; then the content of new or changed files: file objects in one batch, small chunks in batches of up to 500, chunks of 256 KiB and more in parallel straight from Blob Storage (or S3, or the server's signed URLs). A second workspace fetches nothing already cached. |
+| Snapshot | One `Have` for every new object (changed files' chunks, rebuilt trees, commit, view, operation), then one batched `/objects/put` for the small ones and direct uploads for large chunks; then the workspace head moves. |
+| Landing | One `/land` call; the server compares only the touched paths. |
+
+Replies (JSON, object batches) are compressed (Brotli or gzip) when the client accepts it. Every object read from
+the server is checked against its id before it is cached.
+
 The data folder holds `state.db` (SQLite: heads, path index, leases) and, with the default `-storage disk`, the blob
 container `objects/` - a local-disk stand-in for cloud blob storage, laid out by hash prefix, so a server and all of
 its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
@@ -332,7 +374,9 @@ The RPC surface under `/api/v1` is what a clone's remote stores call:
 | --- | --- |
 | `GET /main` | GetHead: mainline's head operation, seq, commit and tree. |
 | `GET /watch` (and `/events`) | A stream (server-sent events) of landings with the prefixes they touched, and of workspaces that moved. |
-| `POST /objects/batch` | GetObjects: structural objects by id, optionally with subtrees to a depth. |
+| `POST /objects/fetch` | GetObjects: many objects in one binary reply (structural objects and chunks under 256 KiB); what it leaves out is read on its direct URL. |
+| `POST /objects/put` | Many small objects in one binary request, each checked like a single put. |
+| `POST /objects/batch` | Structural objects by id as JSON, optionally with subtrees to a depth. |
 | `POST /paths/stat`, `GET /paths/list`, `GET /paths/changed` | StatPaths, listing and ChangedSince from the path index. |
 | `POST /objects/have` | Which ids the server already holds; asked before every upload. |
 | `POST /objects/read-urls`, `POST /objects/upload-urls` | GetChunkUrls and BeginUpload: signed URLs for direct transfers. |
@@ -455,8 +499,8 @@ Bassia has four projects; each depends only on the ones before it.
      implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
      them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
-   may use (`Stores`: `SqliteState` for heads, path index and leases; `S3ObjectStore`; the remote stores and landing of
-   a clone over HTTP), `Monorepo` (a local monorepo or a clone, giving every command the same core), agentic runs
+   may use (`Stores`: `SqliteState` and `PostgresState` for heads, path index and leases; `S3ObjectStore` and
+   `AzureBlobObjectStore`; the remote stores and landing of a clone over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a clone, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
    (`Platform`), and the dashboard (`Web`).
 3. **`Bassia.Server`** - `bassia-server`: the same core over the server's stores, the RPC surface, signed blob URLs,
@@ -502,6 +546,12 @@ stores to the same contract. `CliTests` drives the command line in-process on lo
 `bassia-server` in the test process over the local-disk blob storage and runs clones and raw clients against it: the
 command line across two clones, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, and every dashboard page.
+`PostgresStateTests`, `ObjectStoreContractTests` and `SyncEfficiencyTests` run against PostgreSQL
+(`BASSIA_TEST_POSTGRES`, a connection string; every test gets its own schema) and Azure Blob Storage
+(`BASSIA_TEST_AZURE_BLOB`, a connection string to Azurite; every test gets its own container) - CI provides both, and
+without them those tests check nothing. `SyncEfficiencyTests` counts the requests a clone sends for a checkout, a
+second checkout and a snapshot, on the disk backend and on Azure + PostgreSQL, and runs two clones end to end on the
+latter.
 `GitInteropTests` imports several repositories with interleaved history and exports mainline back, incrementally.
 `CloneCacheTests` covers the clone cache with a stand-in cloner on every platform (clones, fallbacks, the setting,
 pruning, status); `DevDriveTests` clone for real on the volume named by `BASSIA_TEST_DEVDRIVE_DIR` - the

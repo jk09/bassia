@@ -17,7 +17,10 @@ public sealed class ServerConnection : IDisposable
 	public ServerConnection(string url, string? token = null, HttpMessageHandler? handler = null)
 	{
 		BaseUrl = url.TrimEnd('/');
-		Http = handler is null ? new HttpClient() : new HttpClient(handler, false);
+		// Replies are compressed by the server when asked (structural objects and JSON compress well).
+		Http = handler is null
+			? new HttpClient(new HttpClientHandler { AutomaticDecompression = System.Net.DecompressionMethods.All })
+			: new HttpClient(handler, false);
 		Http.BaseAddress = new Uri(BaseUrl + "/");
 		Http.Timeout = TimeSpan.FromMinutes(10);
 		if (token is not null)
@@ -92,8 +95,68 @@ public sealed class ServerConnection : IDisposable
 /// directly to blob storage on signed URLs, and large reads are redirected there, so the server never proxies file
 /// bytes. Reads of whole objects are verified against their ids.
 /// </summary>
-public sealed class RemoteObjectStore(ServerConnection server) : IObjectStore
+public sealed class RemoteObjectStore(ServerConnection server) : IObjectStore, IObjectBatchReader, IObjectBatchWriter
 {
+	/// <summary>
+	/// Many small objects in one request (<c>/objects/fetch</c>); the server leaves out what it lacks and what is too
+	/// large to batch, which is then read on its direct URL.
+	/// </summary>
+	public async Task<IReadOnlyDictionary<ObjectId, ReadOnlyMemory<byte>>> ReadManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		var result = new Dictionary<ObjectId, ReadOnlyMemory<byte>>();
+		foreach (var part in ids.Chunk(1000))
+		{
+			using var response = await server.Http.PostAsJsonAsync(ServerConnection.Path("objects/fetch"), new Api.IdsRequest(part), Api.Json, ct);
+			await ServerConnection.EnsureAsync(response, ct);
+			foreach (var (id, bytes) in Api.Frames.Read(await response.Content.ReadAsByteArrayAsync(ct)))
+			{
+				result[id] = bytes;
+			}
+		}
+
+		return result;
+	}
+
+	/// <summary>Many small objects in one request (<c>/objects/put</c>); large ones still go on their direct URLs.</summary>
+	public async Task PutManyAsync(IReadOnlyList<(ObjectId Id, ReadOnlyMemory<byte> Bytes)> objects, CancellationToken ct = default)
+	{
+		var small = objects.Where(item => item.Bytes.Length < ServerConnection.DirectTransferThreshold).ToList();
+		const int BatchBytes = 8 * 1024 * 1024;
+		var batch = new List<(ObjectId, ReadOnlyMemory<byte>)>();
+		var size = 0;
+		async Task FlushAsync()
+		{
+			if (batch.Count == 0)
+			{
+				return;
+			}
+
+			using var content = new ByteArrayContent(Api.Frames.Write(batch));
+			content.Headers.ContentType = new MediaTypeHeaderValue(Api.Frames.MediaType);
+			using var response = await server.Http.PostAsync(ServerConnection.Path("objects/put"), content, ct);
+			await ServerConnection.EnsureAsync(response, ct);
+			batch.Clear();
+			size = 0;
+		}
+
+		foreach (var item in small)
+		{
+			if (size + item.Bytes.Length > BatchBytes)
+			{
+				await FlushAsync();
+			}
+
+			batch.Add(item);
+			size += item.Bytes.Length;
+		}
+
+		await FlushAsync();
+		foreach (var (id, bytes) in objects.Where(item => item.Bytes.Length >= ServerConnection.DirectTransferThreshold))
+		{
+			await PutAsync(id, bytes, ct);
+		}
+	}
+
 	public async ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
 	{
 		var result = new List<bool>(ids.Count);
@@ -143,7 +206,10 @@ public sealed class RemoteObjectStore(ServerConnection server) : IObjectStore
 			if (ticket.Url is { } url)
 			{
 				using var direct = new ByteArrayContent(bytes.ToArray());
-				using var put = await server.Blobs.PutAsync(url, direct, ct);
+				using var request = new HttpRequestMessage(HttpMethod.Put, url) { Content = direct };
+				// Azure Blob Storage needs the blob type on a SAS upload; S3 and the server's own blob URLs ignore it.
+				request.Headers.TryAddWithoutValidation("x-ms-blob-type", "BlockBlob");
+				using var put = await server.Blobs.SendAsync(request, ct);
 				await ServerConnection.EnsureAsync(put, ct);
 				return;
 			}

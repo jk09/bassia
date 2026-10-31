@@ -107,4 +107,54 @@ public static class Api
 	public sealed record WatchEvent(string Kind, long? Seq = null, IReadOnlyList<string>? Prefixes = null, string? Workspace = null, DateTimeOffset? Time = null);
 
 	public sealed record ErrorReply(string Error);
+
+	/// <summary>
+	/// Many objects in one body: for each, its 32-byte id, its length (4 bytes, little-endian) and its bytes. Used by
+	/// <c>/objects/fetch</c> (the reply) and <c>/objects/put</c> (the request); compressed in transit when both sides can.
+	/// </summary>
+	public static class Frames
+	{
+		public const string MediaType = "application/vnd.bassia.objects";
+
+		public static byte[] Write(IEnumerable<(ObjectId Id, ReadOnlyMemory<byte> Bytes)> objects)
+		{
+			using var stream = new MemoryStream();
+			Span<byte> length = stackalloc byte[4];
+			foreach (var (id, bytes) in objects)
+			{
+				stream.Write(id.ToBytes());
+				System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(length, bytes.Length);
+				stream.Write(length);
+				stream.Write(bytes.Span);
+			}
+
+			return stream.ToArray();
+		}
+
+		public static List<(ObjectId Id, ReadOnlyMemory<byte> Bytes)> Read(ReadOnlyMemory<byte> body)
+		{
+			var result = new List<(ObjectId, ReadOnlyMemory<byte>)>();
+			var offset = 0;
+			while (offset < body.Length)
+			{
+				if (body.Length - offset < ObjectId.Bytes + 4)
+				{
+					throw new InvalidDataException("A truncated object frame.");
+				}
+
+				var id = ObjectId.FromBytes(body.Span.Slice(offset, ObjectId.Bytes));
+				var length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(body.Span.Slice(offset + ObjectId.Bytes, 4));
+				offset += ObjectId.Bytes + 4;
+				if (length < 0 || length > body.Length - offset)
+				{
+					throw new InvalidDataException("A truncated object frame.");
+				}
+
+				result.Add((id, body.Slice(offset, length)));
+				offset += length;
+			}
+
+			return result;
+		}
+	}
 }

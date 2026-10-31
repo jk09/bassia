@@ -116,9 +116,73 @@ public sealed class DiskObjectStore(string root) : IObjectStore, IObjectStoreMai
 /// A client's cache in front of a remote store: a local content-addressed directory shared by every workspace on the
 /// machine. Objects never change, so a cached object is valid forever; reads fill the cache, writes go through.
 /// </summary>
-public sealed class CachingObjectStore(IObjectStore cache, IObjectStore remote) : IObjectStore
+public sealed class CachingObjectStore(IObjectStore cache, IObjectStore remote) : IObjectStore, IObjectPrefetcher, IObjectBatchWriter
 {
+	/// <summary>Objects read one by one (large chunks, on their direct URLs) at the same time.</summary>
+	private const int ParallelReads = 8;
+
 	public IObjectStore Remote => remote;
+
+	/// <summary>
+	/// Fills the cache with every object of <paramref name="ids"/> it lacks: small ones in batches when the remote reads
+	/// many at once, the rest (large chunks) several at a time. Every object is verified against its id before it is cached.
+	/// </summary>
+	public async Task PrefetchAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		var distinct = ids.Distinct().ToList();
+		if (distinct.Count == 0)
+		{
+			return;
+		}
+
+		var cached = await cache.HasAsync(distinct, ct);
+		var missing = distinct.Where((_, index) => !cached[index]).ToList();
+		if (missing.Count == 0)
+		{
+			return;
+		}
+
+		var remaining = new HashSet<ObjectId>(missing);
+		if (remote is IObjectBatchReader batches)
+		{
+			foreach (var part in missing.Chunk(500))
+			{
+				foreach (var (id, bytes) in await batches.ReadManyAsync(part, ct))
+				{
+					if (ObjectId.Of(bytes.Span) != id)
+					{
+						throw new VersionException($"Object {id.Short} read from the server does not match its id.");
+					}
+
+					await cache.PutAsync(id, bytes, ct);
+					remaining.Remove(id);
+				}
+			}
+		}
+
+		await Parallel.ForEachAsync(remaining, new ParallelOptions { MaxDegreeOfParallelism = ParallelReads, CancellationToken = ct },
+			async (id, token) => await ReadAsync(id, null, token));
+	}
+
+	public async Task PutManyAsync(IReadOnlyList<(ObjectId Id, ReadOnlyMemory<byte> Bytes)> objects, CancellationToken ct = default)
+	{
+		if (remote is IObjectBatchWriter batches)
+		{
+			await batches.PutManyAsync(objects, ct);
+		}
+		else
+		{
+			foreach (var (id, bytes) in objects)
+			{
+				await remote.PutAsync(id, bytes, ct);
+			}
+		}
+
+		foreach (var (id, bytes) in objects)
+		{
+			await cache.PutAsync(id, bytes, ct);
+		}
+	}
 
 	public async ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default) =>
 		await remote.HasAsync(ids, ct);

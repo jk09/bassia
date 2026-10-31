@@ -1,5 +1,6 @@
 namespace Bassia.Server;
 
+using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -42,8 +43,24 @@ internal sealed class ServerApp : IAsyncDisposable
 		this.options = options;
 		Directory.CreateDirectory(options.Data);
 		signingKey = LoadKey(Path.Combine(options.Data, "blob.key"));
-		State = new SqliteState(Path.Combine(options.Data, "state.db"));
-		if (options.Storage.Equals("s3", StringComparison.OrdinalIgnoreCase))
+		State = options.State.ToLowerInvariant() switch
+		{
+			"sqlite" => new SqliteState(Path.Combine(options.Data, "state.db")),
+			"postgres" => new PostgresState(options.Postgres ?? throw new ArgumentException("-postgres <connection string> is required with -state postgres.")),
+			var other => throw new ArgumentException($"-state is sqlite or postgres, not '{other}'.")
+		};
+		if (options.Storage.Equals("azure", StringComparison.OrdinalIgnoreCase))
+		{
+			var azure = options.AzureConnection is { } connection
+				? AzureBlobObjectStore.FromConnectionString(connection, options.AzureContainer, options.BucketPrefix)
+				: options.AzureUrl is { } url
+					? AzureBlobObjectStore.FromContainerUrl(new Uri(url), options.BucketPrefix)
+					: throw new ArgumentException("-storage azure needs -azure-connection <string> or -azure-url <container url>.");
+			Blobs = azure;
+			Maintenance = azure;
+			Azure = azure;
+		}
+		else if (options.Storage.Equals("s3", StringComparison.OrdinalIgnoreCase))
 		{
 			var client = options.Region is null ? new AmazonS3Client() : new AmazonS3Client(RegionEndpoint.GetBySystemName(options.Region));
 			var s3 = new S3ObjectStore(client, options.Bucket ?? throw new ArgumentException("-bucket is required with -storage s3."), options.BucketPrefix);
@@ -68,7 +85,9 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	private static readonly TimeSpan UrlLifetime = TimeSpan.FromMinutes(30);
 
-	public SqliteState State { get; }
+	public IServerState State { get; }
+
+	public AzureBlobObjectStore? Azure { get; }
 
 	public IObjectStore Blobs { get; }
 
@@ -89,6 +108,11 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	public async Task StartAsync()
 	{
+		if (Azure is not null && options.AzureConnection is not null)
+		{
+			await Azure.CreateIfMissingAsync();
+		}
+
 		await Repo.InitializeAsync("bassia-server");
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
 		builder.Logging.ClearProviders();
@@ -98,7 +122,16 @@ internal sealed class ServerApp : IAsyncDisposable
 			builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter(Meter.Name).AddOtlpExporter());
 		}
 
+		builder.Services.AddResponseCompression(compression =>
+		{
+			compression.EnableForHttps = true;
+			compression.MimeTypes = ["application/json", "application/octet-stream", "text/html", "text/css", "text/javascript"];
+			compression.ExcludedMimeTypes = ["text/event-stream"];
+		});
+		builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+		builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 		app = builder.Build();
+		app.UseResponseCompression();
 		var dashboard = new Dashboard(context => Task.FromResult(new DashboardScope(Repo, Landing, $"bassia-server · {options.Data}", ReadLogAsync,
 			Events: "/events")));
 		app.Use(AuthorizeAsync);
@@ -170,7 +203,8 @@ internal sealed class ServerApp : IAsyncDisposable
 		request.Query["op"] == operation && long.TryParse(request.Query["exp"], out var expires) && expires >= DateTimeOffset.UtcNow.ToUnixTimeSeconds()
 		&& CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Signature(id, operation, expires)), Encoding.ASCII.GetBytes(request.Query["sig"].ToString()));
 
-	private async Task<Uri> ReadUrlAsync(ObjectId id) => S3 is not null ? await S3.ReadUrlAsync(id) : SignedUrl(id, "get");
+	private async Task<Uri> ReadUrlAsync(ObjectId id) =>
+		S3 is not null ? await S3.ReadUrlAsync(id) : Azure is not null ? await Azure.ReadUrlAsync(id) : SignedUrl(id, "get");
 
 	// ----- watch -----
 
@@ -348,6 +382,54 @@ internal sealed class ServerApp : IAsyncDisposable
 
 			return Json(new Api.BatchReply(result));
 		});
+		// Many small objects in one reply; those missing or large enough for a direct URL are left out.
+		api.MapPost("/objects/fetch", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.IdsRequest>(request);
+			var found = new ConcurrentBag<(ObjectId, ReadOnlyMemory<byte>)>();
+			await Parallel.ForEachAsync(body.Ids.Distinct().Take(5000), new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
+				async (id, ct) =>
+				{
+					if (await Blobs.StatAsync(id, ct) is { Length: < ServerConnection.DirectTransferThreshold } && await Blobs.ReadAsync(id, null, ct) is { } bytes)
+					{
+						found.Add((id, bytes));
+					}
+				});
+			var reply = Api.Frames.Write(found);
+			BytesServed.Add(reply.Length);
+			return Results.Bytes(reply, "application/octet-stream");
+		});
+
+		// Many small objects in one request, each checked like a single put.
+		api.MapPost("/objects/put", async (HttpRequest request) =>
+		{
+			var objects = Api.Frames.Read(await ReadBodyAsync(request));
+			foreach (var (id, bytes) in objects)
+			{
+				if (ObjectId.Of(bytes.Span) != id)
+				{
+					return Error(StatusCodes.Status400BadRequest, $"Object {id.Short}: the bytes do not hash to its id.");
+				}
+
+				if (ObjectCodec.TypeOf(bytes) is not null)
+				{
+					try
+					{
+						ObjectCodec.Decode(bytes);
+					}
+					catch (InvalidDataException ex)
+					{
+						return Error(StatusCodes.Status400BadRequest, $"Refused a malformed object {id.Short}: {ex.Message}");
+					}
+				}
+			}
+
+			await Parallel.ForEachAsync(objects, new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
+				async (item, ct) => await Blobs.PutAsync(item.Id, item.Bytes, ct));
+			ObjectsStored.Add(objects.Count);
+			return Results.NoContent();
+		});
+
 		api.MapPost("/objects/upload-urls", async (HttpRequest request) =>
 		{
 			var body = await BodyAsync<Api.UploadRequest>(request);
