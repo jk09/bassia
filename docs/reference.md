@@ -165,6 +165,10 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
 - **Ignore rules.** Version control and build folders (`.git/`, `bin/`, `obj/`, `node_modules/`, caches) are never
   snapshotted unless already tracked; `.bassia.toml`'s `[ignore] paths` adds more. Two paths that differ only by case
   are refused, because Windows cannot hold both.
+- **Changes.** `workspace status`, `workspace diff` and the dashboard list each changed path as `added`, `deleted`,
+  `modified`, `renamed`, or `mode` - the same content with only the executable bit changed (git's `100755`/`100644`).
+  On Windows, which has no executable bit, a file keeps the mode its tree recorded, so imported executables never show
+  as changed.
 - **Stacking and cloning instead of branches.** `-on <workspace>` stacks a new workspace on another one's work: it
   lands after it (`check` reports `rejected` until then) and `sync` follows it. `workspace clone` makes a new workspace
   with the same base and work as a new change.
@@ -173,7 +177,7 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
   and what stays unresolved is stored as a conflict and written into the folder with markers
   (`<<<<<<< workspace` ... `||||||| base` ... `=======` ... `>>>>>>> mainline`). Editing the file resolves it.
 - **Undo and restore.** Every operation is in the workspace's log (`workspace log`); `undo` restores the view before
-  the last operation and `restore -op <op>` any earlier one, each as a new operation, and the folder follows.
+  the last operation and `restore -op <seq|id>` any earlier one (by its seq, or 4+ characters of its id), each as a new operation, and the folder follows.
 - **Close.** `workspace close [-abandon] [-remove]` ends a workspace; its operations stay recoverable until
   `gc.retention_days` after it closed.
 

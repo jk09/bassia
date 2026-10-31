@@ -375,9 +375,13 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 		}
 
 		body.Append("</section></div>");
-		body.Append($"<h2>Changes against its base <span class=\"muted\">({E(Core.Version.ChangeStatus.Added)}: {records.Count(r => r.Status == Core.Version.ChangeStatus.Added)}, " +
-			$"{E(Core.Version.ChangeStatus.Modified)}: {records.Count(r => r.Status == Core.Version.ChangeStatus.Modified)}, " +
-			$"{E(Core.Version.ChangeStatus.Deleted)}: {records.Count(r => r.Status == Core.Version.ChangeStatus.Deleted)})</span></h2>");
+		var counts = records.GroupBy(record => record.Status).OrderBy(group => group.Key, StringComparer.Ordinal).Select(group => $"{E(group.Key)}: {group.Count()}");
+		body.Append($"<h2>Changes against its base <span class=\"muted\">({(records.Count == 0 ? "none" : string.Join(", ", counts))})</span></h2>");
+		if (records.Any(record => record.Status == Core.Version.ChangeStatus.Mode))
+		{
+			body.Append("<p class=\"muted\">mode: the same content with the executable bit changed (git's 100755 / 100644).</p>");
+		}
+
 		body.Append(DiffTable(records));
 		body.Append("<h2>Operations</h2><table class=\"list\"><tr><th>#</th><th>Operation</th><th>Time</th><th>By</th><th>Description</th></tr>");
 		await foreach (var entry in Repo.LogAsync(HeadName.Workspace(state.Id), 50))
@@ -407,12 +411,14 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 			return Notice("No changes.");
 		}
 
-		var body = new StringBuilder("<table class=\"list\"><tr><th>Status</th><th>Path</th><th>Size</th></tr>");
+		var body = new StringBuilder("<table class=\"list\"><tr><th>Status</th><th>Path</th><th>Size or mode</th></tr>");
 		foreach (var record in records)
 		{
 			var status = record.New?.Kind == EntryKind.Conflict ? "conflict" : record.Status;
 			body.Append($"<tr><td>{Status(status)}</td><td class=\"id\">{(record.OldPath is null ? "" : E(record.OldPath) + " &rarr; ")}{E(record.Path)}</td>");
-			body.Append($"<td>{(record.Old is null ? "" : CliCommands.Results.Size(record.Old.Size) + " &rarr; ")}{(record.New is null ? "-" : CliCommands.Results.Size(record.New.Size))}</td></tr>");
+			body.Append(record.Status == Core.Version.ChangeStatus.Mode
+				? $"<td>{E(Core.Version.Diffs.ModeText(record.Old))} &rarr; {E(Core.Version.Diffs.ModeText(record.New))}</td></tr>"
+				: $"<td>{(record.Old is null ? "" : CliCommands.Results.Size(record.Old.Size) + " &rarr; ")}{(record.New is null ? "-" : CliCommands.Results.Size(record.New.Size))}</td></tr>");
 		}
 
 		return body.Append("</table>").ToString();
@@ -744,6 +750,7 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 		.status.needs-replay, .status.lost, .status.replaced, .status.stopped { color:var(--warn); }
 		.status.conflict, .status.rejected { color:var(--bad); } .status.closed, .status.abandoned, .status.nothing { color:var(--muted); }
 		.status.added { color:var(--ok); } .status.deleted { color:var(--bad); } .status.modified, .status.renamed { color:var(--live); }
+		.status.mode { color:var(--violet); }
 		i.k-integrated { background:#eaf6ee; border:2px solid var(--ok); } i.k-waiter { background:#fff6e6; border:2px dashed var(--warn); }
 		i.k-run { background:#e9f3ff; border:2px solid var(--live); } i.k-result { background:#fff; border:2px dashed var(--live); }
 		""";

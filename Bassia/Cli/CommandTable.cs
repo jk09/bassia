@@ -118,7 +118,7 @@ internal static class CommandTable
 		new("workspace", "undo", "Undo the workspace's last operation (snapshot, sync, ...); the folder follows. Undo again to redo.", [WorkspaceSwitch],
 			["bassia workspace undo"], WorkspaceCommands.UndoAsync, Positional: "workspace"),
 		new("workspace", "restore", "Return the workspace to an earlier operation of its log.",
-			[WorkspaceSwitch, new("op", "operation", "The operation: its id (or a prefix), or its seq in the log.", Required: true)],
+			[WorkspaceSwitch, new("op", "operation", "The operation: its seq in the log, or 4+ characters of its id.", Required: true)],
 			["bassia workspace restore -op 3", "bassia workspace restore fix-login -op 9f2c41"], WorkspaceCommands.RestoreAsync, Positional: "workspace"),
 		new("workspace", "log", "The workspace's operations, newest first.", [WorkspaceSwitch, new("limit", "n", "At most this many (default 50).")],
 			["bassia workspace log fix-login"], WorkspaceCommands.LogAsync, Positional: "workspace"),

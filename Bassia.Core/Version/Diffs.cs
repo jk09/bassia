@@ -10,6 +10,9 @@ public static class ChangeStatus
 	public const string Deleted = "deleted";
 	public const string Modified = "modified";
 	public const string Renamed = "renamed";
+
+	/// <summary>The same content with another mode: only the executable bit changed.</summary>
+	public const string Mode = "mode";
 }
 
 /// <summary>
@@ -82,7 +85,8 @@ public sealed class Diffs(Trees trees)
 		{
 			if (change.Old is not null && change.New is not null)
 			{
-				records.Add(new DiffRecord(change.Path, ChangeStatus.Modified, change.Old, change.New));
+				var modeOnly = change.Old.Kind == change.New.Kind && change.Old.Id == change.New.Id && change.Old.Executable != change.New.Executable;
+				records.Add(new DiffRecord(change.Path, modeOnly ? ChangeStatus.Mode : ChangeStatus.Modified, change.Old, change.New));
 			}
 			else if (change.New is not null)
 			{
@@ -112,12 +116,20 @@ public sealed class Diffs(Trees trees)
 		return (double)newChunks.Where(chunk => oldChunks.Contains(chunk.Id)).Sum(chunk => chunk.Length) / newLeaf.Size;
 	}
 
+	/// <summary>How a mode reads in a summary: executable (git's 100755) or not (100644).</summary>
+	public static string ModeText(Leaf? leaf) => leaf?.Executable == true ? "executable (100755)" : "not executable (100644)";
+
 	/// <summary>
 	/// The review form of one record: a unified diff for an ordinary text edit; for a rewrite (new and old share less
 	/// than <see cref="RewriteThreshold"/>) or binary content, a summary instead of a wall of hunks.
 	/// </summary>
 	public async Task<FilePatch> PatchAsync(DiffRecord record, int context = 3, CancellationToken ct = default)
 	{
+		if (record.Status == ChangeStatus.Mode)
+		{
+			return new FilePatch(record, false, false, 0, 0, null, $"mode changed: {ModeText(record.Old)} -> {ModeText(record.New)}, content unchanged");
+		}
+
 		var oldBytes = record.Old is { IsFile: true } or { Kind: EntryKind.Symlink } ? await Objects.ReadContentAsync(record.Old, ct) : [];
 		var newBytes = record.New is { IsFile: true } or { Kind: EntryKind.Symlink } ? await Objects.ReadContentAsync(record.New, ct) : [];
 		if (!LineDiff.IsText(oldBytes) || !LineDiff.IsText(newBytes))

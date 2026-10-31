@@ -108,6 +108,8 @@ internal static class Results
 		["new_size"] = record.New?.Size,
 		["old_id"] = record.Old?.Id.Hex,
 		["new_id"] = record.New?.Id.Hex,
+		["old_executable"] = record.Old?.Executable,
+		["new_executable"] = record.New?.Executable,
 		["similarity"] = record.Similarity
 	};
 
