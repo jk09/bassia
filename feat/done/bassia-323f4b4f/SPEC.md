@@ -52,7 +52,7 @@ Client sync
 
 Docs and CI
 
-- [ ] CI runs the PostgreSQL and Azure contract and server tests against service containers (PostgreSQL 16, Azurite).
+- [x] CI runs the PostgreSQL and Azure contract and server tests against service containers (PostgreSQL 16, Azurite).
 - [x] `docs/reference.md` documents the Azure configuration, the sync protocol and its costs.
 
 ## Approach
@@ -88,7 +88,7 @@ ASP.NET Core response compression for `application/json` and `application/octet-
 - [x] Batched, compressed, parallel client sync: a 221-file checkout in at most 16 object requests (was ~260), a
       second checkout with no object reads, a snapshot in one `Have` and at most a few batched puts.
 - [x] Tests pass locally (157) against PostgreSQL 16 and Azurite 3.37; docs written.
-- [ ] CI runs them against its PostgreSQL service and Azurite.
+- [x] CI runs them against its PostgreSQL service and Azurite.
 
 Not verified here: Microsoft Entra ID authentication to Blob Storage (`-azure-url`, user delegation SAS) needs a
 real Azure account; the code path is the documented SDK one, and connection-string authentication is what the tests
