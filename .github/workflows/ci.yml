@@ -32,6 +32,18 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The cloud backends' contract and server tests run against PostgreSQL and Azurite (Azure Blob Storage's emulator).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      BASSIA_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Username=postgres;Password=postgres;Database=postgres
+      BASSIA_TEST_AZURE_BLOB: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
     steps:
       - uses: actions/checkout@v5
 
@@ -55,6 +67,17 @@ jobs:
         run: |
           ./packaging/Get-Weave.ps1 -Rid linux-x64 -Destination "$env:RUNNER_TEMP/weave"
           "$env:RUNNER_TEMP/weave" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Start Azurite
+        run: |
+          mkdir -p "$RUNNER_TEMP/azurite"
+          nohup npx --yes azurite@3.37.0 --silent --blobHost 127.0.0.1 --blobPort 10000 --location "$RUNNER_TEMP/azurite" \
+            --skipApiVersionCheck --loose > "$RUNNER_TEMP/azurite.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null "http://127.0.0.1:10000/devstoreaccount1?comp=list" && break
+            sleep 1
+          done
+          curl -s -o /dev/null -w "Azurite answers %{http_code}\n" "http://127.0.0.1:10000/devstoreaccount1?comp=list"
 
       - name: Build
         run: dotnet build --configuration Release

@@ -195,9 +195,13 @@ public sealed class Repository
 	public async Task<WorkspaceState> CommitWorkspaceAsync(WorkspaceState? current, WorkspaceRecord record, string description, string? agent,
 		string? run, CancellationToken ct = default)
 	{
-		var view = await Objects.WriteAsync(new View(new Dictionary<string, ObjectId> { ["base"] = record.Base, ["working"] = record.Working }, record), ct);
+		// The view and the operation pointing at it go up together, in one round trip for a remote store.
+		var viewObject = new View(new Dictionary<string, ObjectId> { ["base"] = record.Base, ["working"] = record.Working }, record);
+		var view = ObjectId.Of(ObjectCodec.Encode(viewObject));
 		var op = new Operation(current is null ? [] : [current.Head], view, description, record.Id, agent, run, Clock(), (current?.Operation.Seq ?? -1) + 1);
-		var opId = await Objects.WriteAsync(op, ct);
+		var opId = (await Objects.WriteManyAsync([viewObject, op], ct))[1];
+		// Inside a write batch, everything written so far goes up now: the head may only point at stored objects.
+		await Objects.FlushAsync(ct);
 		var name = HeadName.Workspace(record.Id);
 		var update = await Views.AdvanceHeadAsync(name, current?.Head, opId, ct);
 		if (!update.Success)

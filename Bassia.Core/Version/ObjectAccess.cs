@@ -54,11 +54,129 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 
 	public Task<View> ReadViewAsync(ObjectId id, CancellationToken ct = default) => ReadAsync<View>(id, ct);
 
+	/// <summary>The objects written inside <see cref="BatchAsync{T}"/>, sent together by <see cref="FlushAsync"/>.</summary>
+	private readonly AsyncLocal<List<(ObjectId Id, byte[] Bytes)>?> deferred = new();
+
+	/// <summary>
+	/// Runs <paramref name="work"/> with its writes held back and sends them together at the end (or at the first
+	/// <see cref="FlushAsync"/>): one <c>Have</c> and one batched put for a remote store, instead of a round trip per object.
+	/// </summary>
+	public async Task<T> BatchAsync<T>(Func<Task<T>> work)
+	{
+		if (deferred.Value is not null)
+		{
+			return await work();
+		}
+
+		deferred.Value = [];
+		try
+		{
+			var result = await work();
+			await FlushAsync();
+			return result;
+		}
+		finally
+		{
+			deferred.Value = null;
+		}
+	}
+
+	/// <summary>Sends the writes held back so far; a head may only point at objects that are stored.</summary>
+	public async Task FlushAsync(CancellationToken ct = default)
+	{
+		if (deferred.Value is not { Count: > 0 } pending)
+		{
+			return;
+		}
+
+		var items = pending.DistinctBy(item => item.Id).ToList();
+		pending.Clear();
+		await StoreMissingAsync(items, ct);
+	}
+
+	/// <summary>Objects at least this large go one by one (on direct URLs, for a remote store); smaller ones travel in batches.</summary>
+	public const int BatchLimit = 256 * 1024;
+
+	/// <summary>Fetches objects ahead of reads, in batches, when the store keeps a local cache; otherwise does nothing.</summary>
+	public async Task PrefetchAsync(IEnumerable<ObjectId> ids, CancellationToken ct = default)
+	{
+		if (store is IObjectPrefetcher prefetcher)
+		{
+			var missing = ids.Where(id => !cache.ContainsKey(id)).Distinct().ToList();
+			if (missing.Count > 0)
+			{
+				await prefetcher.PrefetchAsync(missing, ct);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Fetches the content of file leaves ahead of a checkout: their file objects first (one batch), then all their
+	/// chunks (small ones in batches, large ones several at a time).
+	/// </summary>
+	public async Task PrefetchContentAsync(IEnumerable<Leaf> leaves, CancellationToken ct = default)
+	{
+		if (store is not IObjectPrefetcher)
+		{
+			return;
+		}
+
+		var list = leaves.Where(leaf => leaf.IsFile || leaf.Kind == EntryKind.Symlink).ToList();
+		await PrefetchAsync(list.Where(leaf => leaf.Kind == EntryKind.Chunked).Select(leaf => leaf.Id), ct);
+		var chunks = new List<ObjectId>();
+		foreach (var leaf in list)
+		{
+			chunks.AddRange((await ChunksAsync(leaf, ct)).Select(chunk => chunk.Id));
+		}
+
+		await PrefetchAsync(chunks, ct);
+	}
+
+	/// <summary>Stores several structural objects in one round trip where the store can; returns their ids in order.</summary>
+	public async Task<IReadOnlyList<ObjectId>> WriteManyAsync(IReadOnlyList<StoredObject> values, CancellationToken ct = default)
+	{
+		var encoded = values.Select(value => (Value: value, Bytes: ObjectCodec.Encode(value))).Select(item => (item.Value, Id: ObjectId.Of(item.Bytes), item.Bytes)).ToList();
+		var fresh = encoded.Where(item => !cache.ContainsKey(item.Id)).DistinctBy(item => item.Id).ToList();
+		if (deferred.Value is { } pending)
+		{
+			pending.AddRange(fresh.Select(item => (item.Id, item.Bytes)));
+		}
+		else if (store is IObjectBatchWriter batches && fresh.Count > 1)
+		{
+			await batches.PutManyAsync(fresh.Select(item => (item.Id, (ReadOnlyMemory<byte>)item.Bytes)).ToList(), ct);
+		}
+		else
+		{
+			foreach (var item in fresh)
+			{
+				await store.PutAsync(item.Id, item.Bytes, ct);
+			}
+		}
+
+		foreach (var item in encoded)
+		{
+			cache.TryAdd(item.Id, item.Value);
+		}
+
+		return encoded.Select(item => item.Id).ToList();
+	}
+
 	public async Task<ObjectId> WriteAsync(StoredObject value, CancellationToken ct = default)
 	{
 		var bytes = ObjectCodec.Encode(value);
 		var id = ObjectId.Of(bytes);
-		await store.PutAsync(id, bytes, ct);
+		if (deferred.Value is { } pending)
+		{
+			if (!cache.ContainsKey(id))
+			{
+				pending.Add((id, bytes));
+			}
+		}
+		else
+		{
+			await store.PutAsync(id, bytes, ct);
+		}
+
 		cache.TryAdd(id, value);
 		return id;
 	}
@@ -198,14 +316,33 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 			return;
 		}
 
-		var distinct = chunks.DistinctBy(chunk => chunk.Id).ToList();
-		var have = await store.HasAsync(distinct.Select(chunk => chunk.Id).ToList(), ct);
-		for (var index = 0; index < distinct.Count; index++)
+		if (deferred.Value is { } pending)
 		{
-			if (!have[index])
-			{
-				await store.PutAsync(distinct[index].Id, distinct[index].Bytes, ct);
-			}
+			pending.AddRange(chunks);
+			return;
 		}
+
+		await StoreMissingAsync(chunks.DistinctBy(chunk => chunk.Id).ToList(), ct);
+	}
+
+	/// <summary>Asks which objects the store lacks, then sends those: small ones in batches, large ones several at a time.</summary>
+	private async Task StoreMissingAsync(IReadOnlyList<(ObjectId Id, byte[] Bytes)> items, CancellationToken ct)
+	{
+		var missing = new List<(ObjectId Id, byte[] Bytes)>();
+		foreach (var part in items.Chunk(1000))
+		{
+			var have = await store.HasAsync(part.Select(item => item.Id).ToList(), ct);
+			missing.AddRange(part.Where((_, index) => !have[index]));
+		}
+
+		var small = missing.Where(item => item.Bytes.Length < BatchLimit).ToList();
+		if (store is IObjectBatchWriter batches && small.Count > 1)
+		{
+			await batches.PutManyAsync(small.Select(item => (item.Id, (ReadOnlyMemory<byte>)item.Bytes)).ToList(), ct);
+			missing = missing.Except(small).ToList();
+		}
+
+		await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+			async (item, token) => await store.PutAsync(item.Id, item.Bytes, token));
 	}
 }

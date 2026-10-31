@@ -126,6 +126,8 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			state.Entries.Remove(change.Path);
 		}
 
+		// The content of every new file in a few batched round trips, before any is written.
+		await repo.Objects.PrefetchContentAsync(changes.Where(change => change.New is not null).Select(change => change.New!), ct);
 		foreach (var change in changes.Where(change => change.New is not null))
 		{
 			state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);

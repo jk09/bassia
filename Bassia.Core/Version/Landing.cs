@@ -253,8 +253,10 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 				continue;
 			}
 
+			// Index through the operation log's catch-up rather than applying this seq alone: with several landing
+			// services (server nodes), the landing before this one may not be indexed yet, and seqs go in order.
 			var applied = await repo.Trees.DiffAsync(main.Tree, tree, "", ct);
-			await repo.Paths.ApplyAsync(seq, applied.Select(change => new PathChange(change.Path, change.New)).ToList(), ct);
+			await repo.EnsureIndexedAsync(await repo.MainAtAsync(op, ct), ct);
 			var prefixes = applied.Select(change => PathNames.Split(change.Path)[0]).Distinct(StringComparer.Ordinal).ToList();
 			Landed?.Invoke(new LandedEvent(seq, commitId, record.Id, prefixes, repo.Clock()));
 			return new LandResult(LandOutcome.Landed, $"Landed workspace '{record.Name}' at seq {seq} ({touched.Count} touched path(s){(merged.Count > 0 ? $", {merged.Count} merged" : "")}).",

@@ -6,7 +6,7 @@ using Bassia.Core.Version;
 /// <c>bassia-server</c>: runs the server, or a maintenance job over its data.
 /// <code>
 /// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t>]
-///               [-storage disk|s3 -bucket <b> [-region <r>] [-bucket-prefix objects/]] [-semantic-driver <cmd>|off] [-validate <cmd>]
+///               [-storage disk|s3|azure ...] [-state sqlite|postgres ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
 /// bassia-server gc -data <folder> [-grace-hours 24] [-retention-days 14] [-dry-run]
 /// bassia-server scrub -data <folder> [-sample <n>]
 /// </code>
@@ -16,7 +16,9 @@ internal static class Program
 {
 	private const string Usage = """
 		Usage:
-		  bassia-server -data <folder> [-url <url>] [-public-url <url>] [-token <token>] [-storage disk|s3 -bucket <b> [-region <r>]]
+		  bassia-server -data <folder> [-url <url>] [-public-url <url>] [-token <token>]
+		                [-storage disk | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
+		                [-state sqlite | -state postgres -postgres <connection string>]
 		                [-semantic-driver <command>|off] [-validate <command>]        run the server
 		  bassia-server gc -data <folder> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> [-sample <n>]                                      re-hash stored blobs

@@ -109,7 +109,11 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 	/// Snapshots the workspace's directory, if it has one here: hashes only the paths whose size or time changed, uploads
 	/// missing chunks, rebuilds the trees along changed paths and amends the working commit on the workspace's own head.
 	/// </summary>
-	public async Task<SnapshotResult> SnapshotAsync(WorkspaceState state, string? run = null, CancellationToken ct = default)
+	public Task<SnapshotResult> SnapshotAsync(WorkspaceState state, string? run = null, CancellationToken ct = default) =>
+		// Changed files' chunks, the rebuilt trees, the commit, the view and the operation go up together.
+		repo.Objects.BatchAsync(() => SnapshotOnceAsync(state, run, ct));
+
+	private async Task<SnapshotResult> SnapshotOnceAsync(WorkspaceState state, string? run, CancellationToken ct)
 	{
 		if (Local(state) is not { } local || !state.IsOpen)
 		{

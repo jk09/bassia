@@ -32,6 +32,27 @@ public interface IObjectStore
 	ValueTask<UploadTicket> BeginUploadAsync(ObjectId id, long length, CancellationToken ct = default);
 }
 
+/// <summary>
+/// A store that reads many objects in one round trip: those it returns are whole and verified by the caller; ids it
+/// leaves out (missing, or too large to batch) are read one by one.
+/// </summary>
+public interface IObjectBatchReader
+{
+	Task<IReadOnlyDictionary<ObjectId, ReadOnlyMemory<byte>>> ReadManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default);
+}
+
+/// <summary>A store that writes many objects in one round trip.</summary>
+public interface IObjectBatchWriter
+{
+	Task PutManyAsync(IReadOnlyList<(ObjectId Id, ReadOnlyMemory<byte> Bytes)> objects, CancellationToken ct = default);
+}
+
+/// <summary>A store with a local cache that can be filled ahead of reads, in as few round trips as it can.</summary>
+public interface IObjectPrefetcher
+{
+	Task PrefetchAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default);
+}
+
 /// <summary>A stored blob as maintenance sees it: id, length and when it was written.</summary>
 public sealed record BlobInfo(ObjectId Id, long Length, DateTimeOffset Written);
 

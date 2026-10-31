@@ -12,7 +12,7 @@ using Microsoft.Data.Sqlite;
 /// fencing counter and a FIFO queue of waiters. One SQLite file serves a local monorepo (shared by every process on the
 /// machine) and a single-node server.
 /// </summary>
-public sealed class SqliteState : IViewStore, IPathIndex, ILeaseStore
+public sealed class SqliteState : IServerState
 {
 	private readonly string connectionString;
 

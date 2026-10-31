@@ -89,17 +89,20 @@ public sealed class Trees(ObjectAccess objects)
 		}
 
 		var clashes = new List<string>();
-		var result = await EditTreeAsync(root, "", list, 0, clashes, ct);
+		var written = new List<StoredObject>();
+		var result = await EditTreeAsync(root, "", list, 0, clashes, written, ct);
 		if (clashes.Count > 0)
 		{
 			throw new PathClashException(clashes);
 		}
 
-		return result ?? await EmptyTreeAsync(ct);
+		// Every new tree along the changed paths, in one write (one round trip for a remote store).
+		await objects.WriteManyAsync(written, ct);
+		return result?.Id ?? await EmptyTreeAsync(ct);
 	}
 
-	private async Task<ObjectId?> EditTreeAsync(ObjectId? treeId, string prefix, List<(string[] Parts, Leaf? Leaf)> changes, int depth,
-		List<string> clashes, CancellationToken ct)
+	private async Task<(ObjectId Id, long Size)?> EditTreeAsync(ObjectId? treeId, string prefix, List<(string[] Parts, Leaf? Leaf)> changes, int depth,
+		List<string> clashes, List<StoredObject> written, CancellationToken ct)
 	{
 		var tree = treeId is { } id ? await objects.ReadTreeAsync(id, ct) : Tree.Empty;
 		var entries = tree.Entries.ToDictionary(entry => entry.Name, StringComparer.Ordinal);
@@ -146,8 +149,8 @@ public sealed class Trees(ObjectAccess objects)
 
 				if (deeper.Count > 0)
 				{
-					var subtree = await EditTreeAsync(current?.Id, path, deeper, depth + 1, clashes, ct);
-					current = subtree is { } sub ? new Leaf(EntryKind.Tree, sub, (await objects.ReadTreeAsync(sub, ct)).TotalSize) : null;
+					var subtree = await EditTreeAsync(current?.Id, path, deeper, depth + 1, clashes, written, ct);
+					current = subtree is { } sub ? new Leaf(EntryKind.Tree, sub.Id, sub.Size) : null;
 				}
 			}
 
@@ -166,7 +169,9 @@ public sealed class Trees(ObjectAccess objects)
 			return null;
 		}
 
-		return await objects.WriteAsync(Tree.Of(entries.Values), ct);
+		var result = Tree.Of(entries.Values);
+		written.Add(result);
+		return (ObjectId.Of(ObjectCodec.Encode(result)), result.TotalSize);
 	}
 
 	/// <summary>
@@ -175,18 +180,30 @@ public sealed class Trees(ObjectAccess objects)
 	/// </summary>
 	public async Task<IReadOnlyList<TreeChange>> DiffAsync(ObjectId? oldTree, ObjectId? newTree, string prefix = "", CancellationToken ct = default)
 	{
+		// Breadth first: all the subtrees of one level that differ are fetched together, so a remote store answers a
+		// whole level in one round trip instead of one per tree.
 		var changes = new List<TreeChange>();
-		await DiffIntoAsync(oldTree, newTree, prefix, changes, ct);
+		var level = new List<(ObjectId? Old, ObjectId? New, string Prefix)> { (oldTree, newTree, prefix) };
+		while (level.Count > 0)
+		{
+			level = level.Where(pair => pair.Old != pair.New).ToList();
+			await objects.PrefetchAsync(level.SelectMany(pair => new[] { pair.Old, pair.New }).OfType<ObjectId>(), ct);
+			var next = new List<(ObjectId? Old, ObjectId? New, string Prefix)>();
+			foreach (var (o, n, at) in level)
+			{
+				await DiffLevelAsync(o, n, at, changes, next, ct);
+			}
+
+			level = next;
+		}
+
+		changes.Sort((a, b) => string.CompareOrdinal(a.Path, b.Path));
 		return changes;
 	}
 
-	private async Task DiffIntoAsync(ObjectId? oldTree, ObjectId? newTree, string prefix, List<TreeChange> changes, CancellationToken ct)
+	private async Task DiffLevelAsync(ObjectId? oldTree, ObjectId? newTree, string prefix, List<TreeChange> changes,
+		List<(ObjectId? Old, ObjectId? New, string Prefix)> next, CancellationToken ct)
 	{
-		if (oldTree == newTree)
-		{
-			return;
-		}
-
 		var oldEntries = oldTree is { } o ? (await objects.ReadTreeAsync(o, ct)).Entries : [];
 		var newEntries = newTree is { } n ? (await objects.ReadTreeAsync(n, ct)).Entries : [];
 		int i = 0, j = 0;
@@ -220,7 +237,7 @@ public sealed class Trees(ObjectAccess objects)
 					changes.Add(new TreeChange(path, oldEntry.Leaf, null));
 				}
 
-				await DiffIntoAsync(oldIsTree ? oldEntry!.Id : null, newIsTree ? newEntry!.Id : null, path, changes, ct);
+				next.Add((oldIsTree ? oldEntry!.Id : null, newIsTree ? newEntry!.Id : null, path));
 				if (!newIsTree && newEntry is not null)
 				{
 					changes.Add(new TreeChange(path, null, newEntry.Leaf));

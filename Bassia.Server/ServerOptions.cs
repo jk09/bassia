@@ -19,7 +19,7 @@ internal sealed record ServerOptions
 	/// <summary>A shared bearer token for the API and the dashboard; none: open (authentication is out of scope).</summary>
 	public string? Token { get; init; }
 
-	/// <summary><c>disk</c> (the local-disk stand-in for cloud blobs) or <c>s3</c>.</summary>
+	/// <summary><c>disk</c> (the local-disk stand-in for cloud blobs), <c>s3</c> or <c>azure</c>.</summary>
 	public string Storage { get; init; } = "disk";
 
 	public string? Bucket { get; init; }
@@ -27,6 +27,21 @@ internal sealed record ServerOptions
 	public string? Region { get; init; }
 
 	public string BucketPrefix { get; init; } = "objects/";
+
+	/// <summary>Azure Blob Storage: an account connection string (account key, or Azurite's development string).</summary>
+	public string? AzureConnection { get; init; }
+
+	/// <summary>Azure Blob Storage: a container URL, used with Microsoft Entra ID (managed identity) when there is no connection string.</summary>
+	public string? AzureUrl { get; init; }
+
+	/// <summary>The container, with a connection string (default <c>bassia</c>).</summary>
+	public string AzureContainer { get; init; } = "bassia";
+
+	/// <summary>Where heads, the path index and leases live: <c>sqlite</c> (the data folder, one node) or <c>postgres</c>.</summary>
+	public string State { get; init; } = "sqlite";
+
+	/// <summary>The PostgreSQL connection string (Azure Database for PostgreSQL: add <c>SSL Mode=Require</c>).</summary>
+	public string? Postgres { get; init; }
 
 	public ChunkParameters Chunks { get; init; } = ChunkParameters.Default;
 
@@ -65,7 +80,12 @@ internal sealed record ServerOptions
 			Storage = Get("storage") ?? "disk",
 			Bucket = Get("bucket"),
 			Region = Get("region"),
-			BucketPrefix = Get("bucket-prefix") ?? "objects/",
+			BucketPrefix = Get("bucket-prefix") ?? Get("azure-prefix") ?? "objects/",
+			AzureConnection = Get("azure-connection"),
+			AzureUrl = Get("azure-url"),
+			AzureContainer = Get("azure-container") ?? "bassia",
+			State = Get("state") ?? "sqlite",
+			Postgres = Get("postgres"),
 			SemanticDriver = Get("semantic-driver") ?? "weave-driver",
 			Validate = Get("validate")
 		};
