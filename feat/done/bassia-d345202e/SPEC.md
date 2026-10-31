@@ -70,7 +70,8 @@ reads PostgreSQL through `psql` (in the container, or next to the native binarie
 - [x] Validated natively on Linux (no Docker daemon here): check, up (fresh and again), status, env (sh, pwsh, cmd),
       smoke (10 checks; also with `-NoBuild -Bassia -Server`), test (157 tests; `-Filter cloud`: 8), down, down -Purge,
       and smoke/test refusing while the services are down.
-- [ ] CI `Local cloud` jobs: Docker mode on Linux, native mode on Windows.
+- [x] CI `Local cloud` jobs pass: Docker mode on Linux, native mode on Windows (after fixes: pg_ctl output via files,
+      Azurite created through WMI outside the caller's job object, Docker PostgreSQL readiness over TCP).
 
 ## Validation
 
