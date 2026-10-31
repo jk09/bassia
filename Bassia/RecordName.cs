@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 /// <summary>
 /// The <c>&lt;key&gt;</c> of a run or integration id: <c>&lt;adjective&gt;-&lt;noun&gt;-&lt;slug&gt;</c>, e.g.
 /// <c>magical-otter-vt9j3p</c>. Readable enough to show and type in full, and random enough (two words and six
-/// base-36 characters) that ids never collide across workspaces sharing a component repo, without any coordination.
+/// base-36 characters) that run ids never collide across clients of one monorepo, without any coordination.
 /// </summary>
 internal static partial class RecordName
 {

@@ -1,36 +1,33 @@
 namespace Bassia.Server;
 
-using Bassia.Storage.Cloud;
+using Bassia.Core.Version;
 
 /// <summary>
-/// <c>bassia-server</c>: runs the Bassia server, or does a one-off job with its configuration.
+/// <c>bassia-server</c>: runs the server, or a maintenance job over its data.
 /// <code>
-/// bassia-server -config server.toml [-url http://0.0.0.0:8080]   run the server
-/// bassia-server token -config server.toml -user alice [-minutes 60]  print a server token for a registered user
-/// bassia-server migrate -config server.toml                       bring the database schema up to date
-/// bassia-server check -config server.toml                         check the AWS resources (versioning, recovery)
-/// bassia-server gc -config server.toml                            collect the garbage of every history (cloud storage)
+/// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t>]
+///               [-storage disk|s3 -bucket <b> [-region <r>] [-bucket-prefix objects/]] [-semantic-driver <cmd>|off] [-validate <cmd>]
+/// bassia-server gc -data <folder> [-grace-hours 24] [-retention-days 14] [-dry-run]
+/// bassia-server scrub -data <folder> [-sample <n>]
 /// </code>
-/// Without <c>-config</c>, the configuration comes from environment variables (<see cref="ServerConfig.FromEnvironment"/>),
-/// as in a container.
+/// Every switch can also come from a <c>BASSIA_SERVER_*</c> environment variable (containers).
 /// </summary>
 internal static class Program
 {
 	private const string Usage = """
 		Usage:
-		  bassia-server -config <file> [-url <url>]                 run the server
-		  bassia-server token -config <file> -user <id> [-minutes <n>]   print a token for a registered user (bootstrap, automation)
-		  bassia-server migrate -config <file>                       bring the database schema up to date
-		  bassia-server check -config <file>                         check the cloud resources the configuration names
-		  bassia-server gc -config <file> [-grace-days <n>]          collect the garbage of every history (cloud storage)
-		Without -config, the configuration comes from BASSIA_* environment variables (containers).
+		  bassia-server -data <folder> [-url <url>] [-public-url <url>] [-token <token>] [-storage disk|s3 -bucket <b> [-region <r>]]
+		                [-semantic-driver <command>|off] [-validate <command>]        run the server
+		  bassia-server gc -data <folder> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
+		  bassia-server scrub -data <folder> [-sample <n>]                                      re-hash stored blobs
+		Switches may also come from BASSIA_SERVER_<NAME> environment variables (BASSIA_SERVER_DATA, BASSIA_SERVER_TOKEN, ...).
 		""";
 
 	public static async Task<int> Main(string[] args)
 	{
 		var command = args.Length > 0 && !args[0].StartsWith('-') ? args[0] : "serve";
-		var options = Options(args.SkipWhile(arg => !arg.StartsWith('-')).ToArray());
-		if (command is "help" or "-help" or "--help")
+		var rest = command == "serve" ? args : args[1..];
+		if (command is "help" or "-help" or "--help" || args.Contains("-help") || args.Contains("--help"))
 		{
 			Console.Out.WriteLine(Usage);
 			return 0;
@@ -38,105 +35,62 @@ internal static class Program
 
 		try
 		{
-			var config = options.TryGetValue("config", out var configPath) ? ServerConfig.Load(configPath) : ServerConfig.FromEnvironment();
+			var options = ServerOptions.Parse(rest);
+			await using var server = new ServerApp(options);
 			switch (command)
 			{
 				case "serve":
-					var state = await ServerState.CreateAsync(config);
-					var app = ServerApp.Build(state, options.GetValueOrDefault("url"));
-					Console.Error.WriteLine($"Bassia server listening on {options.GetValueOrDefault("url") ?? config.Url} ({config.StorageKind} storage, {config.DatabaseProvider} database).");
-					await app.RunAsync();
+					await server.StartAsync();
+					Console.Error.WriteLine($"bassia-server: serving '{options.Data}' ({options.Storage} blobs) at {server.Address}.");
+					await server.WaitForShutdownAsync();
 					return 0;
-				case "token":
-					var tokenState = await ServerState.CreateAsync(config);
-					var user = options.GetValueOrDefault("user") ?? throw new ServerConfigException("token needs -user <id>.");
-					if (!config.Admins.Contains(user) && (await tokenState.Meta.Store.LoadUsersAsync()).All(candidate => candidate.Id != user))
-					{
-						throw new ServerConfigException($"'{user}' is neither a registered user (users.toml of the meta-repo) nor one of the configured admins.");
-					}
-
-					var minutes = int.TryParse(options.GetValueOrDefault("minutes"), out var value) ? value : config.TokenMinutes;
-					Console.Out.WriteLine(tokenState.Tokens.Issue(user, TimeSpan.FromMinutes(minutes)));
-					return 0;
-				case "migrate":
-					await Data.ServerDatabase.Open(config.DatabaseProvider, config.DatabaseConnection).MigrateAsync();
-					Console.Out.WriteLine("The database schema is up to date.");
-					return 0;
-				case "check":
-					if (config.StorageKind != "cloud")
-					{
-						Console.Out.WriteLine("The storage is a folder on this machine; nothing to check.");
-						return 0;
-					}
-
-					var problems = await new AwsCloudOptions(config.Bucket!, config.Table!, config.Region, config.Prefix, config.S3Url, config.DynamoUrl).CheckAsync();
-					foreach (var problem in problems)
-					{
-						Console.Out.WriteLine(problem);
-					}
-
-					return problems.Count == 0 ? 0 : 1;
 				case "gc":
-					return await CollectAsync(config, int.TryParse(options.GetValueOrDefault("grace-days"), out var days) ? days : null);
+				{
+					await server.Repo.InitializeAsync("bassia-server");
+					var value = Switch(rest, "grace-hours");
+					var grace = TimeSpan.FromHours(value is null ? 24 : double.Parse(value));
+					var retention = TimeSpan.FromDays(Switch(rest, "retention-days") is { } days ? double.Parse(days) : 14);
+					var report = await new GarbageCollector(server.Repo, server.Maintenance).CollectAsync(grace, retention, rest.Contains("-dry-run"));
+					Console.Out.WriteLine($"{(report.DryRun ? "would sweep" : "swept")} {report.Swept} of {report.Blobs} blobs ({report.SweptBytes} bytes); " +
+						$"{report.Live} live; {report.Young} younger than the grace period; {report.PrunedWorkspaces} closed workspaces pruned");
+					return 0;
+				}
+
+				case "scrub":
+				{
+					var sample = Switch(rest, "sample") is { } text ? int.Parse(text) : (int?)null;
+					var report = await new GarbageCollector(server.Repo, server.Maintenance).ScrubAsync(sample);
+					Console.Out.WriteLine($"checked {report.Checked} blobs: {report.Corrupt.Count} corrupt, {report.Unreadable.Count} unreadable");
+					foreach (var id in report.Corrupt)
+					{
+						Console.Out.WriteLine($"corrupt {id}");
+					}
+
+					return report.Corrupt.Count == 0 && report.Unreadable.Count == 0 ? 0 : 1;
+				}
+
 				default:
 					Console.Error.WriteLine($"Unknown command '{command}'.\n{Usage}");
 					return 2;
 			}
 		}
-		catch (ServerConfigException ex)
+		catch (ArgumentException ex)
 		{
-			Console.Error.WriteLine(ex.Message);
-			return 1;
+			Console.Error.WriteLine($"bassia-server: {ex.Message}\n{Usage}");
+			return 2;
 		}
 	}
 
-	/// <summary>
-	/// Collects the garbage of every component's history and the meta-repo's, one after the other; a component another
-	/// collection holds is skipped. Exit code 1 when one failed.
-	/// </summary>
-	private static async Task<int> CollectAsync(ServerConfig config, int? graceDays)
+	private static string? Switch(IReadOnlyList<string> args, string name)
 	{
-		var state = await ServerState.CreateAsync(config);
-		if (state.Storage is not CloudComponentStorage storage)
+		for (var index = 0; index + 1 < args.Count; index++)
 		{
-			Console.Out.WriteLine("The storage is a folder on this machine; git collects its own garbage.");
-			return 0;
-		}
-
-		var collector = new CloudGarbageCollector(storage, graceDays is { } days ? TimeSpan.FromDays(days) : null);
-		var failed = 0;
-		foreach (var name in (await state.ComponentsAsync()).Select(component => component.Name).Append(Meta.HistoryServerMeta.Name))
-		{
-			try
+			if (args[index].TrimStart('-').Equals(name, StringComparison.OrdinalIgnoreCase))
 			{
-				var result = await collector.CollectAsync(name);
-				Console.Out.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
-				{
-					component = name, pack = result.Pack, superseded = result.Superseded.Count, deleted = result.Deleted.Count
-				}));
-			}
-			catch (Bassia.Storage.StorageException ex)
-			{
-				failed++;
-				Console.Error.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { component = name, error = ex.Message }));
+				return args[index + 1];
 			}
 		}
 
-		return failed == 0 ? 0 : 1;
-	}
-
-	/// <summary><c>-name value</c> pairs.</summary>
-	private static Dictionary<string, string> Options(string[] args)
-	{
-		var options = new Dictionary<string, string>(StringComparer.Ordinal);
-		for (var i = 0; i < args.Length; i++)
-		{
-			if (args[i].StartsWith('-'))
-			{
-				options[args[i].TrimStart('-')] = i + 1 < args.Length && !args[i + 1].StartsWith('-') ? args[++i] : "true";
-			}
-		}
-
-		return options;
+		return null;
 	}
 }

@@ -1,0 +1,365 @@
+namespace Bassia.Core.Workspaces;
+
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Bassia.Core.Model;
+using Bassia.Core.Storage;
+using Bassia.Core.Text;
+using Bassia.Core.Version;
+
+/// <summary>What the workspace last saw at a path: the tree's leaf, the file's size and modification time on disk, and
+/// the id the disk bytes hash to (equal to the leaf's id, except for a conflict materialized with markers).</summary>
+public sealed record TreeStateEntry(Leaf Leaf, long Size, long Mtime, ObjectId DiskId);
+
+/// <summary>
+/// A workspace's tree state: for each tracked path the leaf last seen plus local size and modification time, and the
+/// working tree they correspond to. It is what makes status cheap: only paths whose size or time differ are hashed.
+/// </summary>
+public sealed class TreeState
+{
+	public ObjectId Tree { get; set; }
+
+	public Dictionary<string, TreeStateEntry> Entries { get; init; } = new(StringComparer.Ordinal);
+
+	private static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new IdConverter() } };
+
+	public static TreeState Load(string file)
+	{
+		if (!File.Exists(file))
+		{
+			return new TreeState();
+		}
+
+		var data = JsonSerializer.Deserialize<Stored>(File.ReadAllText(file), Json) ?? throw new VersionException($"Unreadable tree state '{file}'.");
+		return new TreeState
+		{
+			Tree = data.Tree,
+			Entries = data.Entries.ToDictionary(entry => entry.Path, entry => new TreeStateEntry(
+				new Leaf(entry.Kind, entry.Id, entry.LeafSize, entry.Executable), entry.Size, entry.Mtime, entry.DiskId), StringComparer.Ordinal)
+		};
+	}
+
+	public void Save(string file)
+	{
+		Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+		var data = new Stored(Tree, Entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new StoredEntry(pair.Key, pair.Value.Leaf.Kind,
+			pair.Value.Leaf.Id, pair.Value.Leaf.Size, pair.Value.Leaf.Executable, pair.Value.Size, pair.Value.Mtime, pair.Value.DiskId)).ToList());
+		var temp = file + ".tmp";
+		File.WriteAllText(temp, JsonSerializer.Serialize(data, Json));
+		File.Move(temp, file, true);
+	}
+
+	private sealed record Stored(ObjectId Tree, List<StoredEntry> Entries);
+
+	private sealed record StoredEntry(string Path, EntryKind Kind, ObjectId Id, long LeafSize, bool Executable, long Size, long Mtime, ObjectId DiskId);
+
+	private sealed class IdConverter : JsonConverter<ObjectId>
+	{
+		public override ObjectId Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) => ObjectId.Parse(reader.GetString()!);
+
+		public override void Write(Utf8JsonWriter writer, ObjectId value, JsonSerializerOptions options) => writer.WriteStringValue(value.Hex);
+	}
+}
+
+/// <summary>What a scan of the working directory found: the path changes to snapshot and the paths it hashed.</summary>
+public sealed record ScanResult(IReadOnlyList<PathChange> Changes, int Hashed, int Unchanged);
+
+/// <summary>
+/// The provider behind a workspace directory: enumerate and materialize trees, read files, report dirty paths. A ProjFS
+/// provider on Windows projects trees lazily and journals changes; this plain-checkout provider writes files out and
+/// finds changes by comparing size and modification time with the tree state, for CI machines and other systems.
+/// </summary>
+public interface IWorkspaceProvider
+{
+	string Root { get; }
+
+	/// <summary>Makes the directory hold <paramref name="to"/>, given it holds <paramref name="state"/>'s tree.</summary>
+	Task UpdateAsync(TreeState state, ObjectId to, CancellationToken ct = default);
+
+	/// <summary>Finds what changed on disk since <paramref name="state"/> and stores the new content (only missing chunks are uploaded).</summary>
+	Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default);
+}
+
+/// <summary>A plain directory checkout of a workspace's tree.</summary>
+public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceProvider
+{
+	/// <summary>The file in a workspace's root that names its monorepo and workspace; never snapshotted.</summary>
+	public const string MarkerName = ".bassia-workspace";
+
+	public string Root { get; } = Path.GetFullPath(root);
+
+	private string Full(string path) => Path.Combine(Root, path.Replace('/', Path.DirectorySeparatorChar));
+
+	public async Task UpdateAsync(TreeState state, ObjectId to, CancellationToken ct = default)
+	{
+		Directory.CreateDirectory(Root);
+		var changes = await repo.Trees.DiffAsync(state.Tree.IsEmpty ? null : state.Tree, to, "", ct);
+		foreach (var change in changes.Where(change => change.New is null))
+		{
+			Delete(change.Path);
+			state.Entries.Remove(change.Path);
+		}
+
+		foreach (var change in changes.Where(change => change.New is not null))
+		{
+			state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
+		}
+
+		RemoveEmptyDirectories(changes.Where(change => change.New is null).Select(change => PathNames.Parent(change.Path)));
+		state.Tree = to;
+	}
+
+	private async Task<TreeStateEntry> WriteAsync(string path, Leaf leaf, CancellationToken ct)
+	{
+		var full = Full(path);
+		Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+		if (Directory.Exists(full))
+		{
+			Directory.Delete(full, true);
+		}
+		else if (File.Exists(full) || new FileInfo(full).LinkTarget is not null)
+		{
+			File.Delete(full);
+		}
+
+		ObjectId diskId;
+		if (leaf.Kind == EntryKind.Symlink)
+		{
+			var target = Encoding.UTF8.GetString(await repo.Objects.ReadContentAsync(leaf, ct));
+			try
+			{
+				File.CreateSymbolicLink(full, target);
+			}
+			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+			{
+				// Without symlink rights (Windows), the link is written as a file holding its target.
+				await File.WriteAllTextAsync(full, target, ct);
+			}
+
+			diskId = leaf.Id;
+		}
+		else if (leaf.Kind == EntryKind.Conflict)
+		{
+			var bytes = await MaterializeConflictAsync(path, leaf, ct);
+			await File.WriteAllBytesAsync(full, bytes, ct);
+			diskId = repo.Objects.Identify(bytes).Id;
+		}
+		else
+		{
+			await using (var stream = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None))
+			{
+				await repo.Objects.CopyContentAsync(leaf, stream, ct);
+			}
+
+			diskId = leaf.Id;
+		}
+
+		SetExecutable(full, leaf.Executable);
+		var info = new FileInfo(full);
+		return new TreeStateEntry(leaf, LinkOrLength(info), Mtime(info), diskId);
+	}
+
+	/// <summary>A conflict as text with markers: the workspace's side, the base, then mainline's side.</summary>
+	private async Task<byte[]> MaterializeConflictAsync(string path, Leaf leaf, CancellationToken ct)
+	{
+		var conflict = await repo.Objects.ReadAsync<ConflictObject>(leaf.Id, ct);
+		async Task<string?> Text(Leaf? side) => side is { IsFile: true } ? Encoding.UTF8.GetString(await repo.Objects.ReadContentAsync(side, ct)) : null;
+		var labels = new[] { "workspace", "mainline" };
+		var sides = new List<(string, string?)>();
+		for (var index = 0; index < conflict.Sides.Count; index++)
+		{
+			sides.Add((index < labels.Length ? labels[index] : $"side {index + 1}", await Text(conflict.Sides[index])));
+		}
+
+		return Encoding.UTF8.GetBytes(TextMerge.Materialize(await Text(conflict.Bases.FirstOrDefault()), sides));
+	}
+
+	private void Delete(string path)
+	{
+		var full = Full(path);
+		if (Directory.Exists(full) && new DirectoryInfo(full).LinkTarget is null)
+		{
+			Directory.Delete(full, true);
+		}
+		else if (File.Exists(full) || new FileInfo(full).LinkTarget is not null)
+		{
+			File.Delete(full);
+		}
+	}
+
+	private void RemoveEmptyDirectories(IEnumerable<string> directories)
+	{
+		foreach (var directory in directories.Distinct().OrderByDescending(dir => dir.Length))
+		{
+			for (var dir = directory; dir.Length > 0; dir = PathNames.Parent(dir))
+			{
+				var full = Full(dir);
+				if (!Directory.Exists(full) || Directory.EnumerateFileSystemEntries(full).Any())
+				{
+					break;
+				}
+
+				Directory.Delete(full);
+			}
+		}
+	}
+
+	public async Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default)
+	{
+		var changes = new List<PathChange>();
+		var seen = new HashSet<string>(StringComparer.Ordinal);
+		var hashed = 0;
+		var unchanged = 0;
+		var trackedDirs = new HashSet<string>(state.Entries.Keys.SelectMany(DirectoriesOf), StringComparer.Ordinal);
+		var collisions = new List<string>();
+		await ScanDirectoryAsync("");
+
+		async Task ScanDirectoryAsync(string dir)
+		{
+			var full = dir.Length == 0 ? Root : Full(dir);
+			if (!Directory.Exists(full))
+			{
+				return;
+			}
+
+			var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+			foreach (var entry in new DirectoryInfo(full).EnumerateFileSystemInfos().OrderBy(info => info.Name, StringComparer.Ordinal))
+			{
+				ct.ThrowIfCancellationRequested();
+				var path = PathNames.Join(dir, entry.Name);
+				if (dir.Length == 0 && entry.Name == MarkerName)
+				{
+					continue;
+				}
+
+				var isDirectory = entry is DirectoryInfo && entry.LinkTarget is null;
+				var tracked = isDirectory ? trackedDirs.Contains(path) : state.Entries.ContainsKey(path);
+				if (!tracked && policy.IsIgnored(path, isDirectory))
+				{
+					continue;
+				}
+
+				if (!PathNames.IsValidName(entry.Name))
+				{
+					continue;
+				}
+
+				if (names.TryGetValue(entry.Name, out var other))
+				{
+					collisions.Add($"{PathNames.Join(dir, other)} and {path}");
+				}
+
+				names[entry.Name] = entry.Name;
+				if (isDirectory)
+				{
+					await ScanDirectoryAsync(path);
+					continue;
+				}
+
+				seen.Add(path);
+				var info = (FileInfo)(entry is FileInfo file ? file : new FileInfo(entry.FullName));
+				var size = LinkOrLength(info);
+				var mtime = Mtime(info);
+				var executable = IsExecutable(info);
+				state.Entries.TryGetValue(path, out var known);
+				if (known is not null && known.Mtime != 0 && known.Size == size && known.Mtime == mtime && known.Leaf.Executable == executable
+					&& (known.Leaf.Kind == EntryKind.Symlink) == (info.LinkTarget is not null))
+				{
+					unchanged++;
+					continue;
+				}
+
+				hashed++;
+				Leaf leaf;
+				ObjectId diskId;
+				if (info.LinkTarget is { } target)
+				{
+					var bytes = Encoding.UTF8.GetBytes(target);
+					diskId = ObjectId.Of(bytes);
+					leaf = store ? await repo.Objects.WriteSymlinkAsync(target, ct) : new Leaf(EntryKind.Symlink, diskId, bytes.Length);
+				}
+				else
+				{
+					var bytes = await File.ReadAllBytesAsync(info.FullName, ct);
+					var identified = repo.Objects.Identify(bytes, executable);
+					diskId = identified.Id;
+					if (known is not null && known.DiskId == diskId && known.Leaf.Executable == executable)
+					{
+						// Touched but not changed (or a conflict left as materialized): only the stat is new.
+						state.Entries[path] = known with { Size = size, Mtime = mtime };
+						unchanged++;
+						continue;
+					}
+
+					leaf = store ? await repo.Objects.WriteContentAsync(bytes, executable, ct) : identified;
+				}
+
+				if (known is null || !Trees.SameContent(known.Leaf, leaf))
+				{
+					changes.Add(new PathChange(path, leaf));
+				}
+
+				state.Entries[path] = new TreeStateEntry(leaf, size, mtime, diskId);
+			}
+		}
+
+		if (collisions.Count > 0)
+		{
+			throw new VersionException($"Paths that differ only by case cannot be snapshotted (Windows cannot hold both): {string.Join("; ", collisions)}.");
+		}
+
+		foreach (var path in state.Entries.Keys.Where(path => !seen.Contains(path)).ToList())
+		{
+			changes.Add(new PathChange(path, null));
+			state.Entries.Remove(path);
+		}
+
+		return new ScanResult(changes, hashed, unchanged);
+	}
+
+	private static IEnumerable<string> DirectoriesOf(string path)
+	{
+		for (var dir = PathNames.Parent(path); dir.Length > 0; dir = PathNames.Parent(dir))
+		{
+			yield return dir;
+		}
+	}
+
+	private static long LinkOrLength(FileInfo info) => info.LinkTarget is { } target ? Encoding.UTF8.GetByteCount(target) : info.Length;
+
+	/// <summary>
+	/// The modification time to remember, or 0 for a file written in the last two seconds: a later write within the
+	/// clock's granularity could keep both size and time, so such a file is hashed again next time (git's racy check).
+	/// </summary>
+	private static long Mtime(FileInfo info)
+	{
+		if (info.LinkTarget is not null)
+		{
+			return 0;
+		}
+
+		var time = info.LastWriteTimeUtc;
+		return DateTime.UtcNow - time < TimeSpan.FromSeconds(2) ? 0 : time.Ticks;
+	}
+
+	private static bool IsExecutable(FileInfo info) =>
+		!OperatingSystem.IsWindows() && info.LinkTarget is null && (info.UnixFileMode & UnixFileMode.UserExecute) != 0;
+
+	private static void SetExecutable(string full, bool executable)
+	{
+		if (OperatingSystem.IsWindows() || new FileInfo(full).LinkTarget is not null)
+		{
+			return;
+		}
+
+		var mode = File.GetUnixFileMode(full);
+		var wanted = executable
+			? mode | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute
+			: mode & ~(UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+		if (wanted != mode)
+		{
+			File.SetUnixFileMode(full, wanted);
+		}
+	}
+}

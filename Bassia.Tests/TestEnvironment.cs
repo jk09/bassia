@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
-using System.Text.RegularExpressions;
-using Bassia.Integration;
+using Tomlyn;
+using Tomlyn.Model;
 
 // ProgramCli reads Environment.CurrentDirectory and writes to Console, both process-global.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
@@ -18,6 +18,8 @@ internal sealed class TempDirectory : IDisposable
 		Directory.CreateDirectory(Path);
 	}
 
+	public string Combine(params string[] parts) => System.IO.Path.Combine([Path, .. parts]);
+
 	public void Dispose()
 	{
 		try
@@ -32,36 +34,25 @@ internal sealed class TempDirectory : IDisposable
 		}
 		catch (IOException)
 		{
-			// Best-effort cleanup; leftover temp folders don't affect other tests.
 		}
 		catch (UnauthorizedAccessException)
 		{
-			// Same as above.
 		}
 	}
 }
 
 internal static class TestEnvironment
 {
-	/// <summary>
-	/// Runs when the test assembly loads, before any test - not on first use of this class, which would reset what a
-	/// test set up just before (a test that turns <see cref="ProgramCli.Interactive"/> on and then runs bassia through
-	/// this class would otherwise lose it whenever it happened to run first).
-	/// </summary>
 	[System.Runtime.CompilerServices.ModuleInitializer]
 	internal static void Initialize()
 	{
 		EnsureGitIdentity();
 
-		// A test runner may hand bassia a terminal; a bare 'bassia' must still print the plain help, not start the guide.
+		// A test runner may hand bassia a terminal; a bare 'bassia' must still print the plain help.
 		ProgramCli.Interactive = () => false;
+		Environment.SetEnvironmentVariable("BASSIA_USER", "tester");
 	}
 
-	/// <summary>
-	/// Commits and annotated tags need an identity even on machines without a global git config. Tests that drive
-	/// bassia in-process get this from the static constructor; tests that start it as a child process (which
-	/// inherits this environment) call it themselves, before the first commit their subprocess makes.
-	/// </summary>
 	public static void EnsureGitIdentity()
 	{
 		foreach (var variable in new[] { "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME" })
@@ -83,14 +74,11 @@ internal static class TestEnvironment
 		var originalDirectory = Environment.CurrentDirectory;
 		var originalOut = Console.Out;
 		var originalError = Console.Error;
-
 		var outWriter = new StringWriter(new StringBuilder());
 		var errorWriter = new StringWriter(new StringBuilder());
-
 		Directory.SetCurrentDirectory(directory);
 		Console.SetOut(outWriter);
 		Console.SetError(errorWriter);
-
 		try
 		{
 			var exitCode = await ProgramCli.RunAsync(args);
@@ -104,17 +92,32 @@ internal static class TestEnvironment
 		}
 	}
 
-	/// <summary>Runs git in <paramref name="directory"/> and returns trimmed stdout; fails the test on a non-zero exit code.</summary>
+	/// <summary>Runs bassia in <paramref name="directory"/>, asserts success, and returns the parsed TOML result.</summary>
+	public static async Task<TomlTable> OkAsync(string directory, params string[] args)
+	{
+		var (exit, output, error) = await RunInDirectoryAsync(directory, args);
+		Assert.True(exit == 0, $"bassia {string.Join(' ', args)} failed ({exit}): {error}{output}");
+		return Parse(output);
+	}
+
+	/// <summary>Runs bassia expecting a failure (exit code 1) and returns the parsed TOML error result.</summary>
+	public static async Task<TomlTable> FailAsync(string directory, params string[] args)
+	{
+		var (exit, output, error) = await RunInDirectoryAsync(directory, args);
+		Assert.True(exit == 1, $"bassia {string.Join(' ', args)} was expected to fail but exited {exit}: {output}{error}");
+		return Parse(error);
+	}
+
+	public static TomlTable Parse(string text)
+	{
+		var start = text.LastIndexOf(TomlResult.Marker, StringComparison.Ordinal);
+		Assert.True(start >= 0, $"No result marker in: {text}");
+		return TomlSerializer.Deserialize<TomlTable>(text[start..])!;
+	}
+
 	public static async Task<string> GitAsync(string directory, params string[] args)
 	{
-		var startInfo = new ProcessStartInfo("git")
-		{
-			WorkingDirectory = directory,
-			RedirectStandardOutput = true,
-			RedirectStandardError = true,
-			UseShellExecute = false,
-			CreateNoWindow = true
-		};
+		var startInfo = new ProcessStartInfo("git") { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
 		foreach (var arg in args)
 		{
 			startInfo.ArgumentList.Add(arg);
@@ -128,145 +131,7 @@ internal static class TestEnvironment
 		return (await output).Trim();
 	}
 
-	/// <summary>Shell command (for <c>bassia agent start -run</c>) that writes <paramref name="content"/> to a file relative to the run folder.</summary>
+	/// <summary>A shell command (for <c>bassia agent start -run</c>) that writes <paramref name="content"/> to a file.</summary>
 	public static string WriteFileCommand(string relativePath, string content) =>
-		OperatingSystem.IsWindows()
-			? $"echo {content}> {relativePath.Replace('/', '\\')}"
-			: $"echo '{content}' > {relativePath}";
-
-	public static string FailingCommand => OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3";
-
-	/// <summary>Shell command that copies its stdin to <paramref name="path"/> - how a test sees what a resolver was handed.</summary>
-	public static string CaptureStdinCommand(string path) =>
-		OperatingSystem.IsWindows() ? $"more > \"{path}\"" : $"cat > '{path}'";
-
-	/// <summary>
-	/// Shell command that blocks for <paramref name="seconds"/>, standing in for an agent that is still working.
-	/// On Windows it pings rather than calling <c>timeout</c>, which refuses to run with stdin redirected - which
-	/// is exactly how the frontend runs an agent whose output it captures.
-	/// </summary>
-	public static string SleepCommand(int seconds) =>
-		OperatingSystem.IsWindows() ? $"ping -n {seconds + 1} 127.0.0.1 > nul" : $"sleep {seconds}";
-
-	/// <summary>The run id from an <c>agent</c> command's TOML result (stdout on success, stderr on failure).</summary>
-	public static string RunIdOf(string toml)
-	{
-		var match = Regex.Match(toml, "run_id = \"(agent-run-[a-z]+-[a-z]+-[a-z0-9]{6})\"");
-		Assert.True(match.Success, $"no run id in: {toml}");
-		return match.Groups[1].Value;
-	}
-}
-
-/// <summary>
-/// A throw-away Bassia monorepo with source repositories for components created on demand. Each component's
-/// upstream lives in <c>&lt;temp&gt;/upstream/&lt;name&gt;</c>; <c>component add</c> clones it as the bare
-/// source-of-truth repo at <c>&lt;temp&gt;/root/&lt;name&gt;/.git</c>, exactly like a GitHub-hosted component.
-/// </summary>
-internal sealed class MonorepoFixture : IAsyncDisposable
-{
-	private readonly TempDirectory temp = new();
-
-	public string Root => Path.Combine(temp.Path, "root");
-	public string Workspace => Path.Combine(Root, ".workspace");
-	public string MetaRepo => Path.Combine(Root, ".bassia");
-	public string RunsRepo => Path.Combine(Root, ".agentic-runs", ".git");
-	public string SourceRepo(string component) => Path.Combine(Root, component);
-	public string RunDir(string runId) => Path.Combine(Workspace, runId);
-	public string Checkout(string runId, string component) => Path.Combine(RunDir(runId), component);
-	/// <summary>Run or integration folders in the workspace; the job folder <c>.jobs</c> does not count.</summary>
-	public bool HasRunDirs => Directory.Exists(Workspace) && Directory.EnumerateDirectories(Workspace).Any(directory => !Path.GetFileName(directory).StartsWith('.'));
-
-	public static async Task<MonorepoFixture> CreateAsync()
-	{
-		var fixture = new MonorepoFixture();
-		Directory.CreateDirectory(fixture.Root);
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(fixture.Root, "init");
-		Assert.True(exitCode == 0, error);
-
-		// Whether a developer has weave installed must not change what the tests see; the tests of the structural
-		// merge turn it on with -weave.
-		ConfigFile.Set(fixture.Root, ConfigFile.Find("integration.weave"), StructuralMerge.Off);
-		return fixture;
-	}
-
-	/// <summary>
-	/// Creates an upstream repo with one commit tagged <paramref name="tag"/> and registers it as a component. The
-	/// commit holds a README and <paramref name="files"/> (relative path -> content).
-	/// </summary>
-	public async Task AddComponentAsync(string name, string tag = "v0", IReadOnlyDictionary<string, string>? files = null)
-	{
-		var upstream = Path.Combine(temp.Path, "upstream", name);
-		Directory.CreateDirectory(upstream);
-		await TestEnvironment.GitAsync(upstream, "init", "--quiet", "--initial-branch=main");
-		await File.WriteAllTextAsync(Path.Combine(upstream, "README.md"), $"# {name}\n");
-		foreach (var (file, content) in files ?? new Dictionary<string, string>())
-		{
-			Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(upstream, file))!);
-			await File.WriteAllTextAsync(Path.Combine(upstream, file), content);
-		}
-
-		await TestEnvironment.GitAsync(upstream, "add", "--all");
-		await TestEnvironment.GitAsync(upstream, "commit", "--quiet", "-m", "Initial commit");
-
-		var (exitCode, _, error) = await TestEnvironment.RunInDirectoryAsync(Root, "component", "add", "-url", upstream);
-		Assert.True(exitCode == 0, error);
-		await TestEnvironment.GitAsync(SourceRepo(name), "tag", "-a", tag, "-m", "baseline");
-	}
-
-	/// <summary>Adds <c>references = [...]</c> to a registered component by rewriting components.toml.</summary>
-	public Task SetReferencesAsync(string component, params string[] references) =>
-		WriteReferencesAsync(component, references.Select(reference => $"\"{reference}\""));
-
-	/// <summary>Adds references that nest a component at a folder name other than the component's own name.</summary>
-	public Task SetReferencesAsync(string component, params (string Name, string Path)[] references) =>
-		WriteReferencesAsync(component, references.Select(reference => $"{{ name = \"{reference.Name}\", path = \"{reference.Path}\" }}"));
-
-	private async Task WriteReferencesAsync(string component, IEnumerable<string> entries)
-	{
-		var path = Path.Combine(MetaRepo, "components.toml");
-		var lines = (await File.ReadAllLinesAsync(path)).ToList();
-		var nameLine = lines.IndexOf($"name = \"{component}\"");
-		Assert.True(nameLine >= 0, $"component '{component}' not found in components.toml");
-		lines.Insert(nameLine + 1, $"references = [{string.Join(", ", entries)}]");
-		await File.WriteAllLinesAsync(path, lines);
-	}
-
-	/// <summary>Runs any bassia command line in the monorepo root.</summary>
-	public Task<(int ExitCode, string Output, string Error)> BassiaAsync(params string[] args) =>
-		TestEnvironment.RunInDirectoryAsync(Root, args);
-
-	public Task<(int ExitCode, string Output, string Error)> RunStartAsync(params string[] args) =>
-		TestEnvironment.RunInDirectoryAsync(Root, ["agent", "start", .. args]);
-
-	public Task<(int ExitCode, string Output, string Error)> IntegrationStartAsync(params string[] args) =>
-		TestEnvironment.RunInDirectoryAsync(Root, ["integration", "start", .. args]);
-
-	/// <summary>Runs an agent over <c>&lt;component&gt;@v0</c> that writes <paramref name="content"/> to a file, and returns the run id.</summary>
-	public async Task<string> RunWritingAsync(string component, string file, string content)
-	{
-		var (exitCode, output, error) = await RunStartAsync("-select", $"{component}@v0", "-run", TestEnvironment.WriteFileCommand($"{component}/{file}", content));
-		Assert.True(exitCode == 0, error);
-		return TestEnvironment.RunIdOf(output);
-	}
-
-	/// <summary>
-	/// Runs an agent over <c>&lt;component&gt;@v0</c> that replaces a file with <paramref name="content"/>, which may span
-	/// lines, and returns the run id.
-	/// </summary>
-	public async Task<string> RunReplacingAsync(string component, string file, string content)
-	{
-		var payload = Path.Combine(temp.Path, $"payload-{Guid.NewGuid():N}");
-		await File.WriteAllTextAsync(payload, content);
-		var target = $"{component}/{file}";
-		var copy = OperatingSystem.IsWindows() ? $"copy /y \"{payload}\" \"{target.Replace('/', '\\')}\" > nul" : $"cp '{payload}' '{target}'";
-		var (exitCode, output, error) = await RunStartAsync("-select", $"{component}@v0", "-run", copy);
-		Assert.True(exitCode == 0, error);
-		return TestEnvironment.RunIdOf(output);
-	}
-
-	public ValueTask DisposeAsync()
-	{
-		temp.Dispose();
-		return ValueTask.CompletedTask;
-	}
+		OperatingSystem.IsWindows() ? $"echo {content}> {relativePath.Replace('/', '\\')}" : $"echo '{content}' > {relativePath}";
 }

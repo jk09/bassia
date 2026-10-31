@@ -1,174 +1,263 @@
-namespace Bassia;
+namespace Bassia.CliCommands;
 
-using Bassia.Storage;
 using System.Reflection;
 using Bassia.Cli;
-using Bassia.CliCommands.Agent;
-using Bassia.Core;
-using Bassia.Git;
-using Bassia.Graph;
-using Bassia.Integration;
-using Bassia.Locks;
+using Bassia.Core.Model;
+using Bassia.Core.Version;
+using Bassia.Interop;
+using static Bassia.CliCommands.Results;
 
-/// <summary><c>bassia status</c>, <c>bassia config ...</c> and <c>bassia version</c>: the monorepo as a whole.</summary>
+/// <summary>Commands over the monorepo as a whole: create or clone one, its status and settings, import and export, maintenance.</summary>
 internal static class MonorepoCommands
 {
-	// ----- bassia status -----
-
-	public static async Task<int> StatusAsync(Invocation invocation)
+	public static async Task<int> InitAsync(Invocation invocation)
 	{
-		var monorepo = AgentCommand.LoadMonorepo();
-		var store = monorepo.RunRecords();
-		var runs = await store.ListLatestAsync();
-		var integrations = await monorepo.Integrations().ListLatestAsync();
-		var jobs = monorepo.Jobs;
-		var liveRuns = (await jobs.ListAsync("run")).Where(jobs.IsAlive).Select(job => job.Id).Distinct().ToList();
-		var liveIntegrations = (await jobs.ListAsync("integration")).Where(jobs.IsAlive).Select(job => job.Id).Distinct().ToList();
-
-		// Hand edits not committed yet exist only where the meta-repo is a working tree on this machine.
-		var changed = monorepo.Backend is LocalBackend
-			? (await GitClient.In(monorepo.MetaRepoDir).RunAsync(["status", "--porcelain"])).Output.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()
-			: [];
-		var head = (await monorepo.Backend.Meta.LogAsync(new Storage.LogQuery(Limit: 1))).FirstOrDefault();
-
-		var graph = new ComponentGraph(monorepo.Components);
-		var locks = monorepo.Locks;
-		var entries = (await locks.ReadAllAsync());
-		var held = entries.Where(entry => locks.StateOf(entry) == LockState.Live).Sum(entry => entry.Holds.Count);
-		var waiting = entries.Count(entry => entry.Waits.Any(wait => locks.IsWaiting(entry, wait)));
-		var violations = monorepo.Registry.Violations();
-		return ProgramCli.WriteResult(true, invocation.Command,
-			$"{monorepo.Components.Count} component(s), {runs.Count} recorded run(s) ({liveRuns.Count} live), {integrations.Count} integration(s)" +
-			(held + waiting > 0 ? $", {held} path(s) held by live runs, {waiting} run(s) waiting" : "") + ComponentCommands.ViolationSuffix(violations) + ".",
+		var path = invocation.Get("path") ?? Environment.CurrentDirectory;
+		using var monorepo = await Monorepo.InitAsync(path);
+		var main = await monorepo.Repo.GetMainAsync();
+		return Ok(invocation, $"Created a local monorepo in '{monorepo.Root}': blobs in .bassia/objects (local-disk stand-in for cloud storage), " +
+			"heads, path index and leases in .bassia/state.db. Next: 'bassia import -git <url>' or 'bassia workspace create <name>'.",
 			new Dictionary<string, object?>
 			{
 				["root"] = monorepo.Root,
-				["meta_repo"] = monorepo.MetaRepoDir,
-				["meta_repo_head"] = head is null ? null : $"{head.Commit.Id[..Math.Min(7, head.Commit.Id.Length)]} {head.Commit.Subject}",
-				["meta_repo_clean"] = changed.Count == 0,
-				["meta_repo_changes"] = changed,
-				["workspace"] = monorepo.WorkspaceDir,
-				["runs_repo"] = monorepo.RunsRepoDir,
-				["components"] = monorepo.Components.Count,
-				["component_names"] = monorepo.Components.Select(component => component.Name).ToList(),
-				["live_runs"] = liveRuns,
-				["live_integrations"] = liveIntegrations,
-				["graph"] = new TomlText(graph.RenderText(ascii: true)),
-				["boundaries"] = monorepo.Registry.Boundaries.Count,
-				["boundary_violations"] = violations.Count,
-				["runs"] = CountByStatus(runs.Select(run => run.Status), runs.Count),
-				["integrations"] = CountByStatus(integrations.Select(record => record.Status), integrations.Count),
-				["locks"] = new Dictionary<string, object?>
-				{
-					["live"] = held,
-					["released"] = entries.Where(entry => locks.StateOf(entry) == LockState.Released).Sum(entry => entry.Holds.Count),
-					["expired"] = entries.Where(entry => locks.StateOf(entry) == LockState.Expired).Sum(entry => entry.Holds.Count),
-					["waiting"] = waiting,
-					["conflicts"] = runs.Sum(run => run.Components.Sum(component => component.LockConflicts.Count))
-				}
+				["kind"] = monorepo.Kind,
+				["seq"] = main.Seq,
+				["commit"] = main.CommitId.Hex
 			});
 	}
 
-	private static IReadOnlyDictionary<string, object?> CountByStatus(IEnumerable<string> statuses, int total)
+	public static async Task<int> CloneAsync(Invocation invocation)
 	{
-		var counts = new Dictionary<string, object?> { ["total"] = total };
-		foreach (var group in statuses.GroupBy(status => status).OrderBy(group => group.Key, StringComparer.Ordinal))
-		{
-			counts[group.Key] = group.Count();
-		}
-
-		return counts;
+		var url = invocation.Require("from");
+		var path = invocation.Get("path") ?? Path.Combine(Environment.CurrentDirectory, new Uri(url).Host.Split('.')[0]);
+		using var monorepo = await Monorepo.CloneAsync(url, path, invocation.Get("token"));
+		var main = await monorepo.Repo.GetMainAsync();
+		return Ok(invocation, $"Cloned '{url}' into '{monorepo.Root}': nothing is downloaded until a workspace or a command reads it.",
+			new Dictionary<string, object?>
+			{
+				["root"] = monorepo.Root,
+				["kind"] = monorepo.Kind,
+				["url"] = monorepo.Url,
+				["seq"] = main.Seq,
+				["commit"] = main.CommitId.Hex
+			});
 	}
 
-	// ----- bassia config list | get | set | unset -----
+	public static async Task<int> StatusAsync(Invocation invocation)
+	{
+		if (Monorepo.FindRoot(Environment.CurrentDirectory) is null)
+		{
+			return Ok(invocation, $"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' or 'bassia clone -from <url>'.",
+				new Dictionary<string, object?> { ["in_monorepo"] = false });
+		}
+
+		using var monorepo = Monorepo.Current();
+		var main = await monorepo.Repo.GetMainAsync();
+		var workspaces = await monorepo.Repo.ListWorkspacesAsync();
+		var current = await monorepo.CurrentWorkspaceAsync();
+		var live = workspaces.Count(state => state.Record.Run is { } run && Agents.AgentRunner.IsAlive(run));
+		var replay = workspaces.Count(state => state.Record.Status == WorkspaceStatus.NeedsReplay);
+		var data = new Dictionary<string, object?>
+		{
+			["in_monorepo"] = true,
+			["root"] = monorepo.Root,
+			["kind"] = monorepo.Kind,
+			["url"] = monorepo.Url,
+			["user"] = monorepo.User,
+			["seq"] = main.Seq,
+			["commit"] = main.CommitId.Hex,
+			["last_landing"] = Short(main.Commit.Intent),
+			["open_workspaces"] = workspaces.Count,
+			["live_runs"] = live,
+			["needs_replay"] = replay,
+			["workspace"] = current?.Name
+		};
+		if (workspaces.Count > 0)
+		{
+			data["table"] = Table(["WORKSPACE", "STATUS", "BASE", "RUN", "LAST LANDING"], workspaces.Select(state => (IReadOnlyList<string>)
+			[
+				state.Name, state.Record.Status, $"seq {state.Record.BaseSeq}", state.Record.Run is { } run ? (Agents.AgentRunner.IsAlive(run) ? "live" : run.Status) : "-",
+				state.Record.LastLand?.Outcome ?? "-"
+			]));
+		}
+
+		return Ok(invocation, $"{(monorepo.IsRemote ? $"Clone of {monorepo.Url}" : "Local monorepo")} at seq {main.Seq}: {workspaces.Count} open workspace(s), " +
+			$"{live} live run(s), {replay} needing a replay.{(current is null ? "" : $" You are in workspace '{current.Name}'.")}", data);
+	}
+
+	public static Task<int> VersionAsync(Invocation invocation)
+	{
+		var version = typeof(MonorepoCommands).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+		return Task.FromResult(Ok(invocation, $"bassia {version}", new Dictionary<string, object?>
+		{
+			["version"] = version,
+			["runtime"] = Environment.Version.ToString(),
+			["os"] = System.Runtime.InteropServices.RuntimeInformation.OSDescription
+		}));
+	}
+
+	// ----- config -----
+
+	private static MonorepoConfig Config() => Monorepo.Current().Config;
 
 	public static Task<int> ConfigListAsync(Invocation invocation)
 	{
-		var monorepo = AgentCommand.LoadMonorepo();
-		var config = monorepo.Config;
-		var entries = ConfigFile.Keys.Concat(config.ComponentKeys()).Select(config.Resolve).ToList();
-		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command,
-			$"{entries.Count} setting(s): {entries.Count(entry => entry.Layer == ConfigLayer.User)} from the user layer, " +
-			$"{entries.Count(entry => entry.Layer == ConfigLayer.Monorepo)} from the monorepo, the rest default.",
-			new Dictionary<string, object?>
+		using var monorepo = Monorepo.Current();
+		var entries = MonorepoConfig.Keys.Select(key =>
+		{
+			var (value, source) = monorepo.Config.Resolve(key.Key);
+			return (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 			{
-				["path"] = monorepo.Backend.Config.LocationOf(ConfigLayer.Monorepo),
-				["user_path"] = monorepo.Backend.Config.LocationOf(ConfigLayer.User),
-				["table"] = new TomlText(AsciiTable.Render(["KEY", "VALUE", "SOURCE"],
-					entries.Select(entry => (IReadOnlyList<string>)[entry.Key.Key, entry.Value, entry.Source]), 72)),
-				["setting"] = entries.Select(entry => (IReadOnlyDictionary<string, object?>)Setting(monorepo, entry)).ToList()
-			}));
+				["key"] = key.Key,
+				["value"] = key.Key == "server.token" && value.Length > 0 ? "(set)" : value,
+				["source"] = source,
+				["default"] = key.Default,
+				["environment"] = key.Environment,
+				["description"] = key.Description
+			};
+		}).ToList();
+		return Task.FromResult(Ok(invocation, $"{entries.Count} setting(s) in '{Path.Combine(monorepo.BassiaDir, MonorepoConfig.FileName)}'. " +
+			"Repository policy (conflicts, leases, ignore rules) is versioned in .bassia.toml at the root of the tree.",
+			new Dictionary<string, object?> { ["setting"] = entries }));
 	}
 
 	public static Task<int> ConfigGetAsync(Invocation invocation)
 	{
-		var monorepo = AgentCommand.LoadMonorepo();
-		var value = monorepo.Config.Resolve(ConfigFile.Find(invocation.Require("key")));
-		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command, $"{value.Key.Key} = {value.Value} ({value.Source})", Setting(monorepo, value)));
-	}
-
-	public static async Task<int> ConfigSetAsync(Invocation invocation)
-	{
-		var monorepo = AgentCommand.LoadMonorepo();
-		var key = ConfigKeyFor(monorepo, invocation.Require("key"));
-		var layer = invocation.Has("user") ? ConfigLayer.User : ConfigLayer.Monorepo;
-		var value = ConfigFile.Normalize(key, invocation.Require("value"));
-		var commit = await monorepo.Backend.Config.SetAsync(key, value, layer);
-		var reloaded = Monorepo.Load(monorepo.Root);
-		return ProgramCli.WriteResult(true, invocation.Command, $"Set {key.Key} = {value} in the {Layer(layer)} layer.",
-			new Dictionary<string, object?>(Setting(reloaded, reloaded.Config.Resolve(key))) { ["meta_repo_commit"] = commit });
-	}
-
-	public static async Task<int> ConfigUnsetAsync(Invocation invocation)
-	{
-		var monorepo = AgentCommand.LoadMonorepo();
-		var key = ConfigFile.Find(invocation.Require("key"));
-		var layer = invocation.Has("user") ? ConfigLayer.User : ConfigLayer.Monorepo;
-		var (removed, commit) = await monorepo.Backend.Config.UnsetAsync(key, layer);
-		var reloaded = Monorepo.Load(monorepo.Root);
-		var now = reloaded.Config.Resolve(key);
-		return ProgramCli.WriteResult(true, invocation.Command,
-			removed ? $"Unset {key.Key} in the {Layer(layer)} layer; it is now {now.Value} ({now.Source})." : $"{key.Key} was not set in the {Layer(layer)} layer; nothing changed.",
-			new Dictionary<string, object?>(Setting(reloaded, now)) { ["removed"] = removed, ["meta_repo_commit"] = commit });
-	}
-
-	private static string Layer(ConfigLayer layer) => layer == ConfigLayer.User ? "user" : "monorepo";
-
-	/// <summary>A key to write; a per-component key must name a registered component.</summary>
-	private static ConfigKey ConfigKeyFor(Monorepo monorepo, string name)
-	{
-		var key = ConfigFile.Find(name);
-		return key.Component is null || monorepo.FindComponent(key.Component) is not null
-			? key
-			: throw new MonorepoException($"'{key.Component}' in {key.Key} is not a registered component.");
-	}
-
-	private static Dictionary<string, object?> Setting(Monorepo monorepo, ConfigValue value) => new()
-	{
-		["key"] = value.Key.Key,
-		["value"] = value.Value,
-		["source"] = value.Source,
-		["layer"] = value.Layer == ConfigLayer.Default ? "default" : Layer(value.Layer),
-		["monorepo_value"] = monorepo.Config.Raw(ConfigLayer.Monorepo, value.Key),
-		["user_value"] = monorepo.Config.Raw(ConfigLayer.User, value.Key),
-		["default"] = value.Key.Default,
-		["allowed"] = value.Key.Allowed,
-		["description"] = value.Key.Description
-	};
-
-
-	// ----- bassia version -----
-
-	public static Task<int> VersionAsync(Invocation invocation)
-	{
-		var assembly = typeof(MonorepoCommands).Assembly;
-		var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-			?? assembly.GetName().Version?.ToString() ?? "unknown";
-		return Task.FromResult(ProgramCli.WriteResult(true, invocation.Command, $"bassia {version}", new Dictionary<string, object?>
+		using var monorepo = Monorepo.Current();
+		var key = MonorepoConfig.Find(invocation.Require("key"));
+		var (value, source) = monorepo.Config.Resolve(key.Key);
+		return Task.FromResult(Ok(invocation, $"{key.Key} = {value} ({source})", new Dictionary<string, object?>
 		{
-			["version"] = version,
-			["runtime"] = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
-			["os"] = System.Runtime.InteropServices.RuntimeInformation.OSDescription
+			["key"] = key.Key,
+			["value"] = value,
+			["source"] = source,
+			["description"] = key.Description
 		}));
+	}
+
+	public static Task<int> ConfigSetAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var key = MonorepoConfig.Find(invocation.Require("key"));
+		var value = invocation.Require("value");
+		monorepo.Config.Set(key.Key, value);
+		return Task.FromResult(Ok(invocation, $"Set {key.Key} = {value}.", new Dictionary<string, object?> { ["key"] = key.Key, ["value"] = value }));
+	}
+
+	public static Task<int> ConfigUnsetAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var key = MonorepoConfig.Find(invocation.Require("key"));
+		monorepo.Config.Set(key.Key, null);
+		return Task.FromResult(Ok(invocation, $"Unset {key.Key}; it is {monorepo.Config.Get(key.Key)} ({monorepo.Config.Resolve(key.Key).Source}) now.",
+			new Dictionary<string, object?> { ["key"] = key.Key }));
+	}
+
+	// ----- import and export -----
+
+	public static async Task<int> ImportAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var urls = invocation.List("git");
+		var prefixes = invocation.List("prefix");
+		if (prefixes.Count > 0 && prefixes.Count != urls.Count)
+		{
+			throw invocation.Usage("-prefix needs one folder per repository of -git.");
+		}
+
+		var sources = urls.Select((url, index) => new GitSource(url, PathNames.Normalize(prefixes.Count > 0 ? prefixes[index] : DefaultPrefix(url)))).ToList();
+		if (sources.Select(source => source.Prefix).Distinct().Count() != sources.Count)
+		{
+			throw invocation.Usage("Two repositories would go into the same folder; name the folders with -prefix.");
+		}
+
+		var history = invocation.Has("history");
+		var limit = invocation.Int("limit", 1000, 1);
+		var importer = new GitImporter(monorepo) { Progress = line => Console.Error.WriteLine("bassia: " + line) };
+		var reports = await importer.ImportAsync(sources, history, limit);
+		var main = await monorepo.Repo.GetMainAsync();
+		return Ok(invocation, $"Imported {reports.Count} repositor{(reports.Count == 1 ? "y" : "ies")} ({reports.Sum(report => report.Commits)} commit(s){(history ? "" : ", baselines")}); mainline is at seq {main.Seq}.",
+			new Dictionary<string, object?>
+			{
+				["seq"] = main.Seq,
+				["commit"] = main.CommitId.Hex,
+				["repository"] = Tables(reports, report => new Dictionary<string, object?>
+				{
+					["url"] = report.Url,
+					["prefix"] = report.Prefix,
+					["commits"] = report.Commits,
+					["files"] = report.Files,
+					["bytes"] = report.Bytes,
+					["skipped"] = report.Skipped.ToList()
+				})
+			});
+	}
+
+	private static string DefaultPrefix(string url)
+	{
+		var name = url.TrimEnd('/', '\\').Split('/', '\\', ':')[^1];
+		return name.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
+	}
+
+	public static async Task<int> ExportAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var dir = Path.GetFullPath(invocation.Require("git"));
+		var branch = invocation.Get("branch") ?? "main";
+		var (from, to, commits) = await new GitExporter(monorepo).ExportAsync(dir, branch);
+		return Ok(invocation, commits == 0
+				? $"'{dir}' is up to date with mainline (seq {to})."
+				: $"Exported seq {from + 1}..{to} as {commits} commit(s) to branch '{branch}' of '{dir}'.",
+			new Dictionary<string, object?> { ["git"] = dir, ["branch"] = branch, ["from_seq"] = from, ["to_seq"] = to, ["commits"] = commits });
+	}
+
+	// ----- maintenance -----
+
+	public static async Task<int> GcAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		if (monorepo.Maintenance is null)
+		{
+			return Fail(invocation, "Garbage collection runs where the blobs are: on the server ('bassia-server gc'), not in a clone.");
+		}
+
+		var grace = TimeSpan.FromHours(invocation.Int("grace-hours", monorepo.Config.GetInt("gc.grace_hours")));
+		var retention = TimeSpan.FromDays(invocation.Int("retention-days", monorepo.Config.GetInt("gc.retention_days")));
+		var report = await new GarbageCollector(monorepo.Repo, monorepo.Maintenance).CollectAsync(grace, retention, invocation.Has("dry-run"));
+		return Ok(invocation, $"{(report.DryRun ? "Would sweep" : "Swept")} {report.Swept} of {report.Blobs} blob(s) ({Size(report.SweptBytes)}); {report.Live} live object(s) " +
+			$"from {report.Roots} head(s); {report.Young} unreferenced blob(s) are younger than the grace period; {report.PrunedWorkspaces} closed workspace(s) pruned.",
+			new Dictionary<string, object?>
+			{
+				["dry_run"] = report.DryRun,
+				["roots"] = report.Roots,
+				["live"] = report.Live,
+				["blobs"] = report.Blobs,
+				["swept"] = report.Swept,
+				["swept_bytes"] = report.SweptBytes,
+				["young"] = report.Young,
+				["pruned_workspaces"] = report.PrunedWorkspaces
+			});
+	}
+
+	public static async Task<int> ScrubAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		if (monorepo.Maintenance is null)
+		{
+			return Fail(invocation, "Scrubbing runs where the blobs are: on the server ('bassia-server scrub'), not in a clone.");
+		}
+
+		var sample = invocation.Has("sample") ? invocation.Int("sample", 100, 1) : (int?)null;
+		var report = await new GarbageCollector(monorepo.Repo, monorepo.Maintenance).ScrubAsync(sample);
+		var ok = report.Corrupt.Count == 0 && report.Unreadable.Count == 0;
+		var data = new Dictionary<string, object?>
+		{
+			["checked"] = report.Checked,
+			["corrupt"] = report.Corrupt.Select(id => id.Hex).ToList(),
+			["unreadable"] = report.Unreadable.Select(id => id.Hex).ToList()
+		};
+		return ok
+			? Ok(invocation, $"Checked {report.Checked} blob(s): every one matches its id.", data)
+			: Fail(invocation, $"Checked {report.Checked} blob(s): {report.Corrupt.Count} corrupt, {report.Unreadable.Count} unreadable.", data);
 	}
 }

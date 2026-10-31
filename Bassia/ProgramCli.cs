@@ -1,17 +1,12 @@
 namespace Bassia;
 
-using System.ComponentModel;
 using Bassia.Cli;
-using Bassia.CliCommands.Agent;
-using Bassia.Core;
-using Bassia.Git;
-using Bassia.Integration;
 
 internal static class ProgramCli
 {
 	/// <summary>
 	/// Whether a person is at a terminal: stdin, stdout and stderr none redirected. Only then does a bare <c>bassia</c>
-	/// add the guide (<see cref="TutorialCommand.WelcomeAsync"/>); agents and scripts get the plain help.
+	/// print the short help; agents and scripts get the full help as TOML.
 	/// </summary>
 	internal static Func<bool> Interactive { get; set; } = () => !Console.IsInputRedirected && !Console.IsOutputRedirected && !Console.IsErrorRedirected;
 
@@ -33,7 +28,8 @@ internal static class ProgramCli
 		args = ExtractHuman(remainingArgs);
 		if (args.Length == 0 && !HumanOutput.Enabled && Interactive())
 		{
-			return await TutorialCommand.WelcomeAsync();
+			Console.WriteLine(Help.ShortText);
+			return 0;
 		}
 
 		if (args.Length == 0 || IsHelp(args[0]))
@@ -89,17 +85,11 @@ internal static class ProgramCli
 				return Help.Show(spec.Sub is null ? [spec.Name] : [spec.Name, spec.Sub]);
 			}
 
-			// Everything the command writes is attributed to the current user (see UserCommands.ActorForAsync).
-			using var actor = Actor.Use(await UserCommands.ActorForAsync(spec));
 			return await spec.Handler(invocation);
 		}
 		catch (CliUsageException ex)
 		{
 			return UsageError(ex.Command, ex.Message);
-		}
-		catch (Win32Exception)
-		{
-			return WriteResult(false, spec.FullName, "Git was not found. Install Git and ensure it is available on PATH.");
 		}
 		catch (Exception ex) when (IsReportable(ex))
 		{
@@ -116,7 +106,8 @@ internal static class ProgramCli
 
 	/// <summary>The failures a command reports as its TOML error rather than as a crash.</summary>
 	internal static bool IsReportable(Exception ex) =>
-		ex is AgentException or MonorepoException or Storage.StorageException or IntegrationException or Feedback.FeedbackException or IOException or UnauthorizedAccessException;
+		ex is MonorepoException or Core.Storage.VersionException or Interop.GitException or Feedback.FeedbackException or IOException
+			or UnauthorizedAccessException or HttpRequestException or TaskCanceledException { InnerException: TimeoutException };
 
 	/// <summary>A command line that does not parse: a TOML error on stderr, exit code 2.</summary>
 	internal static int UsageError(string command, string message)
@@ -197,7 +188,7 @@ internal static class ProgramCli
 	/// <summary>
 	/// Takes <c>-human</c>/<c>--human</c> (print for a person, not as TOML) out of the command line and records it for
 	/// this run. It may appear anywhere except inside a rest-of-line switch's text (the agent command of <c>-run</c>,
-	/// the resolver of <c>-resolve</c>, the message of <c>feedback send</c>), which is the command's own and stays verbatim.
+	/// the message of <c>feedback send</c>), which is the command's own and stays verbatim.
 	/// </summary>
 	private static string[] ExtractHuman(string[] args)
 	{

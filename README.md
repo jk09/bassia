@@ -1,247 +1,136 @@
 # Bassia
 
-**A monorepo made of git repositories, built for AI agents working in parallel.**
+**A client-server monorepo for fleets of coding agents: a workspace per run, one trunk to land on.**
 
-Bassia turns a set of ordinary git repositories into one monorepo. Each repository stays a plain repository that
-git, your IDE and your CI already understand. Bassia adds a meta-repo that knows how the repositories depend on
-each other. On top of that it runs coding agents in isolated checkouts, and merges their work back with git, a
-structural merge, and an LLM that knows *why* each side changed. A local web dashboard lets you watch all of it.
+Bassia is version control built for agents that rewrite whole files and directories in parallel. There are no
+branches, tags or commits to manage: every agentic run gets its own **workspace** over the monorepo, its work is
+snapshotted implicitly, and you watch whether each workspace can **land** on the single trunk. When two agents rewrote
+the same file, Bassia does not merge text nobody reviewed: it re-runs the later task on the new trunk.
 
-![The Bassia overview: live agentic runs, the component map, merges that need attention and the latest milestones](docs/images/overview.png)
+![The Bassia overview: live runs, which workspaces can land, where they stand, and the latest landings](docs/images/overview.png)
 
-- **[Scales with your code](#a-monorepo-that-scales-and-stays-git)**: work on a handful of components, not a
-  checkout of everything; clone just the map and download only the files an agent touches. It's git all the way down.
-- **[Agentic runs are built in](#agentic-runs-are-built-in)**: many agents, in parallel, each in its own isolated
-  checkout, with every result committed, tagged and recorded.
-- **[Locks keep agents apart](#locks-keep-agents-apart)**: a run holds the files and folders its agent changes;
-  others see it, wait for it and continue from its result instead of rewriting the same file in parallel.
-- **[Merges that understand intent](#merges-that-understand-intent)**: git first, then
-  [weave](https://github.com/Ataraxy-Labs/weave)'s entity-level merge, then an LLM resolver briefed with both
-  sides' prompts. You decide what always needs a human.
-- **[A dashboard you look at](#a-dashboard-you-look-at)**: components, tags, runs and the merge queue, drawn as
-  pictures and updated live.
-- **[A CLI made for agents](#a-cli-made-for-agents)**: every command answers in TOML, and `bassia help` teaches
-  any agent the whole CLI.
-- **[Bring your existing repositories](#bring-your-existing-repositories)**: add them as they are; submodules become
-  components, and an overgrown repository can be split.
+- **[Workspaces instead of branches](#workspaces-instead-of-branches)**: one per run, stacked or cloned when work
+  builds on work; commits are implicit.
+- **[Landing is the only contention](#landing-is-the-only-contention)**: only the paths a workspace touched are
+  compared with the trunk; disjoint work lands without any merge.
+- **[Replay, not merge](#replay-not-merge)**: a conflict re-runs the task on the new trunk with the same change id;
+  text, semantic and stored-conflict policies are there where you want them.
+- **[Cheap rewrites, lazy reads](#cheap-rewrites-lazy-reads)**: content-defined chunks in cloud blob storage; status
+  and listings come from hashes and metadata, file bytes only when something reads them.
+- **[Client-server, testable on a laptop](#client-server-testable-on-a-laptop)**: the same core runs in a local
+  monorepo and in `bassia-server`; a local-disk blob store stands in for S3.
+- **[A dashboard you look at](#a-dashboard-you-look-at)** and **[a CLI made for agents](#a-cli-made-for-agents)**.
+- **[Bring your git repositories](#bring-your-git-repositories)**: import several at once, export the trunk back.
 
-## A monorepo that scales and stays git
+The design behind it: [Design: Cloud-Backed Version Control for Agentic Development](https://claude.ai/artifact/V2nkDzNs8XAsx1E9PpgwM7).
+The whole guide: [docs/reference.md](docs/reference.md).
 
-A Bassia monorepo is a folder with a meta-repo (`.bassia`) and one git repository per **component**: a library, a
-service, an app, a tool. The meta-repo's `components.toml` records which components need which:
-
-```powershell
-bassia init -path R:\acme
-bassia -C R:\acme component add -url https://github.com/acme/sortlib.git
-bassia -C R:\acme component add -url https://github.com/acme/api.git -references sortlib:vendor/sortlib
-bassia -C R:\acme graph -format tree
-```
-
-The dependencies are what keep it scalable. Whatever you work on, you check out only the components you choose plus
-what they need, never the whole monorepo. A component is the unit of scale, of ownership and of access. Because
-every component is a real git repository with real history, nothing locks you in: you can push it, review it and
-build it the way you do today. Git is the storage of today, not a premise: the graph of components is a layer of its
-own over a small storage contract, so components could one day live elsewhere - say, as blobs in cloud storage held
-together by a commit DAG in a database - without changing how the monorepo works.
-
-![The component map: each component with what it needs, its live runs, queued results and merges needing attention](docs/images/components.png)
-
-**Clone the map, download what you touch.** `bassia clone` copies a monorepo's meta-repo and every component's history
-without any file content. A ClearCase-like config spec maps the components an agent needs - and what they reference -
-onto any folder, and only the files its `load` rules name are downloaded; the rest of the tree is listed and fetched on
-request. A cloud worker runs its agent on exactly that, and the results go straight back to the depot.
+## Workspaces instead of branches
 
 ```sh
-bassia clone -from https://git.example.com/acme -path acme && cd acme
-printf 'map api\nselect sortlib v1.1\nload api/src\n' > api.spec
-bassia agent start -spec api.spec -prompt "paginate the list endpoint"   # the agent runs 'bassia view load' for more
+bassia init -path ~/acme && cd ~/acme
+bassia workspace create fix-login -intent "fix the login redirect"   # a folder holding the trunk's newest tree
+$EDITOR workspaces/fix-login/src/auth/login.ts                        # any tool, any agent
+bassia workspace status fix-login                                     # snapshotted on the way: no add, no commit
+bassia workspace create fix-login-tests -on fix-login                 # stacked: starts from fix-login's work, lands after it
+bassia workspace clone -from fix-login -name fix-login-alt            # the same work as a new change: try another way
 ```
 
-**Boundaries keep the architecture.** Tag components (`type:app`, `scope:billing`), say who may reference them, and
-write nx-style rules over the tags, with wildcards (`scope:*` may reference only `scope:$1`). A change to the graph
-that breaks a rule is refused; violations already there are reported, so you can introduce rules gradually.
+Every mutation is an operation in the workspace's own log, so `workspace undo` and `workspace restore -op <n>` recover
+any earlier state, and an abandoned run is never lost. Workspaces never contend with each other, however many agents
+snapshot at once.
 
-```powershell
-bassia component set -name billing-core -tags type:lib,scope:billing -visibility scope:billing
-bassia boundary add -source "scope:*" -allow "scope:$1,scope:shared"
-bassia boundary check -strict
+![Workspaces: stacks drawn from the trunk, each coloured by whether it can land](docs/images/workspaces.png)
+
+## Landing is the only contention
+
+```sh
+bassia workspace check fix-login        # would-land, or why not: the paths and what their policy does
+bassia workspace land fix-login         # the next seq on the trunk, keeping the change id
+bassia mainline log                     # one linear history, numbered by seq
 ```
 
-**Tags span components.** One annotated tag of the same name in several components marks a combination that belongs
-together: a release, a baseline for agents, the result of an integration. These tags are how you measure progress.
+A landing compares only the paths the workspace touched with the trunk since the workspace's base: paths nobody else
+changed are taken as they are, equal results are accepted, and the commit lands by compare-and-swap. Losing a race
+costs only those paths again. Leases (`bassia lease acquire src/Billing`) hold a prefix for a run with fencing tokens,
+so a stalled agent cannot overwrite its successor; `.bassia.toml` can require them where it matters.
 
-```powershell
-bassia tag create v1.1 -select sortlib,parser,storage,api,web,cli -message "Release 1.1"
-bassia agent start -select sortlib@v1.1,api@v1.1 -prompt "version the REST routes under /v2"
+## Replay, not merge
+
+When two agents rewrote the same file, a textual merge yields plausible but unreviewed code. The default policy is
+**replay**: the landing is refused with the paths and the new trunk, and
+
+```sh
+bassia agent replay add-request-logging -land
 ```
 
-![Tags across components: one column per tag, one row per component, joined where a tag spans several](docs/images/tags.png)
+runs the same task (prompt, agent, model, recorded with the change) again on the new trunk, in a new workspace that
+keeps the change id. Per path glob, `.bassia.toml` can choose `textmerge` (line-based, while both sides stay similar),
+`semantic` (weave's language-aware merge, landed only after your validation command passes) or `conflict` (stored
+with markers in the workspace to resolve by hand).
 
-## Agentic runs are built in
+![Conflicts: what keeps workspaces from landing, and the paths that keep colliding](docs/images/conflicts.png)
 
-An **agentic run** gives a coding agent its own workspace. Bassia checks out the components you select, at the tags
-or commits you name, and nests the components each one needs where it expects them. It then runs the agent there:
-Claude Code by default, or any command you configure. When the agent finishes, Bassia commits each changed
-component, tags the result `agent-run/<run>/<n>` and pushes it. Nothing touches `main`. Every run is recorded in the
-monorepo's run store, so you can always tell which prompt produced which commit.
+## Cheap rewrites, lazy reads
 
-```powershell
-bassia agent start -select api@v1.1,parser@v1.1,storage@v1.1,sortlib@v1.1 -detach -prompt "paginate the list endpoint"
-bassia agent start -select storage@v1.1,sortlib@v1.1 -detach -prompt "add a write-ahead log" -model opus
-bassia agent list -status live
-bassia agent logs <run>          # follow one; also agent wait, agent stop, agent diff -patch
+Every object is immutable and content-addressed (BLAKE3 over canonical CBOR). Files are cut into content-defined
+chunks, so a rewrite that keeps part of a file uploads only the new part, after asking which chunks the server already
+has. Comparing two trees skips every subtree with an equal id, tree entries carry size and kind, and a workspace
+re-hashes only files whose size or time changed - so status, listings and diff statistics never read file content.
+Diffs are derived, never stored; a file that shares little with its old version is reviewed as rewritten, side by
+side, instead of as a wall of hunks.
+
+## Client-server, testable on a laptop
+
+```sh
+bassia-server -data /srv/bassia -url http://0.0.0.0:8080 -token <token>          # blobs on local disk
+bassia-server -data /srv/bassia -storage s3 -bucket acme-bassia -token <token>   # blobs on S3
+bassia clone -from http://bassia.example.com:8080 -path ~/acme -token <token>
 ```
 
-Runs are independent processes, so any number can run side by side, started by you or by other agents. Each one is
-live-visible, can be followed, waited for or stopped from any shell, and keeps its folder for inspection.
-
-![Agentic runs: live runs with their phase, a ticking clock and their latest output, and every run over time](docs/images/runs.png)
-
-## Locks keep agents apart
-
-Agents rewrite whole files, and two rewrites of one file rarely merge well, even when git says they do. So Bassia
-lets parallel runs see each other. You say which paths are exclusive - files one by one, or whole folders - for the
-monorepo, a component or a single run. While an agent works, its run **holds** every such path it changes, and every
-other run sees that. An agent checks a path before it rewrites it, or **waits** until the holder is done and then
-continues from the holder's result, which Bassia brings into its checkout. A crashed or suspended run's holds expire,
-and a run that changed a held path anyway is marked, so the integration hands its result to the resolver (or a human)
-instead of trusting a clean-looking merge.
-
-```powershell
-bassia config set lock.folders -value "src/*"          # each folder under src is one lock
-bassia lock list                                        # who holds what, and who waits for whom
-bassia lock wait -path app/src/parser/Lexer.cs          # from inside a run: wait, then catch up
-```
-
-## Merges that understand intent
-
-Agents that work in parallel collide. `bassia integration` brings their results back together in three tiers, and
-each tier only gets what the one before it could not merge:
-
-1. **Git** merges what merges cleanly. The triage runs first, without touching a working tree, so you can see in
-   advance which results are fast-forwards, clean merges or conflicts, and which runs collide with each other.
-2. **[weave](https://github.com/Ataraxy-Labs/weave)**, an entity-level merge driver, resolves conflicts that only
-   look like conflicts to git: two runs adding different functions to the same file, or editing different keys of
-   the same config.
-3. **A semantic resolver** (an LLM, Claude Code by default) gets what's left, with a **semantic brief**: the prompt
-   that drove the incoming run, what the runs already integrated were for, the history and diff of both sides, and
-   the conflicts with their common ancestor. It merges intent, not lines.
-
-You set the **merge policy**, globally or per component: which conflicts go to the resolver and which always wait
-for a human (`merge.manual_paths = **/*.sql`), whether weave's merges with warnings are accepted, and whether a
-finished integration lands on `main` by itself. The result is tagged `integration/<key>/<n>` across components.
-Nothing moves `main` until you `integration advance`, or until your policy lets it.
-
-```powershell
-bassia integration plan -runs all                   # the triage; changes nothing
-bassia integration start -runs all -detach          # git, then weave, then the resolver
-bassia config set merge.component.storage.semantic -value manual
-```
-
-![The merge queue: results in merge order coloured by who merges them, runs that collide, and the merges that need a human](docs/images/merge-queue.png)
+The version core reaches storage only through four small interfaces - objects, heads, the path index and leases - so
+the same core runs in a local monorepo (`bassia init`: a local-disk blob container and SQLite) and in `bassia-server`
+(the same stores, or S3). A clone talks to the server and caches every object it reads. Large chunks travel between
+clients and blob storage on signed URLs; the server never proxies file bytes. Every test runs without a cloud account.
 
 ## A dashboard you look at
 
-`bassia web` serves a read-only dashboard on `127.0.0.1`, made to be looked at rather than clicked through:
+`bassia web` (and the server's front page) shows the live runs, every workspace with whether it can land right now,
+the stacks, the trunk's landings with their diffs, what blocks landings and which paths keep colliding, leases, the
+files at any seq, and the policy. It is read-only: every page shows the commands that act on what it shows.
 
-- **Overview**: live runs, merges that need attention, the latest milestones.
-- **Components**: the map of components and what they need.
-- **Tags**: each tag's lineage, from baseline to runs to results to integrations.
-- **Runs**: every run on a timeline, with live ones animated.
-- **Locks**: which run holds which files and folders, and who waits for whom.
-- **Merge queue**: the triage of the next integration and the merges that need a human.
-- **Timeline**: commits laid out in one lane per component.
-- **Configuration**: every setting, layer by layer.
-
-Every page shows the `bassia` command that does what it describes, one click to copy. Changes go through the
-command line. Pages render on the server, need no JavaScript and load nothing from the internet.
-
-| Where a tag came from and where it went | Commits in one lane per component |
-| --- | --- |
-| ![A tag's lineage: baseline, runs, results, integration](docs/images/tag-lineage.png) | ![The timeline: one lane per component, commits marked by kind](docs/images/timeline.png) |
+![Runs: live runs as cards, and every run over time](docs/images/runs.png)
 
 ## A CLI made for agents
 
-Bassia is operated mostly by AI agents, so the command line comes first:
-
-- **Every command answers in TOML**, both success and failure, in one predictable shape, with tables meant for
-  people and fields meant for programs.
-- **One command table** drives the parser, `help` and error messages. They can't drift apart.
-- **Your agent, not ours**: Bassia has no LLM of its own. Claude Code, Codex or any other agent learns it from the
-  CLI itself: `bassia help` explains the concepts and the usual workflow and lists every command, `bassia help -all`
-  describes every command in full in one result, and each command says whether it only reads (`read_only`), so the
-  agent can explore freely and change things only when asked to.
-- **Skills**: put reusable instructions in `.bassia/skills/<name>/SKILL.md` ("cut a release", "land everything
-  that's green"); agents find them with `bassia skill list` and read them with `bassia skill show`.
-- **Layered configuration**: `.bassia/config.toml` is shared and committed; your own `.bassia/config.user.toml`
-  overrides it and is never committed. Both can be changed from the CLI.
-
-```powershell
-bassia help                     # concepts, workflow, every command
-bassia help -all                # every command in full, for an agent to learn bassia in one call
-bassia help agent start         # one command: usage, switches, examples, read_only
-```
-
-## Bring your existing repositories
-
-Your repositories don't need to change to join a Bassia monorepo:
-
-- **Add them as they are.** `bassia component add -url <url>` clones any repository git can clone. Its history, tags
-  and branches come along unchanged.
-- **Submodules become components.** `component add -unwind` (or `component unwind`) turns git submodules, at any
-  depth, into components of their own. Each component gets the right references, and a linking tag reproduces
-  exactly the combination of commits the submodules pinned.
-- **Split what has grown too big.** `component survey` shows which folders change together. `component split`
-  then cuts a repository into several components from a short plan, each part keeping its files' full history,
-  renames included.
-- **A whole folder of projects** can become one monorepo in a single step. The `bassia-testbed` skill in this
-  repository does exactly that for every repository in a development folder.
-
-## Get started
-
-Bassia needs the [.NET SDK 10](https://dotnet.microsoft.com/download) and git 2.38 or later. It is developed on
-Windows and tested on Linux.
-
-**From a release package**: download the package for your platform (`win-x64`, `linux-x64`, `linux-arm64`,
-`osx-x64`, `osx-arm64`) from the [releases](https://github.com/jk09/bassia/releases) or from a CI run's artifacts,
-unpack it and run `install.sh` (`install.cmd` on Windows). It needs only the .NET 10 runtime (with ASP.NET Core) and
-git, which it checks first, and brings weave along. See [packaging/README.md](packaging/README.md).
-
-**With Claude Code**: clone this repository and run `/bassia-install` (or `/bassia-install main` for the latest
-code). It builds the newest release tag, or the branch or commit you name, and installs it for your user, side by
-side with other versions; `/bassia-use` switches between them. No administrator rights are needed.
-
-**By hand**:
+Every command answers in TOML (`-human` for Markdown), with exit codes 0, 1 and 2. `bassia help -all` teaches an agent
+the whole CLI in one call. Agentic runs are built in:
 
 ```sh
-git clone https://github.com/jk09/bassia && cd bassia
+bassia agent start -prompt "paginate the list endpoint" -land -detach   # its own workspace, landed when it succeeds
+bassia agent list                                                       # live, succeeded, failed, lost
+bassia agent logs paginate-the-list-endpoint-4f2a91 -tail 20
+```
+
+## Bring your git repositories
+
+```sh
+bassia import -git https://github.com/acme/api.git,https://github.com/acme/web.git -history
+bassia export -git ../acme-mirror                                       # the trunk as git history, incrementally
+```
+
+Each repository goes into its own top-level folder, as a baseline or with its history interleaved by commit time; each
+imported commit lands like any agent's work. The export writes one git commit per landing with a `Change-Id:` trailer.
+
+## Install, build, test
+
+Ask Claude Code to `/bassia-install` in a clone of this repository, or build it yourself with the .NET 10 SDK:
+
+```sh
 dotnet build
+dotnet test
 dotnet run --project Bassia -- help
 ```
 
-Then type `bassia` in an empty folder. At a terminal it offers a guided setup: it asks which repositories to add,
-which needs which and where the monorepo goes, then runs the `bassia` commands that do it and shows you each one.
-Inside a monorepo, `bassia` shows where you are and offers the next steps. `bassia tutorial` starts the same guide
-at any time. By hand, the setup is:
-
-```powershell
-bassia init -path R:\acme
-bassia -C R:\acme component add -url <your repository>
-bassia -C R:\acme web
-```
-
-## Learn more
-
-- [The reference](docs/reference.md): every command, the configuration, runs, integration and the dashboard in
-  detail.
-- [Agentic runs](docs/reference.md#agentic-runs) and
-  [integration](docs/reference.md#integration-syntactic-first-then-structural-then-semantic), including
-  [the structural merge](docs/reference.md#the-structural-merge-weave).
-- [Splitting a component](docs/reference.md#splitting-a-component) and
-  [unwinding submodules](docs/reference.md#unwinding-submodules).
-- [Building and testing Bassia](docs/reference.md#build).
-- [`feat/`](feat/README.md): the feature records that drive Bassia's development, written before the code.
-
-## License
-
-Bassia is released under the [MIT License](LICENSE).
+See [docs/reference.md](docs/reference.md) for installing side by side, the server, the policy file, every command,
+the architecture and the tests.

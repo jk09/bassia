@@ -1,10 +1,9 @@
 namespace Bassia.Web;
 
 using System.Text;
-using Bassia.CliCommands.Agent;
-using Bassia.Core;
-using Bassia.Git;
-using Bassia.Integration;
+using Bassia.Core.Model;
+using Bassia.Core.Storage;
+using Bassia.Core.Version;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -12,32 +11,30 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Logging;
 using static Bassia.Web.Html;
 
+/// <summary>What one dashboard request looks at: the monorepo's core, how it lands, and how run output is read.</summary>
+internal sealed record DashboardScope(
+	Repository Repo,
+	ILanding Landing,
+	string Label,
+	Func<RunRecord, Task<string>> ReadLog,
+	string? Account = null,
+	string? Events = null,
+	IReadOnlyList<(string Key, string Value, string Source)>? Settings = null);
+
 /// <summary>
-/// The web dashboard (<c>bassia web</c>): a local, read-only site over one monorepo, made to be looked at - the
-/// components and how they relate, tags as units of progress, agentic runs as they happen, and the merge queue with
-/// its triage and the merges that need a human. Pages are rendered on the server, pictures included, and work without
-/// JavaScript; the script animates and refreshes the live parts. Nothing is changed from here: every page shows the
-/// <c>bassia</c> command that does what it describes, for a person or an agent to run. The Bassia server serves the
-/// same pages to every signed-in user, over the monorepo as that user may see it.
+/// The web dashboard (<c>bassia web</c>, and the server's pages): a read-only site for watching agentic work - every
+/// workspace and whether it can land on mainline now, live runs, mainline's landings, what keeps workspaces from
+/// landing (and which paths keep colliding), leases and the repository's policy. Pages are rendered on the server,
+/// pictures included, and work without JavaScript; the script refreshes the live parts. Nothing is changed from here:
+/// every page shows the <c>bassia</c> commands that act on what it shows.
 /// </summary>
-internal sealed partial class Dashboard
+internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 {
-	/// <summary>The request being served: what <see cref="Current"/> returns and the frame's header show.</summary>
 	private static readonly AsyncLocal<DashboardScope?> Scope = new();
 
-	private readonly Func<HttpContext, Task<DashboardScope>> open;
+	private static DashboardScope Current => Scope.Value ?? throw new InvalidOperationException("No dashboard scope.");
 
-	/// <summary>The dashboard of <c>bassia web</c>: the monorepo at <paramref name="monorepo"/>'s root, read anew for every request.</summary>
-	public Dashboard(Monorepo monorepo)
-		: this(_ => Task.FromResult(new DashboardScope(Monorepo.Load(monorepo.Root), monorepo.Root)))
-	{
-	}
-
-	/// <summary>
-	/// A dashboard whose monorepo <paramref name="open"/> gives for each request: the server's opens the monorepo as the
-	/// signed-in user may see it.
-	/// </summary>
-	public Dashboard(Func<HttpContext, Task<DashboardScope>> open) => this.open = open;
+	private static Repository Repo => Current.Repo;
 
 	public WebApplication Build(string url)
 	{
@@ -51,9 +48,6 @@ internal sealed partial class Dashboard
 		return app;
 	}
 
-	// ----- request guard -----
-
-	/// <summary>Only requests addressed to the loopback host are served: a DNS-rebinding page would send its own host name.</summary>
 	private static async Task LoopbackAsync(HttpContext context, RequestDelegate next)
 	{
 		if (context.Request.Host.Host is not ("127.0.0.1" or "localhost" or "[::1]" or "::1"))
@@ -66,10 +60,7 @@ internal sealed partial class Dashboard
 		await next(context);
 	}
 
-	/// <summary>
-	/// Serves a dashboard request: only reads are accepted, the monorepo is opened for it, and an expected failure becomes
-	/// an error page, not a dead server. The server puts this behind its sign-in, for the dashboard's paths only.
-	/// </summary>
+	/// <summary>Serves a dashboard request: reads only; an expected failure becomes an error page, not a dead server.</summary>
 	public async Task ServeAsync(HttpContext context, RequestDelegate next)
 	{
 		if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
@@ -79,37 +70,22 @@ internal sealed partial class Dashboard
 			return;
 		}
 
-		var label = "";
 		try
 		{
 			if (!IsAsset(context.Request.Path))
 			{
 				Scope.Value = await open(context);
-				label = Scope.Value.Label;
 			}
 
 			await next(context);
 		}
-		catch (Exception ex) when (ex is GitException or MonorepoException or AgentException or IntegrationException or IOException or UnauthorizedAccessException
-			or Storage.StorageException)
+		catch (Exception ex) when (!context.Response.HasStarted && ex is not OperationCanceledException)
 		{
-			if (context.Response.HasStarted)
-			{
-				throw;
-			}
-
 			context.Response.Clear();
-			context.Response.StatusCode = ex is MonorepoException or IntegrationException or AgentException ? StatusCodes.Status400BadRequest : StatusCodes.Status500InternalServerError;
+			context.Response.StatusCode = ex is VersionException or MonorepoException ? StatusCodes.Status400BadRequest : StatusCodes.Status500InternalServerError;
 			context.Response.ContentType = "text/html; charset=utf-8";
-			await context.Response.WriteAsync(Page(label, "", "Error", Error(ex.Message), Scope.Value?.Account, Scope.Value?.Events));
-		}
-		catch (Exception ex) when (!context.Response.HasStarted)
-		{
-			// A bug, not an expected failure: still a page that says what went wrong, rather than an empty 500.
-			context.Response.Clear();
-			context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-			context.Response.ContentType = "text/html; charset=utf-8";
-			await context.Response.WriteAsync(Page(label, "", "Error", Error($"Unexpected error: {ex.GetType().Name}: {ex.Message}"), Scope.Value?.Account, Scope.Value?.Events));
+			await context.Response.WriteAsync(Page(Scope.Value?.Label ?? "", "", "Error", Error(ex is VersionException or MonorepoException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}"),
+				Scope.Value?.Account, Scope.Value?.Events));
 		}
 		finally
 		{
@@ -117,543 +93,658 @@ internal sealed partial class Dashboard
 		}
 	}
 
-	/// <summary>The stylesheet and the script: the same for everyone, served without opening the monorepo.</summary>
 	public static bool IsAsset(PathString path) => path == "/style.css" || path == "/app.js";
 
-	/// <summary>Whether <paramref name="path"/> is one of the dashboard's pages, fragments or assets.</summary>
-	public static bool IsDashboardPath(PathString path) =>
-		path == "/" || Paths.Any(prefix => path.StartsWithSegments(prefix));
+	private static readonly string[] Paths = ["/style.css", "/app.js", "/fragment", "/workspaces", "/runs", "/mainline", "/conflicts", "/leases", "/files", "/config"];
 
-	private static readonly string[] Paths =
-		["/style.css", "/app.js", "/graph.svg", "/fragment", "/locks", "/components", "/tags", "/tag", "/runs", "/queue", "/integrations", "/timeline", "/commit", "/config"];
+	public static bool IsDashboardPath(PathString path) => path == "/" || Paths.Any(prefix => path.StartsWithSegments(prefix));
 
 	public void Map(IEndpointRouteBuilder app)
 	{
-		app.MapGet("/style.css", () => Results.Text(Stylesheet, "text/css"));
+		app.MapGet("/style.css", () => Results.Text(Stylesheet + ExtraStyles, "text/css"));
 		app.MapGet("/app.js", () => Results.Text(Script, "text/javascript"));
-		app.MapGet("/graph.svg", () => Results.Text(new Graph.ComponentGraph(Current().Components).ToSvg(ComponentHref), "image/svg+xml"));
-
 		app.MapGet("/", OverviewAsync);
 		app.MapGet("/fragment/live", LiveFragmentAsync);
-		app.MapGet("/fragment/run/{id}", RunFragmentAsync);
-		app.MapGet("/fragment/locks", LocksFragmentAsync);
-		app.MapGet("/fragment/queue", QueueFragmentAsync);
-		app.MapGet("/locks", LocksAsync);
-		app.MapGet("/components", ComponentsAsync);
-		app.MapGet("/components/{name}", ComponentAsync);
-		app.MapGet("/tags", TagsAsync);
-		app.MapGet("/tag", TagAsync);
+		app.MapGet("/workspaces", WorkspacesAsync);
+		app.MapGet("/workspaces/{id}", WorkspaceAsync);
 		app.MapGet("/runs", RunsAsync);
 		app.MapGet("/runs/{id}", RunAsync);
-		app.MapGet("/queue", QueueAsync);
-		app.MapGet("/integrations", IntegrationsAsync);
-		app.MapGet("/integrations/plan", PlanAsync);
-		app.MapGet("/integrations/{id}", IntegrationAsync);
-		app.MapGet("/integrations/{id}/brief", BriefAsync);
-		app.MapGet("/timeline", TimelineAsync);
-		app.MapGet("/commit/{component}/{hash}", CommitAsync);
-		app.MapGet("/config", ConfigPage);
+		app.MapGet("/fragment/run/{id}", RunOutputFragmentAsync);
+		app.MapGet("/mainline", MainlineAsync);
+		app.MapGet("/mainline/{seq:long}", LandingAsync);
+		app.MapGet("/conflicts", ConflictsAsync);
+		app.MapGet("/leases", LeasesAsync);
+		app.MapGet("/files", FilesAsync);
+		app.MapGet("/config", ConfigAsync);
 	}
 
-	/// <summary>
-	/// The monorepo as it is now, for this request: components and configuration change under a running dashboard, and on
-	/// the server it is the monorepo as the signed-in user may see it.
-	/// </summary>
-	private static Monorepo Current() => (Scope.Value ?? throw new InvalidOperationException("No dashboard request is being served.")).Monorepo;
+	private static IResult Html(string active, string title, string body) =>
+		Results.Content(Page(Current.Label, active, title, body, Current.Account, Current.Events), "text/html; charset=utf-8");
 
-	private static IResult View(string active, string title, string body, int status = StatusCodes.Status200OK) =>
-		Results.Content(Page(Scope.Value?.Label ?? "", active, title, body, Scope.Value?.Account, Scope.Value?.Events), "text/html; charset=utf-8", Encoding.UTF8, status);
+	private static IResult Fragment(string body, bool live) =>
+		new FragmentResult(body, live);
 
-	private static IResult NotFound(string what) => View("", "Not found", Error(what), StatusCodes.Status404NotFound);
-
-	private static string ComponentHref(string name) => $"/components/{Url(name)}";
-
-	/// <summary>Everything most pages draw from, read once per request.</summary>
-	private sealed record State(Monorepo Monorepo, IReadOnlyList<RunMetadata> Runs, IReadOnlyList<IntegrationRecord> Integrations, IReadOnlyList<LiveRun> Live, MergeQueue Queue, LockBoard Locks)
+	private sealed class FragmentResult(string body, bool live) : IResult
 	{
-		public Storage.IRunRecordStore Store => Monorepo.RunRecords();
+		public async Task ExecuteAsync(HttpContext context)
+		{
+			context.Response.ContentType = "text/html; charset=utf-8";
+			context.Response.Headers["X-Live"] = live ? "1" : "0";
+			await context.Response.WriteAsync(body);
+		}
 	}
 
-	private async Task<State> LoadAsync()
+	// ----- data -----
+
+	private sealed record Row(WorkspaceState State, LandResult? Check, Commit Working);
+
+	/// <summary>Every workspace (open ones with a dry-run landing: can it land now?).</summary>
+	private static async Task<List<Row>> RowsAsync(bool includeClosed, bool check = true)
 	{
-		var monorepo = Current();
-		var store = monorepo.RunRecords();
-		var runs = await store.ListLatestAsync();
-		var integrations = await monorepo.Integrations().ListLatestAsync();
-		return new State(monorepo, runs, integrations, await LiveRuns.ReadAsync(monorepo, runs), await MergeQueue.ReadAsync(monorepo, runs, integrations), await LockBoard.ReadAsync(monorepo));
+		var rows = new List<Row>();
+		foreach (var state in await Repo.ListWorkspacesAsync(includeClosed))
+		{
+			LandResult? result = null;
+			if (check && state.IsOpen)
+			{
+				try
+				{
+					result = await Current.Landing.LandAsync(new LandRequest(state.Id, DryRun: true));
+				}
+				catch (VersionException)
+				{
+				}
+			}
+
+			rows.Add(new Row(state, result, await Repo.Objects.ReadCommitAsync(state.Record.Working)));
+		}
+
+		return rows;
 	}
 
-	/// <summary>What the component map shows on each node.</summary>
-	private static async Task<IReadOnlyDictionary<string, ComponentActivity>> ActivityAsync(State state, IReadOnlyList<MultiComponentTag>? tags = null)
-	{
-		tags ??= await MultiComponentTag.ReadAllAsync(state.Monorepo);
-		var latest = state.Monorepo.Components.ToDictionary(component => component.Name, component => tags
-			.Where(tag => TagStory.KindOf(tag.Name) != "run")
-			.SelectMany(tag => tag.Components.Where(entry => entry.Component == component.Name).Select(entry => (tag.Name, entry.Date)))
-			.OrderByDescending(pair => pair.Date, StringComparer.Ordinal).Select(pair => pair.Name).FirstOrDefault(), StringComparer.Ordinal);
+	private static bool Live(RunRecord? run) => run is not null && Agents.AgentRunner.IsAlive(run);
 
-		return state.Monorepo.Components.ToDictionary(component => component.Name, component => new ComponentActivity(
-			component.Name,
-			state.Live.Count(run => run.Record?.Components.Any(entry => entry.Name == component.Name) ?? false),
-			state.Queue.Pending.Count(item => item.Component == component.Name && item.State != QueueState.NeedsAttention),
-			state.Queue.Attention.Count(item => item.Component == component.Name),
-			latest[component.Name],
-			state.Runs.Count(run => run.Components.Any(entry => entry.Name == component.Name)),
-			state.Locks.Live.Count(row => row.Hold.Key.Component == component.Name)), StringComparer.Ordinal);
+	private static string Landability(Row row)
+	{
+		if (!row.State.IsOpen)
+		{
+			return Status(row.State.Record.Status);
+		}
+
+		return row.Check?.Outcome switch
+		{
+			LandOutcome.WouldLand => "<span class=\"status would-land\">can land</span>",
+			LandOutcome.Nothing => "<span class=\"status muted\">no changes</span>",
+			LandOutcome.NeedsReplay => $"<span class=\"status needs-replay\">needs replay</span> <span class=\"muted\">({row.Check.Conflicts.Count} path(s))</span>",
+			LandOutcome.Conflict => $"<span class=\"status failed\">conflicts</span> <span class=\"muted\">({row.Check.Conflicts.Count})</span>",
+			LandOutcome.Rejected => $"<span class=\"status stale\" title=\"{E(row.Check.Message)}\">blocked</span>",
+			_ => "<span class=\"muted\">-</span>"
+		};
 	}
 
 	// ----- overview -----
 
-	private async Task<IResult> OverviewAsync()
+	private static async Task<IResult> OverviewAsync()
 	{
-		var state = await LoadAsync();
-		var tags = await MultiComponentTag.ReadAllAsync(state.Monorepo);
-		var activity = await ActivityAsync(state, tags);
-		var next = await NextAsync(state);
-		var attention = state.Queue.Attention.Select(item => (Tag: item.ResultTag, item.Component, Note: item.Step?.Note ?? "needs a human", Planned: false))
-			.Concat(next.PlannedManual(state.Queue).Select(pair => (Tag: pair.Step.SourceTag, pair.Component, Note: pair.Step.Note ?? "will need a human", Planned: true)))
-			.ToList();
-
-		var waiting = state.Queue.Pending.Count(item => item.State != QueueState.NeedsAttention);
+		var main = await Repo.GetMainAsync();
+		var rows = await RowsAsync(false);
+		var live = rows.Where(row => Live(row.State.Record.Run)).ToList();
+		var canLand = rows.Count(row => row.Check?.Outcome == LandOutcome.WouldLand);
+		var blocked = rows.Count(row => row.Check?.Outcome is LandOutcome.NeedsReplay or LandOutcome.Conflict or LandOutcome.Rejected);
+		var leases = await Repo.Leases.ListAsync();
 		var body = new StringBuilder();
-		body.Append("<div class=\"cards\">")
-			.Append(Card("components", state.Monorepo.Components.Count, "/components"))
-			.Append(Card("live runs", state.Live.Count, "/runs", state.Live.Count > 0 ? "live" : null))
-			.Append(Card("paths held by live runs", state.Locks.Live.Count(), "/locks", state.Locks.Waits.Count > 0 ? "live" : null))
-			.Append(Card("runs", state.Runs.Count, "/runs"))
-			.Append(Card("results on their way to main", waiting, "/queue"))
-			.Append(Card("merges need attention", attention.Count, "/queue#attention", attention.Count > 0 ? "alert" : null))
-			.Append(Card("tags across components", tags.Count(tag => tag.Components.Count > 1), "/tags?multi=1"))
-			.Append(Card("integrations", state.Integrations.Count, "/integrations"))
-			.Append("</div>");
+		body.Append("<div class=\"cards\">");
+		body.Append($"<a class=\"card\" href=\"/mainline\"><div class=\"n\">{main.Seq}</div>mainline seq</a>");
+		body.Append($"<a class=\"card\" href=\"/workspaces\"><div class=\"n\">{rows.Count}</div>open workspaces</a>");
+		body.Append($"<a class=\"card live\" href=\"/runs\"><div class=\"n\">{live.Count}</div>live runs</a>");
+		body.Append($"<a class=\"card\" href=\"/workspaces\"><div class=\"n\">{canLand}</div>can land now</a>");
+		body.Append($"<a class=\"card{(blocked > 0 ? " alert" : "")}\" href=\"/conflicts\"><div class=\"n\">{blocked}</div>blocked from landing</a>");
+		body.Append($"<a class=\"card\" href=\"/leases\"><div class=\"n\">{leases.Count}</div>leases</a>");
+		body.Append("</div>");
+		body.Append("<h2>Live runs</h2><div data-live-src=\"/fragment/live\">").Append(LiveCards(live)).Append("</div>");
+		body.Append("<div class=\"split\"><section class=\"wide\"><h2>Workspaces</h2>").Append(WorkspaceTable(rows)).Append("</section>");
+		body.Append("<section class=\"side\"><h2>Where workspaces stand</h2>").Append(StatusDonut(rows)).Append("</section></div>");
+		body.Append("<h2>Recent landings</h2>").Append(await LandingTableAsync(10));
+		body.Append("<p>").Append(Cmd("bassia agent start -prompt \"<task>\" -land")).Append(' ').Append(Cmd("bassia workspace create <name>")).Append("</p>");
+		return Html("/", "Overview", body.ToString());
+	}
 
-		body.Append("<div data-live-src=\"/fragment/live\" data-live-on=\"run job log\">").Append(LiveCards(state.Live)).Append("</div>");
+	private static string StatusDonut(List<Row> rows)
+	{
+		var segments = new List<Segment>
+		{
+			new("can land", rows.Count(row => row.Check?.Outcome == LandOutcome.WouldLand), "s-completed"),
+			new("needs replay", rows.Count(row => row.Check?.Outcome == LandOutcome.NeedsReplay), "s-partial"),
+			new("conflicts", rows.Count(row => row.Check?.Outcome == LandOutcome.Conflict), "s-failed"),
+			new("blocked", rows.Count(row => row.Check?.Outcome == LandOutcome.Rejected), "s-other"),
+			new("no changes", rows.Count(row => row.Check?.Outcome == LandOutcome.Nothing), "s-abandoned")
+		}.Where(segment => segment.Count > 0).ToList();
+		return segments.Count == 0 ? Notice("No open workspace.") : Charts.Donut(segments, "open workspaces");
+	}
 
-		// The map on the left; beside it what asks for a decision, then where the monorepo stands.
-		body.Append("<div class=\"split\"><section class=\"fit\"><h2>Components and what they need</h2>")
-			.Append(Charts.ComponentMap(state.Monorepo.Components, activity))
-			.Append("</section><section class=\"side\">");
+	private static async Task<IResult> LiveFragmentAsync()
+	{
+		var live = (await RowsAsync(false, check: false)).Where(row => Live(row.State.Record.Run)).ToList();
+		return Fragment(LiveCards(live), live.Count > 0);
+	}
 
-		body.Append($"<h2>Needs attention{(attention.Count > 0 ? $" <span class=\"count bad\">{attention.Count}</span>" : "")}</h2>");
-		body.Append(attention.Count == 0
-			? "<p class=\"muted\">No merge waits for a human.</p>"
-			: string.Concat(attention.Take(5).Select(item => $"<div class=\"attn{(item.Planned ? " planned" : "")}\"><b>{E(item.Component)}</b> {Ref(item.Tag)}" +
-				$"<div class=\"muted\">{(item.Planned ? "next integration: " : "")}{E(item.Note)}</div></div>"))
-				+ $"<p><a href=\"/queue#attention\">{(attention.Count > 5 ? $"All {attention.Count} merges needing attention" : "What to do about them")} →</a></p>");
+	private static string LiveCards(List<Row> live)
+	{
+		if (live.Count == 0)
+		{
+			return Notice("No agentic run is working right now.");
+		}
 
-		// Milestones: baselines and integrations mark where the monorepo stands; a run's result tag is one step of one run.
-		body.Append("<h2>Latest milestones</h2>");
-		var milestones = tags.Select(tag => TagStory.For(tag, state.Runs, state.Integrations))
-			.Where(story => story.Kind != "run")
-			.OrderByDescending(story => story.Date, StringComparer.Ordinal).Take(6).ToList();
-		body.Append(milestones.Count == 0 ? "<p class=\"muted\">No baseline or integration tag yet.</p>" : "<ul class=\"taglist\">" + string.Concat(milestones.Select(story =>
-			$"<li><a class=\"tagchip k-{story.Kind}\" href=\"/tag?name={Url(story.Tag.Name)}\">{E(story.Tag.Name)}</a> <span class=\"muted\">{story.Tag.Components.Count} component(s) · {Time(story.Date)}</span></li>")) + "</ul>"
-			+ "<p><a href=\"/tags\">All tags →</a></p>");
+		var body = new StringBuilder("<div class=\"livecards\">");
+		foreach (var row in live)
+		{
+			var run = row.State.Record.Run!;
+			body.Append($"<a class=\"livecard\" href=\"/runs/{Url(run.RunId)}\"><div class=\"head\"><span><span class=\"pulse\"></span> {E(run.RunId)}</span>");
+			body.Append($"<span class=\"clock\" data-since=\"{run.Started.ToUniversalTime():O}\"></span></div>");
+			body.Append(Charts.PhaseSteps("running", true));
+			body.Append($"<div class=\"comps\">workspace <b>{E(row.State.Name)}</b> on seq {row.State.Record.BaseSeq} · {E(run.Agent)}{(run.Model is null ? "" : " · " + E(run.Model))}</div>");
+			body.Append($"<div class=\"tail\">{E(Clip(run.Prompt ?? run.Command, 110))}</div></a>");
+		}
 
-		body.Append("<h2>Runs by status</h2>").Append(Charts.Donut(StatusSegments(state.Runs), "agentic runs"));
+		return body.Append("</div>").ToString();
+	}
+
+	private static string WorkspaceTable(List<Row> rows)
+	{
+		if (rows.Count == 0)
+		{
+			return Notice("No workspace. Create one with 'bassia workspace create <name>' or start an agent with 'bassia agent start -prompt <task>'.");
+		}
+
+		var names = rows.ToDictionary(row => row.State.Id, row => row.State.Name);
+		var body = new StringBuilder("<table class=\"list\"><tr><th>Workspace</th><th>Lands?</th><th>Base</th><th>On</th><th>Run</th><th>Intent</th><th>Owner</th></tr>");
+		foreach (var row in rows)
+		{
+			var record = row.State.Record;
+			body.Append("<tr>");
+			body.Append($"<td>{WorkspaceLink(record.Id, record.Name)}</td><td>{Landability(row)}</td><td>{SeqLink(record.BaseSeq)}</td>");
+			body.Append($"<td>{(record.Parent is { } parent ? WorkspaceLink(parent, names.GetValueOrDefault(parent, parent)) : "<span class=\"muted\">mainline</span>")}</td>");
+			body.Append($"<td>{(record.Run is { } run ? $"{RunLink(run.RunId)} {RunStatus(run)}" : "<span class=\"muted\">-</span>")}</td>");
+			body.Append($"<td>{E(Clip(row.Working.Intent, 70))}</td><td>{E(record.Owner)}</td></tr>");
+		}
+
+		return body.Append("</table>").ToString();
+	}
+
+	private static string RunStatus(RunRecord run) => Live(run) ? Status("running") : run.Status == Core.Model.RunStatus.Running ? Status("lost") : Status(run.Status);
+
+	// ----- workspaces -----
+
+	private static async Task<IResult> WorkspacesAsync(HttpRequest request)
+	{
+		var all = request.Query.ContainsKey("all");
+		var rows = await RowsAsync(all);
+		var body = new StringBuilder();
+		body.Append($"<div class=\"filters\"><a class=\"filter{(all ? "" : " active")}\" href=\"/workspaces\">open</a><a class=\"filter{(all ? " active" : "")}\" href=\"/workspaces?all\">all</a></div>");
+		body.Append("<h2>Stacks</h2>").Append(StackFlow(rows.Where(row => row.State.IsOpen).ToList()));
+		body.Append("<h2>Every workspace</h2>").Append(WorkspaceTable(rows));
+		body.Append("<p>").Append(Cmd("bassia workspace check <name>")).Append(' ').Append(Cmd("bassia workspace land <name>")).Append(' ')
+			.Append(Cmd("bassia workspace create <name> -on <workspace>")).Append("</p>");
+		return Html("/workspaces", "Workspaces", body.ToString());
+	}
+
+	/// <summary>Mainline on the left, each open workspace to the right of what it is based on, coloured by whether it can land.</summary>
+	private static string StackFlow(List<Row> rows)
+	{
+		if (rows.Count == 0)
+		{
+			return Notice("No open workspace.");
+		}
+
+		var depth = new Dictionary<string, int>();
+		int Depth(Row row)
+		{
+			if (depth.TryGetValue(row.State.Id, out var known))
+			{
+				return known;
+			}
+
+			var parent = rows.FirstOrDefault(other => other.State.Id == row.State.Record.Parent);
+			return depth[row.State.Id] = parent is null ? 1 : Depth(parent) + 1;
+		}
+
+		var nodes = new List<FlowNode> { new("main", 0, "mainline", null, "/mainline", "baseline") };
+		var edges = new List<(string, string)>();
+		foreach (var row in rows)
+		{
+			var kind = row.Check?.Outcome switch
+			{
+				LandOutcome.WouldLand => "integrated",
+				LandOutcome.NeedsReplay or LandOutcome.Conflict => "waiter",
+				_ => Live(row.State.Record.Run) ? "run" : "result"
+			};
+			nodes.Add(new FlowNode(row.State.Id, Depth(row), row.State.Name, $"seq {row.State.Record.BaseSeq} · {row.Check?.Outcome ?? row.State.Record.Status}",
+				$"/workspaces/{Url(row.State.Id)}", kind));
+			edges.Add((row.State.Record.Parent is { } parent && rows.Any(other => other.State.Id == parent) ? parent : "main", row.State.Id));
+		}
+
+		var columns = Enumerable.Range(0, nodes.Max(node => node.Column) + 1).Select(column => column == 0 ? "mainline" : column == 1 ? "workspaces" : $"stacked {column - 1}").ToList();
+		return Charts.Flow(nodes, edges, columns) + Legend(("k-integrated", "can land"), ("k-waiter", "blocked"), ("k-run", "agent working"), ("k-result", "other"));
+	}
+
+	private static async Task<IResult> WorkspaceAsync(string id)
+	{
+		var state = await Repo.ResolveWorkspaceAsync(id);
+		var record = state.Record;
+		var working = await Repo.Objects.ReadCommitAsync(record.Working);
+		var baseCommit = await Repo.Objects.ReadCommitAsync(record.Base);
+		var check = state.IsOpen ? await Current.Landing.LandAsync(new LandRequest(state.Id, DryRun: true)) : null;
+		var records = await Repo.Diffs.DiffAsync(baseCommit.Tree, working.Tree);
+		var body = new StringBuilder("<div class=\"split\"><section>");
+		body.Append("<table class=\"list facts\">");
+		body.Append($"<tr><td>status</td><td>{Status(record.Status)}</td></tr>");
+		body.Append($"<tr><td>can land</td><td>{Landability(new Row(state, check, working))}</td></tr>");
+		body.Append($"<tr><td>base</td><td>{(record.Parent is null ? SeqLink(record.BaseSeq) : $"workspace {E(record.Parent)} (on {SeqLink(record.BaseSeq)})")}</td></tr>");
+		body.Append($"<tr><td>change</td><td class=\"id\">{E(working.ChangeId.Hex)}</td></tr>");
+		body.Append($"<tr><td>working commit</td><td class=\"id\">{E(record.Working.Short)}</td></tr>");
+		body.Append($"<tr><td>intent</td><td>{E(working.Intent)}</td></tr>");
+		body.Append($"<tr><td>owner</td><td>{E(record.Owner)}</td></tr>");
+		body.Append($"<tr><td>created</td><td>{Time(record.Created)}</td></tr>");
+		body.Append($"<tr><td>folder</td><td class=\"id\">{E(record.Path ?? "-")} <span class=\"muted\">{E(record.Host ?? "")}</span></td></tr>");
+		if (working.Recipe is { } recipe)
+		{
+			body.Append($"<tr><td>replay recipe</td><td>{E(recipe.Agent ?? "")} {E(recipe.Model ?? "")}: {E(Clip(recipe.Prompt ?? recipe.Command ?? "", 200))}</td></tr>");
+		}
+
+		if (record.Run is { } run)
+		{
+			body.Append($"<tr><td>run</td><td>{RunLink(run.RunId)} {RunStatus(run)}</td></tr>");
+		}
+
+		if (record.LastLand is { } land)
+		{
+			body.Append($"<tr><td>last landing</td><td>{Status(land.Outcome)} {Time(land.Time)} {E(land.Message)}</td></tr>");
+		}
+
+		body.Append("</table></section><section class=\"side\">");
+		if (check is not null)
+		{
+			body.Append("<h2>Landing now</h2>").Append(check.Outcome == LandOutcome.WouldLand ? Notice(check.Message) : $"<div class=\"attn\">{E(check.Message)}</div>");
+			if (check.Conflicts.Count > 0)
+			{
+				body.Append(ConflictTable(check.Conflicts));
+			}
+
+			body.Append("<p>").Append(Cmd($"bassia workspace land {record.Name}")).Append(' ').Append(Cmd($"bassia workspace sync {record.Name}")).Append(' ')
+				.Append(Cmd($"bassia agent replay {record.Name} -land")).Append("</p>");
+		}
+
 		body.Append("</section></div>");
-
-		body.Append("<h2>Recent agentic runs</h2>").Append(Charts.RunTimeline(Bars(state, 12), DateTimeOffset.UtcNow));
-		return View("/", "Overview", body.ToString());
-	}
-
-	private static string Card(string label, int n, string href, string? kind = null) =>
-		$"<a class=\"card{(kind is null ? "" : " " + kind)}\" href=\"{href}\"><div class=\"n\">{n}</div><div class=\"muted\">{E(label)}</div></a>";
-
-	// ----- components -----
-
-	private async Task<IResult> ComponentsAsync()
-	{
-		var state = await LoadAsync();
-		var activity = await ActivityAsync(state);
-		var graph = new Graph.ComponentGraph(state.Monorepo.Components);
-		var findings = await FindingsAsync(state.Monorepo);
-		var rows = new StringBuilder();
-		foreach (var component in state.Monorepo.Components)
+		body.Append($"<h2>Changes against its base <span class=\"muted\">({E(Core.Version.ChangeStatus.Added)}: {records.Count(r => r.Status == Core.Version.ChangeStatus.Added)}, " +
+			$"{E(Core.Version.ChangeStatus.Modified)}: {records.Count(r => r.Status == Core.Version.ChangeStatus.Modified)}, " +
+			$"{E(Core.Version.ChangeStatus.Deleted)}: {records.Count(r => r.Status == Core.Version.ChangeStatus.Deleted)})</span></h2>");
+		body.Append(DiffTable(records));
+		body.Append("<h2>Operations</h2><table class=\"list\"><tr><th>#</th><th>Operation</th><th>Time</th><th>By</th><th>Description</th></tr>");
+		await foreach (var entry in Repo.LogAsync(HeadName.Workspace(state.Id), 50))
 		{
-			var info = activity[component.Name];
-			var count = findings.GetValueOrDefault(component.Name)?.Count ?? 0;
-			rows.Append($"""
-				<tr><td><a href="{ComponentHref(component.Name)}" title="{E(component.Url)}"><b>{E(component.Name)}</b></a></td>
-				<td>{Tags(component.Tags)}</td>
-				<td>{(count > 0 ? $"<b class=\"bad\">{count}</b>" : "0")}</td>
-				<td>{References(component.References.Select(reference => reference.Name))}</td>
-				<td>{References(graph.ReferrersOf(component.Name).Select(reference => reference.Name))}</td>
-				<td>{(info.LatestTag is null ? "<span class=\"muted\">-</span>" : Ref(info.LatestTag))}</td>
-				<td>{info.Runs}</td><td>{info.Live}</td><td>{info.Queued}</td><td>{(info.Attention > 0 ? $"<b class=\"bad\">{info.Attention}</b>" : "0")}</td></tr>
-				""");
+			body.Append($"<tr><td>{entry.Operation.Seq}</td><td class=\"id\">{E(entry.Id.Short)}</td><td>{Time(entry.Operation.Time)}</td><td>{E(entry.Operation.Agent ?? "")}</td><td>{E(entry.Operation.Description)}</td></tr>");
 		}
 
-		var body = $"""
-			<p class="muted">Each box is a component; an arrow points at what it needs. Hover one to light up everything it needs and everything that needs it. <a href="/graph.svg">graph.svg</a> is the plain picture.</p>
-			<div class="split"><section class="fit">{Charts.ComponentMap(state.Monorepo.Components, activity)}</section><section class="wide">
-			<table class="list"><tr><th>Component</th><th>Tags</th><th>Findings</th><th>Needs</th><th>Used by</th><th>Latest tag</th><th>Runs</th><th>Live</th><th>Queued</th><th>Attention</th></tr>
-			{rows}</table>
-			<p>{Cmd("bassia component add -url <url> -references <component,...>")} {Cmd("bassia graph -format tree")}</p>
-			</section></div>
-			""";
-		return View("/components", "Components", body);
+		body.Append("</table><p>").Append(Cmd($"bassia workspace restore {record.Name} -op <seq>")).Append(' ').Append(Cmd($"bassia workspace undo {record.Name}")).Append("</p>");
+		return Html("/workspaces", $"Workspace {record.Name}", body.ToString());
 	}
 
-	private static string Tags(IReadOnlyList<string> tags) =>
-		tags.Count == 0 ? "<span class=\"muted\">-</span>" : string.Join(" ", tags.Select(tag => $"<span class=\"chip\">{E(tag)}</span>"));
-
-	/// <summary>Per component, what breaks its boundaries (as referrer or referenced) and what it lacks of the conformance rules.</summary>
-	private static async Task<IReadOnlyDictionary<string, List<string>>> FindingsAsync(Monorepo monorepo)
+	private static string ConflictTable(IReadOnlyList<PathConflict> conflicts)
 	{
-		var findings = monorepo.Components.ToDictionary(component => component.Name, _ => new List<string>(), StringComparer.Ordinal);
-		foreach (var violation in monorepo.Registry.Violations())
+		var body = new StringBuilder("<table class=\"list\"><tr><th>Path</th><th>Why</th><th>Policy</th><th>Detail</th></tr>");
+		foreach (var conflict in conflicts)
 		{
-			findings[violation.From].Add(violation.Message);
-			if (violation.To != violation.From)
+			body.Append($"<tr class=\"attn-row\"><td class=\"id\">{E(conflict.Path)}</td><td>{E(conflict.Case)}</td><td><span class=\"pv\">{E(conflict.Policy)}</span></td><td>{E(conflict.Detail)}</td></tr>");
+		}
+
+		return body.Append("</table>").ToString();
+	}
+
+	private static string DiffTable(IReadOnlyList<DiffRecord> records)
+	{
+		if (records.Count == 0)
+		{
+			return Notice("No changes.");
+		}
+
+		var body = new StringBuilder("<table class=\"list\"><tr><th>Status</th><th>Path</th><th>Size</th></tr>");
+		foreach (var record in records)
+		{
+			var status = record.New?.Kind == EntryKind.Conflict ? "conflict" : record.Status;
+			body.Append($"<tr><td>{Status(status)}</td><td class=\"id\">{(record.OldPath is null ? "" : E(record.OldPath) + " &rarr; ")}{E(record.Path)}</td>");
+			body.Append($"<td>{(record.Old is null ? "" : CliCommands.Results.Size(record.Old.Size) + " &rarr; ")}{(record.New is null ? "-" : CliCommands.Results.Size(record.New.Size))}</td></tr>");
+		}
+
+		return body.Append("</table>").ToString();
+	}
+
+	// ----- runs -----
+
+	private static async Task<IResult> RunsAsync()
+	{
+		var rows = (await RowsAsync(true, check: false)).Where(row => row.State.Record.Run is not null).OrderByDescending(row => row.State.Record.Run!.Started).ToList();
+		var live = rows.Where(row => Live(row.State.Record.Run)).ToList();
+		var body = new StringBuilder();
+		body.Append("<h2>Live</h2><div data-live-src=\"/fragment/live\">").Append(LiveCards(live)).Append("</div>");
+		body.Append("<h2>Every run over time</h2>");
+		var bars = rows.Take(40).Select(row =>
+		{
+			var run = row.State.Record.Run!;
+			var status = Live(run) ? "started" : run.Status switch
 			{
-				findings[violation.To].Add(violation.Message);
+				Core.Model.RunStatus.Succeeded => "completed",
+				Core.Model.RunStatus.Failed => "failed",
+				Core.Model.RunStatus.Stopped => "cancelled",
+				_ => "stale"
+			};
+			return new RunBar(run.RunId, row.State.Name, status, run.Started, Live(run) ? null : run.Finished ?? run.Started, Live(run), Clip(run.Prompt ?? run.Command, 80));
+		}).ToList();
+		body.Append(Charts.RunTimeline(bars, DateTimeOffset.UtcNow));
+		body.Append(Charts.Donut(rows.GroupBy(row => Live(row.State.Record.Run) ? "running" : row.State.Record.Run!.Status)
+			.Select(group => new Segment(group.Key, group.Count(), group.Key switch
+			{
+				"running" => "s-started",
+				Core.Model.RunStatus.Succeeded => "s-completed",
+				Core.Model.RunStatus.Failed => "s-failed",
+				_ => "s-other"
+			})).ToList(), "runs by status"));
+		body.Append("<table class=\"list\"><tr><th>Run</th><th>Status</th><th>Workspace</th><th>Started</th><th>Landing</th><th>Task</th></tr>");
+		foreach (var row in rows)
+		{
+			var run = row.State.Record.Run!;
+			body.Append($"<tr><td>{RunLink(run.RunId)}</td><td>{RunStatus(run)}</td><td>{WorkspaceLink(row.State.Id, row.State.Name)}</td><td>{Time(run.Started)}</td>");
+			body.Append($"<td>{(row.State.Record.LastLand is { } land ? Status(land.Outcome) : "<span class=\"muted\">-</span>")}</td><td>{E(Clip(run.Prompt ?? run.Command, 80))}</td></tr>");
+		}
+
+		body.Append("</table><p>").Append(Cmd("bassia agent start -detach -prompt \"<task>\"")).Append(' ').Append(Cmd("bassia agent list")).Append("</p>");
+		return Html("/runs", "Runs", body.ToString());
+	}
+
+	private static async Task<WorkspaceState> FindRunAsync(string id)
+	{
+		foreach (var state in await Repo.ListWorkspacesAsync(true))
+		{
+			if (state.Record.Run?.RunId == id)
+			{
+				return state;
 			}
 		}
 
-		try
+		throw new VersionException($"No run '{id}'.");
+	}
+
+	private static async Task<IResult> RunAsync(string id)
+	{
+		var state = await FindRunAsync(id);
+		var run = state.Record.Run!;
+		var body = new StringBuilder();
+		body.Append(Charts.PhaseSteps(Live(run) ? "running" : run.Status == Core.Model.RunStatus.Succeeded ? "completed" : "failed", Live(run)));
+		body.Append("<table class=\"list facts\">");
+		body.Append($"<tr><td>status</td><td>{RunStatus(run)}</td></tr><tr><td>workspace</td><td>{WorkspaceLink(state.Id, state.Name)} ({Status(state.Record.Status)})</td></tr>");
+		body.Append($"<tr><td>agent</td><td>{E(run.Agent)} {E(run.Model ?? "")}</td></tr><tr><td>task</td><td>{E(run.Prompt ?? run.Command)}</td></tr>");
+		body.Append($"<tr><td>started</td><td>{Time(run.Started)}</td></tr><tr><td>finished</td><td>{(run.Finished is { } finished ? Time(finished) : "-")}</td></tr>");
+		body.Append($"<tr><td>exit code</td><td>{run.ExitCode?.ToString() ?? "-"}</td></tr><tr><td>host</td><td>{E(run.Host ?? "-")}</td></tr>");
+		if (state.Record.LastLand is { } land)
 		{
-			foreach (var finding in await Core.ConformanceChecker.CheckAllAsync(monorepo.Registry, monorepo.Graph().Storage))
+			body.Append($"<tr><td>landing</td><td>{Status(land.Outcome)} {E(land.Message)}</td></tr>");
+		}
+
+		body.Append("</table><h2>Output</h2>");
+		body.Append($"<div data-live-src=\"/fragment/run/{Url(id)}\">{await RunOutputAsync(run)}</div>");
+		body.Append("<p>").Append(Cmd($"bassia agent logs {run.RunId}")).Append(' ').Append(Cmd($"bassia agent wait {run.RunId}")).Append(' ')
+			.Append(Cmd($"bassia agent stop {run.RunId}")).Append("</p>");
+		return Html("/runs", $"Run {run.RunId}", body.ToString());
+	}
+
+	private static async Task<string> RunOutputAsync(RunRecord run)
+	{
+		var text = await Current.ReadLog(run);
+		var lines = text.Split('\n');
+		return $"<pre class=\"output\">{E(string.Join('\n', lines.TakeLast(400)))}</pre>";
+	}
+
+	private static async Task<IResult> RunOutputFragmentAsync(string id)
+	{
+		var run = (await FindRunAsync(id)).Record.Run!;
+		return Fragment(await RunOutputAsync(run), Live(run));
+	}
+
+	// ----- mainline -----
+
+	private static async Task<string> LandingTableAsync(int limit)
+	{
+		var body = new StringBuilder("<table class=\"list\"><tr><th>Seq</th><th>Time</th><th>Author</th><th>Workspace</th><th>Change</th><th>Intent</th></tr>");
+		var state = await Repo.GetMainAsync();
+		for (var count = 0; count < limit; count++)
+		{
+			var commit = state.Commit;
+			var machine = commit.MachineMerged ? " <span class=\"pill\" style=\"background:var(--violet)\">machine-merged</span>" : "";
+			body.Append($"<tr><td>{SeqLink(state.Seq)}</td><td>{Time(commit.Time)}</td><td>{E(commit.Author.ToString())}</td><td class=\"id\">{E(state.Operation.Workspace ?? "-")}</td>");
+			body.Append($"<td class=\"id\">{E(commit.ChangeId.Short)}</td><td>{E(Clip(commit.Intent.Split('\n')[0], 90))}{machine}</td></tr>");
+			if (state.Operation.Parents.Count == 0)
 			{
-				findings[finding.Component].Add(finding.Message);
-			}
-		}
-		catch (Exception ex) when (ex is MonorepoException or Storage.StorageException)
-		{
-			// A component whose history cannot be read has no conformance findings to show.
-		}
-
-		return findings;
-	}
-
-	private static string FindingList(IReadOnlyList<string> findings) =>
-		findings.Count == 0 ? "none" : "<ul>" + string.Concat(findings.Select(finding => $"<li class=\"bad\">{E(finding)}</li>")) + "</ul>";
-
-	private static string References(IEnumerable<string> names)
-	{
-		var list = names.ToList();
-		return list.Count == 0 ? "<span class=\"muted\">-</span>" : string.Join(" ", list.Select(name => $"<a class=\"chip\" href=\"{ComponentHref(name)}\">{E(name)}</a>"));
-	}
-
-	private static async Task<IReadOnlyList<GitRef>?> RefsAsync(Monorepo monorepo, string component)
-	{
-		var storage = monorepo.Backend.Components;
-		if (!storage.Exists(component))
-		{
-			return null;
-		}
-
-		try
-		{
-			var store = storage.Open(component);
-			return (await store.ListBranchesAsync()).Select(branch => new GitRef(branch.Name, GitRefKind.Branch, branch.Commit, branch.Subject))
-				.Concat((await store.ListTagsAsync()).Select(tag => new GitRef(tag.Name, tag.Annotated ? GitRefKind.AnnotatedTag : GitRefKind.LightweightTag, tag.Commit, tag.Subject)))
-				.ToList();
-		}
-		catch (Storage.StorageException)
-		{
-			return null;
-		}
-	}
-
-	private async Task<IResult> ComponentAsync(string name)
-	{
-		var state = await LoadAsync();
-		if (state.Monorepo.FindComponent(name) is not { } component)
-		{
-			return NotFound($"Component '{name}' is not registered in components.toml.");
-		}
-
-		var graph = new Graph.ComponentGraph(state.Monorepo.Components);
-		var refs = await RefsAsync(state.Monorepo, name);
-		var policy = state.Monorepo.MergePolicyFor(name);
-		var body = new StringBuilder($"""
-			<div class="split"><section>
-			<table class="list facts">
-			<tr><td>Source repo</td><td><code>{E(state.Monorepo.SourceRepoDir(name))}</code></td></tr>
-			<tr><td>URL</td><td>{E(component.Url)}</td></tr>
-			<tr><td>Needs</td><td>{References(component.References.Select(reference => reference.Name))}</td></tr>
-			<tr><td>Used by</td><td>{References(graph.ReferrersOf(name).Select(reference => reference.Name))}</td></tr>
-			<tr><td>Tags</td><td>{Tags(component.Tags)}</td></tr>
-			<tr><td>Visibility</td><td>{E(ComponentCommands.DescribeVisibility(component.Visibility))}</td></tr>
-			<tr><td>Exports</td><td>{(component.Exports is null ? "everything" : string.Join(", ", component.Exports.Select(pattern => $"<code>{E(pattern)}</code>")))}</td></tr>
-			<tr><td>Owners</td><td>{(component.Owners.Count == 0 ? "<span class=\"muted\">-</span>" : E(string.Join(", ", component.Owners)))}</td></tr>
-			<tr><td>Findings</td><td>{FindingList((await FindingsAsync(state.Monorepo)).GetValueOrDefault(name) ?? [])}</td></tr>
-			<tr><td>Merge policy</td><td>{PolicyText(policy)} <a href="/config">configuration</a></td></tr>
-			<tr><td>Lock filter</td><td>{LockFilterText(state.Monorepo, name)} <a href="/locks">locks</a></td></tr>
-			{HeldRow("Held now", state.Locks.InComponent(name).Where(row => row.State == Locks.LockState.Live))}
-			{HeldRow("Released, results not landed", state.Locks.InComponent(name).Where(row => row.State == Locks.LockState.Released))}
-			</table>
-			<p><a href="/timeline?c={Url(name)}">Timeline of {E(name)} and what it needs</a> · <a href="/tags?c={Url(name)}">its tags</a></p>
-			<p>{Cmd($"bassia agent start -select {name} -prompt \"...\"")}</p>
-			</section><section class="wide">
-			{Charts.ComponentMap(state.Monorepo.Components, await ActivityAsync(state), focus: name)}
-			</section></div>
-			""");
-
-		var queued = state.Queue.Pending.Where(item => item.Component == name).ToList();
-		if (queued.Count > 0)
-		{
-			body.Append("<h2>In the merge queue</h2><table class=\"list\"><tr><th>Run</th><th>Result</th><th>State</th><th>Why</th></tr>");
-			foreach (var item in queued)
-			{
-				body.Append($"<tr><td>{RunLink(item.Run.RunId)}</td><td>{Ref(item.ResultTag)}</td><td>{QueueStateText(item.State)}</td><td>{Rationale(item.Run.Command)}</td></tr>");
+				break;
 			}
 
-			body.Append("</table>");
+			state = await Repo.MainAtAsync(state.Operation.Parents[0]);
 		}
 
-		if (refs is null)
+		return body.Append("</table>").ToString();
+	}
+
+	private static async Task<IResult> MainlineAsync(HttpRequest request)
+	{
+		var limit = int.TryParse(request.Query["limit"], out var value) ? Math.Clamp(value, 1, 1000) : 50;
+		var body = new StringBuilder("<p class=\"muted\">One trunk, linear: every landing is the next seq and keeps its workspace's change id.</p>");
+		body.Append(await LandingTableAsync(limit));
+		body.Append($"<div class=\"pager\"><a href=\"/mainline?limit={limit * 2}\">more</a></div>");
+		body.Append("<p>").Append(Cmd("bassia mainline log")).Append(' ').Append(Cmd("bassia mainline show -seq <n> -patch")).Append(' ')
+			.Append(Cmd("bassia mainline restore -seq <n>")).Append("</p>");
+		return Html("/mainline", "Mainline", body.ToString());
+	}
+
+	private static async Task<IResult> LandingAsync(long seq, HttpRequest request)
+	{
+		var state = await Repo.MainAtSeqAsync(seq);
+		MainState? parent = state.Operation.Parents.Count > 0 ? await Repo.MainAtAsync(state.Operation.Parents[0]) : null;
+		var records = await Repo.Diffs.DiffAsync(parent?.Tree, state.Tree);
+		var commit = state.Commit;
+		var body = new StringBuilder("<table class=\"list facts\">");
+		body.Append($"<tr><td>commit</td><td class=\"id\">{E(state.CommitId.Hex)}</td></tr><tr><td>change</td><td class=\"id\">{E(commit.ChangeId.Hex)}</td></tr>");
+		body.Append($"<tr><td>author</td><td>{E(commit.Author.ToString())}</td></tr><tr><td>time</td><td>{Time(commit.Time)}</td></tr>");
+		body.Append($"<tr><td>workspace</td><td class=\"id\">{E(state.Operation.Workspace ?? "-")}</td></tr>");
+		body.Append($"<tr><td>intent</td><td><pre class=\"brief\">{E(commit.Intent)}</pre></td></tr>");
+		if (commit.Recipe is { } recipe)
 		{
-			body.Append(Error($"'{name}' has no readable repository at '{state.Monorepo.SourceRepoDir(name)}'."));
+			body.Append($"<tr><td>recipe</td><td>{E(recipe.Agent ?? "")} {E(recipe.Model ?? "")}: {E(recipe.Prompt ?? recipe.Command ?? "")}</td></tr>");
+		}
+
+		body.Append("</table><h2>Changes</h2>").Append(DiffTable(records));
+		if (request.Query.ContainsKey("patch"))
+		{
+			body.Append("<h2>Review</h2>");
+			foreach (var record in records.Take(100))
+			{
+				var patch = await Repo.Diffs.PatchAsync(record);
+				body.Append($"<h3 class=\"id\">{E(record.Path)}</h3>");
+				body.Append(patch.Hunks is { } hunks ? $"<pre>{E(hunks)}</pre>" : $"<div class=\"attn\">{E(patch.Summary ?? "")}</div>");
+			}
 		}
 		else
 		{
-			body.Append("<h2>Branches and tags</h2><table class=\"list\"><tr><th>Kind</th><th>Name</th><th>Commit</th><th>Subject</th></tr>");
-			var defaultBranch = await DefaultBranchAsync(state.Monorepo, name);
-			foreach (var reference in OrderRefs(refs, defaultBranch))
+			body.Append($"<p><a href=\"/mainline/{seq}?patch\">review the hunks</a> (rewritten files show as a summary)</p>");
+		}
+
+		var nav = $"<div class=\"pager\">{(seq > 0 ? $"<a href=\"/mainline/{seq - 1}\">&larr; seq {seq - 1}</a>" : "")}<a href=\"/mainline/{seq + 1}\">seq {seq + 1} &rarr;</a></div>";
+		return Html("/mainline", $"Mainline seq {seq}: {Clip(commit.Intent.Split('\n')[0], 60)}", nav + body);
+	}
+
+	// ----- conflicts -----
+
+	private static async Task<IResult> ConflictsAsync()
+	{
+		var rows = await RowsAsync(true);
+		var blocked = rows.Where(row => row.Check?.Outcome is LandOutcome.NeedsReplay or LandOutcome.Conflict or LandOutcome.Rejected).ToList();
+		var body = new StringBuilder();
+		body.Append("<p class=\"muted\">When two agents rewrote the same path, the default is to re-run the later task on the new mainline (replay), not to merge text " +
+			"nobody reviewed. Policies per path are set in .bassia.toml.</p>");
+		body.Append($"<h2>Blocked from landing <span class=\"count\">{blocked.Count}</span></h2>");
+		if (blocked.Count == 0)
+		{
+			body.Append(Notice("Every open workspace can land (or has nothing to land)."));
+		}
+
+		foreach (var row in blocked)
+		{
+			body.Append($"<h3>{WorkspaceLink(row.State.Id, row.State.Name)} {Landability(row)}</h3><div class=\"attn\">{E(row.Check!.Message)}</div>");
+			if (row.Check.Conflicts.Count > 0)
 			{
-				var kind = reference.Kind switch
-				{
-					GitRefKind.Branch => "branch",
-					GitRefKind.AnnotatedTag => "<b>annotated tag</b>",
-					_ => "<span class=\"muted\">lightweight tag</span>"
-				};
-				var label = reference.IsTag ? $"<a class=\"ref\" href=\"/tag?name={Url(reference.Name)}\">{E(reference.Name)}</a>" : Ref(reference.Name);
-				var machine = RefRank(reference, defaultBranch) >= 3;
-				body.Append($"<tr{(machine ? " class=\"machine\"" : "")}><td>{kind}{(reference.Name == defaultBranch ? " <span class=\"muted\">(default)</span>" : "")}</td><td>{label}</td><td><a class=\"hash\" href=\"/commit/{Url(name)}/{Url(reference.Commit)}\">{E(Short(reference.Commit))}</a></td><td>{E(reference.Subject)}</td></tr>");
+				body.Append(ConflictTable(row.Check.Conflicts));
+			}
+
+			body.Append("<p>").Append(row.Check.Outcome switch
+			{
+				LandOutcome.NeedsReplay => Cmd($"bassia agent replay {row.State.Name} -land") + " " + Cmd($"bassia workspace sync {row.State.Name}"),
+				LandOutcome.Conflict => Cmd($"bassia workspace status {row.State.Name}") + " " + Cmd($"bassia workspace land {row.State.Name}"),
+				_ => Cmd($"bassia workspace check {row.State.Name}")
+			}).Append("</p>");
+		}
+
+		// Paths that keep colliding: candidates for an exclusive lease or for splitting the task.
+		var hot = rows.SelectMany(row => (row.Check?.Conflicts.Select(conflict => conflict.Path) ?? []).Concat(row.State.Record.LastLand?.Conflicts ?? []))
+			.GroupBy(path => path).Select(group => (Path: group.Key, Count: group.Count())).OrderByDescending(item => item.Count).Take(20).ToList();
+		body.Append("<h2>Hot paths</h2>");
+		if (hot.Count == 0)
+		{
+			body.Append(Notice("No path has caused a conflict."));
+		}
+		else
+		{
+			var max = hot.Max(item => item.Count);
+			body.Append("<table class=\"list\"><tr><th>Path</th><th>Conflicts</th><th></th></tr>");
+			foreach (var (path, count) in hot)
+			{
+				body.Append($"<tr><td class=\"id\">{E(path)}</td><td>{count}</td><td class=\"stackcell\"><div class=\"stack\"><span class=\"st-manual\" style=\"width:{100 * count / max}%\"></span></div></td></tr>");
+			}
+
+			body.Append("</table><p>A path that keeps causing replays is a candidate for an exclusive lease: ")
+				.Append(Cmd("bassia lease acquire -prefix <folder> -wait 600")).Append("</p>");
+		}
+
+		return Html("/conflicts", "Conflicts", body.ToString());
+	}
+
+	// ----- leases, files, config -----
+
+	private static async Task<IResult> LeasesAsync()
+	{
+		var leases = await Repo.Leases.ListAsync();
+		var names = (await Repo.ListWorkspacesAsync(true)).ToDictionary(state => state.Id, state => state.Name);
+		var body = new StringBuilder();
+		if (leases.Count == 0)
+		{
+			body.Append(Notice("No live lease."));
+		}
+		else
+		{
+			body.Append("<table class=\"list\"><tr><th>Prefix</th><th>Mode</th><th>Workspace</th><th>Run</th><th>Token</th><th>Expires</th></tr>");
+			foreach (var lease in leases)
+			{
+				body.Append($"<tr><td class=\"id\">{E(lease.Prefix.Length == 0 ? "/" : lease.Prefix)}</td><td>{E(lease.Mode.ToString().ToLowerInvariant())}</td>");
+				body.Append($"<td>{WorkspaceLink(lease.Owner, names.GetValueOrDefault(lease.Owner, lease.Owner))}</td><td class=\"id\">{E(lease.Run ?? "-")}</td>");
+				body.Append($"<td>{lease.Token}</td><td>{Time(lease.Expires)}</td></tr>");
 			}
 
 			body.Append("</table>");
 		}
 
-		body.Append("<h2>Agentic runs that touched it</h2><table class=\"list\"><tr><th>Run</th><th>Status</th><th>Base</th><th>Result</th><th>Result tag</th><th>Rationale</th></tr>");
-		foreach (var run in state.Runs)
-		{
-			foreach (var entry in run.Components.Where(entry => entry.Name == name))
-			{
-				body.Append($"<tr><td>{RunLink(run.RunId)}</td><td>{Status(run.Status)}</td><td>{E(entry.CommitIsh)}</td><td>{E(entry.ResultStatus.ToString().ToLowerInvariant())}</td><td>{(entry.ResultTag is null ? "-" : Ref(entry.ResultTag))}</td><td>{Rationale(run.Command)}</td></tr>");
-			}
-		}
-
-		body.Append("</table>");
-		return View("/components", $"Component {name}", body.ToString());
+		body.Append("<p>").Append(Cmd("bassia lease acquire -prefix <folder> -workspace <name>")).Append(' ').Append(Cmd("bassia lease list")).Append("</p>");
+		return Html("/leases", "Leases", body.ToString());
 	}
 
-	/// <summary>
-	/// The order a component's refs are listed in: what a person picks from first - the default branch, other branches,
-	/// baselines - then what Bassia made: integration tags, run result tags, and the integration and run branches.
-	/// </summary>
-	internal static IEnumerable<GitRef> OrderRefs(IEnumerable<GitRef> refs, string? defaultBranch) =>
-		refs.OrderBy(reference => RefRank(reference, defaultBranch)).ThenBy(reference => reference.Name, StringComparer.Ordinal);
-
-	private static int RefRank(GitRef reference, string? defaultBranch)
+	private static async Task<IResult> FilesAsync(HttpRequest request)
 	{
-		var made = reference.Name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal) ? 2
-			: reference.Name.StartsWith(IntegrationRecord.RefPrefix, StringComparison.Ordinal) ? 1
-			: 0;
-		return reference.Kind == GitRefKind.Branch
-			? reference.Name == defaultBranch ? 0 : made == 0 ? 1 : 4 + made
-			: made == 0 ? 2 : 2 + made;
-	}
-
-	private static Task<string?> DefaultBranchAsync(Monorepo monorepo, string component) =>
-		monorepo.Backend.Components.Open(component).DefaultBranchAsync();
-
-	internal static string PolicyText(MergePolicy policy) =>
-		$"conflicts → <b>{(policy.ManualSemantic ? "a human" : "the resolver")}</b>, weave warnings → <b>{E(IntegrationRecord.Snake(policy.Warnings))}</b>, " +
-		$"advance <b>{(policy.AutoAdvance ? "auto" : "manual")}</b>{(policy.ManualPaths.IsEmpty ? "" : $", manual paths <code>{E(string.Join(", ", policy.ManualPaths.Texts))}</code>")}";
-
-	/// <summary>A facts row of holds, each path once with the runs holding it; nothing when there are none.</summary>
-	private static string HeldRow(string label, IEnumerable<LockBoard.Row> rows)
-	{
-		var paths = rows.GroupBy(row => row.Hold.Key.Display).ToList();
-		return paths.Count == 0 ? "" : $"<tr><td>{E(label)}</td><td>" + string.Join(" ", paths.Select(group =>
-			$"<span class=\"lockchip {LockCommands.StateName(group.First().State)}\">{E(group.Key)}</span>{string.Join(" ", group.Select(row => RunLink(row.Entry.RunId)))}")) + "</td></tr>";
-	}
-
-	/// <summary>A component's lock filter in a line: its file and folder patterns and what a lock conflict leads to.</summary>
-	internal static string LockFilterText(Monorepo monorepo, string component)
-	{
-		var (files, folders) = Locks.LockFilter.For(monorepo, component).Texts;
-		return files.Count == 0 && folders.Count == 0
-			? "<span class=\"muted\">nothing is locked</span>"
-			: $"{(files.Count == 0 ? "" : $"files <code>{E(string.Join(", ", files))}</code> ")}{(folders.Count == 0 ? "" : $"folders <code>{E(string.Join(", ", folders))}</code> ")}" +
-				$"· a lock conflict goes to {LockPolicyText(Locks.LockFilter.ConflictPolicy(monorepo.Config, component))}";
-	}
-
-	internal static string QueueStateText(QueueState state) => state switch
-	{
-		QueueState.Waiting => "<span class=\"qs waiting\">waiting</span>",
-		QueueState.Integrated => "<span class=\"qs integrated\">integrated, not advanced</span>",
-		QueueState.NeedsAttention => "<span class=\"qs attention\">needs attention</span>",
-		_ => "<span class=\"qs landed\">landed</span>"
-	};
-
-	// ----- timeline -----
-
-	private async Task<IResult> TimelineAsync(HttpRequest request)
-	{
-		var monorepo = Current();
-		var chosen = request.Query["c"].Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToList();
-		var page = int.TryParse(request.Query["page"], out var p) ? p : 1;
-		var size = int.TryParse(request.Query["n"], out var n) ? n : Timeline.DefaultPageSize;
-		var colour = monorepo.Components.Select((component, index) => (component.Name, index)).ToDictionary(pair => pair.Name, pair => pair.index % 8, StringComparer.Ordinal);
-
-		// Ticking a component reloads the timeline at once (the script submits the form); the button is for no-JS use.
-		var form = new StringBuilder("<form method=\"get\" action=\"/timeline\" class=\"autosubmit\"><div class=\"pick\">");
-		foreach (var component in monorepo.Components)
+		var main = await Repo.GetMainAsync();
+		var seq = long.TryParse(request.Query["seq"], out var given) ? given : main.Seq;
+		var state = seq == main.Seq ? main : await Repo.MainAtSeqAsync(seq);
+		var path = PathNames.Normalize(request.Query["path"].ToString());
+		var leaf = await Repo.Trees.GetAsync(state.Tree, path) ?? throw new VersionException($"'{path}' does not exist at seq {seq}.");
+		var body = new StringBuilder($"<p class=\"muted\">seq {seq} · listed from tree metadata; file content is fetched only when you open a file.</p><p class=\"id\">");
+		body.Append($"<a href=\"/files?seq={seq}\">/</a>");
+		var prefix = "";
+		foreach (var part in PathNames.Split(path))
 		{
-			var check = chosen.Contains(component.Name) ? " checked" : "";
-			form.Append($"<label class=\"pickchip c{colour[component.Name]}\"><input type=\"checkbox\" name=\"c\" value=\"{E(component.Name)}\"{check}> {E(component.Name)}</label>");
-		}
-
-		form.Append($"</div><span class=\"muted\">Per page</span> <input type=\"number\" name=\"n\" min=\"1\" max=\"{Timeline.MaxPageSize}\" value=\"{size}\"> <button>Show timeline</button></form>");
-
-		if (chosen.Count == 0)
-		{
-			// Not the whole monorepo, but one click away from any unit: each component with what it needs.
-			var starts = monorepo.Components.Select(component => (component.Name, Unit: Timeline.Unit(monorepo, [component.Name])))
-				.OrderByDescending(start => start.Unit.Count).ThenBy(start => start.Name, StringComparer.Ordinal);
-			var links = string.Concat(starts.Select(start =>
-				$"<a class=\"start\" href=\"/timeline?c={Url(start.Name)}\"><b class=\"pickchip c{colour[start.Name]}\">{E(start.Name)}</b>" +
-				$"<span class=\"muted\">{(start.Unit.Count == 1 ? "on its own" : $"with {E(string.Join(", ", start.Unit.Where(name => name != start.Name)))}")}</span></a>"));
-			return View("/timeline", "Timeline", form + $"""
-				<p class="muted">The timeline follows a unit: the components you tick plus everything they need, never the whole monorepo at once. Start from one:</p>
-				<div class="starts">{links}</div>
-				""");
-		}
-
-		var unit = Timeline.Unit(monorepo, chosen);
-		var timeline = await Timeline.ReadAsync(monorepo, unit, page, size);
-		var added = unit.Where(name => !chosen.Contains(name)).ToList();
-		var lane = unit.Select((name, index) => (name, index)).ToDictionary(pair => pair.name, pair => pair.index, StringComparer.Ordinal);
-
-		var query = string.Join("&", chosen.Select(name => $"c={Url(name)}")) + $"&n={timeline.PageSize}";
-		var pager = new StringBuilder("<div class=\"pager\">");
-		if (timeline.Page > 1)
-		{
-			pager.Append($"<a href=\"/timeline?{query}&page={timeline.Page - 1}\">← newer</a>");
-		}
-
-		if (timeline.HasMore)
-		{
-			pager.Append($"<a href=\"/timeline?{query}&page={timeline.Page + 1}\">older →</a>");
-		}
-
-		pager.Append($"<span class=\"muted\">page {timeline.Page}</span></div>");
-
-		var body = new StringBuilder(form.ToString());
-		body.Append($"<p>Unit: {string.Join(" ", unit.Select(name => $"<a class=\"pickchip c{colour[name]}\" href=\"{ComponentHref(name)}\">{E(name)}</a>"))}");
-		if (added.Count > 0)
-		{
-			body.Append($" <span class=\"muted\">({E(string.Join(", ", added))} joined as dependencies)</span>");
+			prefix = PathNames.Join(prefix, part);
+			body.Append($" / <a href=\"/files?seq={seq}&amp;path={Url(prefix)}\">{E(part)}</a>");
 		}
 
 		body.Append("</p>");
-		if (timeline.Entries.Count == 0)
+		if (leaf.Kind == EntryKind.Tree)
 		{
-			body.Append(Notice(page > 1 ? "No more commits." : "These components have no commits yet."));
+			body.Append("<table class=\"list\"><tr><th>Name</th><th>Kind</th><th>Size</th></tr>");
+			foreach (var entry in (await Repo.Objects.ReadTreeAsync(leaf.Id)).Entries)
+			{
+				var child = PathNames.Join(path, entry.Name);
+				body.Append($"<tr><td class=\"id\"><a href=\"/files?seq={seq}&amp;path={Url(child)}\">{E(entry.Name)}{(entry.Kind == EntryKind.Tree ? "/" : "")}</a></td>");
+				body.Append($"<td>{E(entry.Kind.ToString().ToLowerInvariant())}</td><td>{CliCommands.Results.Size(entry.Size)}</td></tr>");
+			}
+
+			body.Append("</table>");
 		}
 		else
 		{
-			body.Append(timeline.Page > 1 || timeline.HasMore ? pager.ToString() : "").Append(Charts.Legend(("tl-plain", "commit"), ("tl-result", "a run's result"), ("tl-integration", "an integration's merge")));
-			body.Append($"<table class=\"list timeline\"><tr><th>Time</th><th style=\"width:{unit.Count * 14 + 12}px\"></th><th>Component</th><th>Commit</th><th>Subject</th><th>Made by</th></tr>");
-			string? day = null;
-			foreach (var entry in timeline.Entries)
-			{
-				var entryDay = entry.Date.ToUniversalTime().ToString("yyyy-MM-dd dddd", System.Globalization.CultureInfo.InvariantCulture);
-				if (entryDay != day)
-				{
-					day = entryDay;
-					body.Append($"<tr><th colspan=\"6\">{E(day)}</th></tr>");
-				}
+			var bytes = leaf.Size <= 2 * 1024 * 1024 ? await Repo.Objects.ReadContentAsync(leaf) : null;
+			body.Append(bytes is not null && Core.Text.LineDiff.IsText(bytes)
+				? $"<pre>{E(Encoding.UTF8.GetString(bytes))}</pre>"
+				: Notice($"{CliCommands.Results.Size(leaf.Size)} of {(bytes is null ? "content too large to show" : "binary content")}."));
+		}
 
-				var kind = entry.Provenance?.Kind switch
-				{
-					CommitProvenance.Result => "tl-result",
-					CommitProvenance.Integration => "tl-integration",
-					_ => "tl-plain"
-				};
-				var madeBy = entry.Provenance switch
-				{
-					{ Kind: CommitProvenance.Integration, IntegrationId: { } integration } => $"{IntegrationLink(integration)}<div class=\"muted\">merging {RunLink(entry.Provenance.RunId)}</div>",
-					{ } provenance => $"run {RunLink(provenance.RunId)}",
-					_ => $"<span class=\"muted\">{E(entry.Author)}</span>"
-				};
-				body.Append($"""
-					<tr><td class="muted">{entry.Date.ToUniversalTime():HH:mm}</td>
-					<td class="lanes" style="--lanes:{unit.Count}"><span class="lanedot {kind} c{colour[entry.Component]}" style="--lane:{lane[entry.Component]}" title="{E(entry.Component)}"></span></td>
-					<td><a class="pickchip c{colour[entry.Component]}" href="{ComponentHref(entry.Component)}">{E(entry.Component)}</a></td>
-					<td><a class="hash" href="/commit/{Url(entry.Component)}/{Url(entry.Hash)}">{E(entry.ShortHash)}</a></td>
-					<td>{E(entry.Subject)} {string.Concat(TimelineRefs(entry.Refs).Select(Ref))}</td>
-					<td>{madeBy}</td></tr>
-					""");
+		return Html("/files", "Files", body.ToString());
+	}
+
+	private static async Task<IResult> ConfigAsync()
+	{
+		var main = await Repo.GetMainAsync();
+		var policy = await RepoPolicy.LoadAsync(Repo.Trees, main.Tree);
+		var body = new StringBuilder($"<h2>Repository policy <span class=\"muted\">({E(RepoPolicy.FileName)} at seq {main.Seq})</span></h2>");
+		body.Append("<table class=\"list\"><tr><th>Paths</th><th>Conflict policy</th></tr>");
+		foreach (var (glob, kind) in policy.ConflictRules)
+		{
+			body.Append($"<tr><td class=\"id\">{E(glob.Pattern)}</td><td><span class=\"pv\">{E(kind)}</span></td></tr>");
+		}
+
+		body.Append($"<tr><td class=\"muted\">everything else</td><td><span class=\"pv own\">{E(policy.DefaultConflictPolicy)}</span></td></tr></table>");
+		body.Append("<h3>Lease required</h3>").Append(policy.LeaseRequired.Count == 0
+			? "<p class=\"muted\">No prefix requires a lease: leases are advisory everywhere.</p>"
+			: "<p>" + string.Concat(policy.LeaseRequired.Select(prefix => $"<span class=\"chip id\">{E(prefix)}</span>")) + "</p>");
+		body.Append("<h3>Never snapshotted</h3><p>").Append(string.Concat(policy.Ignore.Select(glob => $"<span class=\"chip id\">{E(glob.Pattern)}</span>"))).Append("</p>");
+		if (Current.Settings is { } settings)
+		{
+			body.Append("<h2>Settings of this monorepo folder</h2><table class=\"list\"><tr><th>Key</th><th>Value</th><th>Source</th></tr>");
+			foreach (var (key, value, source) in settings)
+			{
+				body.Append($"<tr><td class=\"id\">{E(key)}</td><td class=\"id\">{E(value)}</td><td><span class=\"layer wins {(source == "default" ? "default" : "monorepo")}\">{E(source)}</span></td></tr>");
 			}
 
 			body.Append("</table>");
 		}
 
-		body.Append(pager);
-		return View("/timeline", "Timeline", body.ToString());
+		body.Append("<p>").Append(Cmd("bassia config list")).Append("</p>");
+		return Html("/config", "Config", body.ToString());
 	}
 
-	/// <summary>
-	/// The refs worth a chip: a run's or an integration's branch (<c>agent-run/&lt;key&gt;</c>) is dropped where its own
-	/// tag (<c>agent-run/&lt;key&gt;/&lt;n&gt;</c>) is on the same commit, since both name the same thing.
-	/// </summary>
-	internal static IEnumerable<string> TimelineRefs(IReadOnlyList<string> refs) =>
-		refs.Where(name => !refs.Any(other => other.Length > name.Length && other.StartsWith(name + "/", StringComparison.Ordinal)
-			&& (name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal) || name.StartsWith(IntegrationRecord.RefPrefix, StringComparison.Ordinal))));
+	private static string Clip(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
 
-	private async Task<IResult> CommitAsync(string component, string hash)
-	{
-		var monorepo = Current();
-		if (monorepo.FindComponent(component) is null)
-		{
-			return NotFound($"Component '{component}' is not registered in components.toml.");
-		}
+	private static string Legend(params (string Class, string Label)[] items) =>
+		"<div class=\"legend\">" + string.Concat(items.Select(item => $"<span><i class=\"{item.Class}\" style=\"border-radius:3px\"></i>{E(item.Label)}</span>")) + "</div>";
 
-		// Only a hash reaches git: nothing from the URL can be read as an option or a revision expression.
-		if (hash.Length is < 4 or > 64 || !hash.All(Uri.IsHexDigit))
-		{
-			return NotFound($"'{hash}' is not a commit hash.");
-		}
+	private const string ExtraStyles = """
 
-		var storage = monorepo.Backend.Components;
-		var store = storage.Exists(component) ? storage.Open(component) : null;
-		var found = store is null ? [] : await store.FindObjectsAsync(hash.ToLowerInvariant());
-		if (store is null || found is not [{ Kind: "commit" } only])
-		{
-			return NotFound($"Commit {hash} does not exist in component '{component}'.");
-		}
-
-		var full = only.Id;
-		var entry = (await store.LogAsync(new Storage.LogQuery([full], Limit: 1))).Single();
-		var stat = await store.DiffStatAsync(entry.Commit.Parents.FirstOrDefault(), full);
-		var chips = string.Concat(entry.Branches.Concat(entry.Tags).Order(StringComparer.Ordinal).Select(Ref));
-		var show = new StringBuilder()
-			.Append($"commit {full}\n")
-			.Append(entry.Commit.Parents.Count > 1 ? $"Merge: {string.Join(" ", entry.Commit.Parents.Select(parent => parent[..Math.Min(7, parent.Length)]))}\n" : "")
-			.Append($"Author: {entry.Commit.Author}\n")
-			.Append($"Date:   {entry.Date.ToUniversalTime():yyyy-MM-dd HH:mm:ss} UTC\n\n")
-			.Append(string.Concat(entry.Commit.Message.Replace("\r", "").TrimEnd('\n').Split('\n').Select(line => $"    {line}\n")))
-			.Append('\n')
-			.Append(Cli.DiffStatText.Render(stat))
-			.ToString();
-		var body = $"""
-			<table class="list facts"><tr><td>Component</td><td><a href="{ComponentHref(component)}">{E(component)}</a></td></tr>
-			<tr><td>Commit</td><td><code>{E(full)}</code></td></tr>
-			<tr><td>Refs</td><td>{(chips.Length == 0 ? "<span class=\"muted\">-</span>" : chips)}</td></tr></table>
-			<pre>{E(show)}</pre>
-			""";
-		return View("/timeline", $"Commit {Short(full)}", body);
-	}
+		.status.open, .status.would-land, .status.succeeded, .status.landed { color:var(--ok); }
+		.status.needs-replay, .status.lost, .status.replaced, .status.stopped { color:var(--warn); }
+		.status.conflict, .status.rejected { color:var(--bad); } .status.closed, .status.abandoned, .status.nothing { color:var(--muted); }
+		.status.added { color:var(--ok); } .status.deleted { color:var(--bad); } .status.modified, .status.renamed { color:var(--live); }
+		i.k-integrated { background:#eaf6ee; border:2px solid var(--ok); } i.k-waiter { background:#fff6e6; border:2px dashed var(--warn); }
+		i.k-run { background:#e9f3ff; border:2px solid var(--live); } i.k-result { background:#fff; border:2px dashed var(--live); }
+		""";
 }
-
-/// <summary>
-/// What one dashboard request is served from: the monorepo, the label in the header (the monorepo's root, or the
-/// server), the signed-in account's part of the header (HTML, or null), and where live changes are pushed (or null:
-/// the live parts poll).
-/// </summary>
-internal sealed record DashboardScope(Monorepo Monorepo, string Label, string? Account = null, string? Events = null);

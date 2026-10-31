@@ -10,50 +10,45 @@ internal static class Help
 {
 	public const string GlobalUsage = "bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...";
 
-	/// <summary>What a bare <c>bassia</c> prints for a person at a terminal, before the guide; 'bassia help' has everything.</summary>
+	/// <summary>What a bare <c>bassia</c> prints for a person at a terminal; 'bassia help' has everything.</summary>
 	public const string ShortText =
-		"bassia - a monorepo of git repositories (components), built for AI agents working in parallel.\n" +
+		"bassia - a client-server monorepo for fleets of coding agents: a workspace per run, one trunk to land on.\n" +
 		"\n" +
 		"Usage: " + GlobalUsage + "\n" +
 		"\n" +
 		"  bassia help [<command>]     every command, or one command's switches and examples\n" +
 		"  bassia help -all            every command in full, for an agent to learn bassia in one call\n" +
-		"  bassia tutorial             guided setup of a monorepo, or options for the one you are in\n" +
+		"  bassia status               where you are: the monorepo, mainline, open workspaces and runs\n" +
 		"\n" +
 		"Every command prints its result as TOML; add -human to read it as Markdown.";
 
 	/// <summary>What Bassia's parts are, for an agent that has only this help to go by.</summary>
 	private static readonly (string Name, string Meaning)[] Concepts =
 	[
-		("monorepo", "A folder holding the meta-repo, one bare git repository per component, the workspace and the run store. Commands find it from the current directory upwards, or from -C <path>."),
-		("component", "One git repository of the monorepo (a library, service, app, tool), stored bare next to the meta-repo and registered in .bassia/components.toml. It has a single main branch; to work in parallel on a line of its own, fork it (component fork)."),
-		("reference", "A dependency of one component on another (component[:path]). A run checks out the referenced component nested inside the referring one at that path (default: its name). References form an acyclic graph (graph, component show)."),
-		("boundary", "A rule over component tags (type:app, scope:billing) in components.toml: which components may reference which, nx-style, with wildcards (boundary list|add|remove|check). A component's visibility limits who may reference it. A change to the graph that adds a violation is refused; violations already there are warnings."),
-		("task", "A command a component defines in bassia.toml at its root ([tasks.build] command = ..., depends_on = [\"^build\"]); task run runs tasks over a checkout of a selection, affected tells what a change affects, and merge.verify makes the integration run them before it publishes."),
-		("conformance", "A rule in components.toml ([[conformance]]) of what components with a tag must have: files, tasks, owners, exports (conformance list|add|remove|check). Templates in .bassia/templates start new components from those conventions (component create -template)."),
-		("user", "Someone working in the monorepo, registered in .bassia/users.toml (user add|list|show|set|remove). Locks, runs, integrations, tags and commits are attributed to the current user (BASSIA_USER, else user use, else the git email); lock check names who holds a path and how to reach them. whoami tells who you are."),
-		("meta-repo", "The .bassia git repository: components.toml (components and references), config.toml (settings, committed), config.user.toml (your own settings, not committed) and skills/. Commands that change it commit it themselves."),
-		("tag", "An annotated tag; one tag of the same name in several components marks a combination that belongs together (a release, a baseline). A run selects components at a tag, a commit hash or the main-branch tip."),
-		("agentic run", "An agent command run in an isolated run folder under the workspace (.workspace/agent-run-<key>) holding the selected components and what they reference. Afterwards each changed component is committed, tagged agent-run/<key>/<n> and pushed back; main is not touched. Ids look like agent-run-brave-otter-3f2a91; the <key> or a 4+ character prefix of it also works."),
-		("agent command", "What a run executes: -run <command...> verbatim, or -prompt <text> appended as one quoted argument to agent.command (default: claude -p --permission-mode acceptEdits). Bassia only starts it; the agent is yours to choose."),
-		("lock", "While a run's agent works, the paths matched by lock.files / lock.folders (or -lock-files / -lock-folders) that it changes are held for the run; other runs see the holds (lock list|check), wait for them (lock wait) and record a lock conflict when they change a held path."),
-		("integration", "Merging runs' results onto the components' main branches: git first, then the structural merge (weave), then the resolver command (integration.resolver) for semantic conflicts. Results are tagged integration/<key>/<n>; 'integration advance' (or merge.advance = auto) fast-forwards the main branches to them."),
-		("view", "A config spec (map, select and load rules) mapped onto a folder anywhere on this machine: the mapped components and what they reference, side by side, with only the files the load rules name downloaded and written (view create|ls|load|update). 'agent start -spec' runs an agent on one, and the agent loads more with view load."),
-		("clone", "A monorepo that caches another one, its depot (clone, fetch; depot.url): the meta-repo and each component's history without file content, which views and sparse runs download as they load files. Runs in a clone push their results on to the depot."),
-		("configuration", "Layered settings: config.user.toml over config.toml over Bassia's defaults (config list|get|set|unset). Merge and lock settings can be set per component."),
-		("skill", "Reusable instructions for a recurring task, kept in the meta-repo as .bassia/skills/<name>/SKILL.md; read them with skill list and skill show.")
+		("monorepo", "One tree of files, versioned as immutable content-addressed objects (chunks, trees, commits) in blob storage. A folder with .bassia/ is either a local monorepo (bassia init: the core runs in-process over a local-disk blob store and SQLite) or a clone of a bassia-server (bassia clone: the same core, over the server's stores). Commands find it from the current folder upwards, or from -C <path>."),
+		("mainline", "The single trunk. Every landing gets the next seq (1, 2, 3, ...) and mainline's history is linear. There are no branches or tags: read it by seq (mainline log|show|ls|cat|changed)."),
+		("workspace", "Where work happens instead of a branch: a folder holding a tree, with a base (mainline at some seq, or another workspace it is stacked on with -on) and a working commit. Commits are implicit: every command that reads a workspace snapshots its folder first. Clone a workspace (workspace clone) to branch off it."),
+		("landing", "Moving a workspace's change onto mainline (workspace land; workspace check says whether it can). Only the paths the workspace touched are compared with mainline since its base seq: disjoint changes land with no merge; a path both rewrote follows its conflict policy. The landed commit keeps the workspace's ChangeId."),
+		("change id", "The stable identity of a unit of work: it survives snapshots, sync, landing and replay. The commit id (a hash) changes every time."),
+		("conflict policy", "Per path glob in .bassia.toml at the root of the tree: replay (default: the landing is refused and the task re-run on the new head), textmerge (line-based three-way merge while both sides stay similar), semantic (a language-aware merge driver, landed only after the land.validate hook passes), conflict (stored as a conflict in the workspace; mainline refuses it)."),
+		("replay", "Rebase by replay: 'agent replay' runs a workspace's recorded task (prompt, agent, model) again on mainline's head, in a new workspace with the same ChangeId, instead of merging text no one reviewed."),
+		("sync", "Rebase a workspace onto its newest base (workspace sync): untouched paths cost nothing; paths both sides changed follow their policy, and what stays unresolved is written into the folder with conflict markers."),
+		("operation log", "Every mutation of mainline or a workspace is an operation pointing at a view; undo and restore write a new operation with an earlier view, so a wrong or abandoned run is recoverable."),
+		("lease", "An advisory hold on a path prefix (lease acquire), exclusive or intent, with a time to live and a fencing token. Exclusive leases on disjoint prefixes never block each other; prefixes named lease_required in .bassia.toml refuse a landing without one."),
+		("agentic run", "agent start runs a coding agent (agent.command, Claude Code by default) in a workspace of its own, records the task as the change's replay recipe, snapshots the result and with -land lands it. Runs are followed with agent list|show|logs|wait|stop."),
+		("git", "An import and export format at the edge: import -git brings repositories in, each under its own folder (baselines, or -history); export -git writes mainline to a git repository incrementally."),
+		("configuration", "Settings of a monorepo folder in .bassia/config.toml (config list|get|set|unset): who acts, the agent command, the server, the merge driver and validation hook, garbage collection.")
 	];
 
 	/// <summary>The usual sequence of commands, in order.</summary>
 	private static readonly string[] Workflow =
 	[
-		"bassia init -path <folder>: create the monorepo (or run inside an existing one; 'bassia status' tells which).",
-		"bassia component add -url <url> [-references <c[:path]>,...] or component create -name <name>: register the components and what they reference.",
-		"bassia component tag / tag create: mark baselines (optional; a run may also start from main-branch tips or commit hashes).",
-		"bassia agent start -select <component[@tag|hash],...> (-prompt <text> | -run <command...>) [-detach]: run an agent; follow it with agent list|show|logs|wait|diff.",
-		"bassia integration plan -runs <run-id,...|all>: triage how the results would merge, without changing anything.",
-		"bassia integration start -runs <run-id,...|all>: merge them; follow with integration show|wait, then integration advance to move the main branches.",
-		"bassia status, graph, log, tag list, lock list: look at the monorepo at any time."
+		"bassia init -path <folder> (or bassia clone -from <server-url>): a monorepo folder.",
+		"bassia import -git <url>,<url>: bring existing git repositories in, each under its own folder (optional).",
+		"bassia agent start -prompt <text> [-land] [-detach]: a workspace per run; or bassia workspace create <name> and edit its folder yourself.",
+		"bassia workspace check <name>: can it land? needs-replay names the paths mainline rewrote meanwhile.",
+		"bassia workspace land <name>: onto mainline as the next seq; or agent replay <name> / workspace sync <name> when it conflicts.",
+		"bassia status, workspace list, agent list, mainline log, lease list, web: look at everything at any time."
 	];
 
 	/// <summary>How an agent learns the rest.</summary>
@@ -61,10 +56,9 @@ internal static class Help
 	[
 		"bassia help -all: every command in full - usage, details, switches and examples - in one result.",
 		"bassia help <command> [<subcommand>], or <command> [<subcommand>] -help: one command; bassia help <group>: a group's subcommands.",
-		"read_only = true marks a command that changes nothing in the monorepo; interactive = true marks one meant for a person (it reads stdin, asks for confirmation or serves until Ctrl-C). Run the read-only commands that are not interactive freely to explore.",
-		"bassia status: whether the current directory is in a monorepo, and what is in it and going on.",
-		"bassia config list: every setting with its value, layer and meaning.",
-		"bassia skill list, skill show -name <skill>: the monorepo's own instructions for recurring tasks."
+		"read_only = true marks a command that changes nothing; interactive = true marks one meant for a person. Run the read-only commands that are not interactive freely to explore.",
+		"bassia status: whether the current folder is in a monorepo, and what is going on in it.",
+		"bassia config list: every setting with its value, source and meaning."
 	];
 
 	public static Task<int> RunAsync(Invocation invocation) =>
@@ -112,8 +106,8 @@ internal static class Help
 			"-human: print the result as Markdown for a person instead of TOML"
 		},
 		["grammar"] = "Switches are case-insensitive and may be written -name or --name. A command's main argument may be given without its switch " +
-			"(bassia agent show brave-otter-3f2a91). A rest-of-line switch (-run, -resolve, the message of feedback send) takes everything after it " +
-			"and comes last. -run and -resolve are shell command lines: one argument is used verbatim, several are joined with spaces (a word " +
+			"(bassia workspace show fix-login). A rest-of-line switch (-run, the message of feedback send) takes everything after it " +
+			"and comes last. -run is a shell command line: one argument is used verbatim, several are joined with spaces (a word " +
 			"with whitespace is wrapped in double quotes), so pass a command with its own quotes as one argument. Lists are comma-separated.",
 		["result"] = "A result's first line is a TOML comment marking it (the first line of this result), then come ok, command, message (or error) " +
 			"and the command's data. When a command streams other output first (agent start without -detach), parse from the last line that is " +
@@ -152,7 +146,7 @@ internal static class Help
 		}
 
 		return ProgramCli.WriteResult(true, "help",
-			"bassia - a Git-based monorepo of components, built for AI agents working in parallel. Bassia has no LLM of its own: an agent " +
+			"bassia - a client-server monorepo for fleets of coding agents: a workspace per agentic run, one trunk to land on. Bassia has no LLM of its own: an agent " +
 			"learns it from this help and drives it with bassia command lines. Every command prints a TOML result. Run 'bassia help -all' for " +
 			"every command in full, or 'bassia help <command>' for one.",
 			data);

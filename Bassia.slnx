@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="Bassia.Core/Bassia.Core.csproj" />
   <Project Path="Bassia.Tests/Bassia.Tests.csproj" />
   <Project Path="Bassia.Server/Bassia.Server.csproj" />
   <Project Path="Bassia/Bassia.csproj" />
