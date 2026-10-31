@@ -171,7 +171,14 @@ public sealed class DevDriveTests : IDisposable
 
 	public void Dispose()
 	{
-		if (root is not null && Directory.Exists(root))
+		if (root is null || !Directory.Exists(root))
+		{
+			return;
+		}
+
+		// SQLite's connection pool keeps state.db open, and Windows deletes no open file.
+		Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+		try
 		{
 			foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
 			{
@@ -179,6 +186,10 @@ public sealed class DevDriveTests : IDisposable
 			}
 
 			Directory.Delete(root, true);
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			// Best effort, as for every temporary folder: the CI volume is thrown away afterwards.
 		}
 	}
 
