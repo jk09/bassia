@@ -217,7 +217,20 @@ function Invoke-AsPostgres([string] $exe, [string[]] $arguments) {
 			$output = & su postgres -s /bin/sh -c $line 2>&1
 		}
 	}
-	else { $output = & $exe @arguments 2>&1 }
+	else {
+		# Output into files, waiting for this process only: 'pg_ctl start' leaves the postmaster running with inherited
+		# handles (on Windows), so a pipe (2>&1) would never reach its end and the call would hang.
+		$out = [IO.Path]::GetTempFileName()
+		$err = [IO.Path]::GetTempFileName()
+		try {
+			$process = Start-Process -FilePath $exe -ArgumentList ($arguments | ForEach-Object { "`"$_`"" }) -RedirectStandardOutput $out `
+				-RedirectStandardError $err -NoNewWindow -PassThru
+			# Not WaitForExit(): that also waits for the postmaster, which keeps the redirected files open.
+			while (-not $process.HasExited) { Start-Sleep -Milliseconds 100 }
+			return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = ((Get-Content -Raw $out) + (Get-Content -Raw $err)).Trim() }
+		}
+		finally { Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue }
+	}
 	[pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output | ForEach-Object { "$_" }) -join "`n" }
 }
 
