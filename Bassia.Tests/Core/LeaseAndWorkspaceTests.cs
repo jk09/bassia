@@ -213,6 +213,41 @@ public class WorkspaceDiskTests
 		Assert.True(counting.BytesRead - before < 5000 * 3, $"status read {counting.BytesRead - before} bytes in {counting.Reads - reads} reads");
 	}
 
+	/// <summary>
+	/// On a file system without an executable bit (Windows), files imported with git's mode 100755 must not show as
+	/// modified: the snapshot keeps the mode the tree recorded, and only content changes count.
+	/// </summary>
+	[Fact]
+	public async Task OnAFileSystemWithoutAnExecutableBit_ExecutableFilesAreNotModifiedBySnapshots()
+	{
+		var repo = await TestRepo.CreateAsync();
+		using var dir = new TempDir();
+		var client = new WorkspaceClient(repo.Repo, repo.Landing, dir.Combine(".state"), "tester",
+			(root, _) => new CheckoutProvider(root, repo.Repo) { TracksExecutable = false });
+		var setup = await repo.Workspaces.CreateAsync("setup", "tester");
+		var working = await repo.Repo.Objects.ReadCommitAsync(setup.Record.Working);
+		var tree = await repo.Repo.Trees.EditAsync(working.Tree,
+		[
+			new PathChange("tool.sh", await repo.Repo.Objects.WriteContentAsync("echo hi\n"u8.ToArray(), executable: true)),
+			new PathChange("lib/a.cpp", await repo.Repo.Objects.WriteContentAsync("int a;\n"u8.ToArray(), executable: true)),
+			new PathChange("README.md", await repo.Repo.Objects.WriteContentAsync("readme\n"u8.ToArray()))
+		]);
+		await repo.Workspaces.SetTreeAsync(setup.Id, tree, "setup", null, null);
+		Assert.Equal(LandOutcome.Landed, (await repo.LandAsync((await repo.Repo.FindWorkspaceAsync(setup.Id))!)).Outcome);
+
+		var (state, _) = await client.CreateAsync("ws", dir.Combine("ws"));
+		await File.WriteAllTextAsync(dir.Combine("ws", "NEW.md"), "new\n");
+		await File.WriteAllTextAsync(dir.Combine("ws", "lib", "a.cpp"), "int b;\n");
+
+		var snapshot = await client.SnapshotAsync(state);
+		Assert.Equal(["NEW.md", "lib/a.cpp"], snapshot.Changes.Select(change => change.Path).Order(StringComparer.Ordinal));
+		var record = snapshot.Workspace.Record;
+		var diff = await repo.Repo.Diffs.DiffAsync((await repo.Repo.Objects.ReadCommitAsync(record.Base)).Tree,
+			(await repo.Repo.Objects.ReadCommitAsync(record.Working)).Tree);
+		Assert.Equal(["NEW.md", "lib/a.cpp"], diff.Select(change => change.Path));
+		Assert.True(diff.Single(change => change.Path == "lib/a.cpp").New!.Executable, "an edited file keeps its recorded mode");
+	}
+
 	[Fact]
 	public async Task StackedAndClonedWorkspaces_ShareTheirBases()
 	{
