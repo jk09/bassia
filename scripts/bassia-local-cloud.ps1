@@ -161,7 +161,9 @@ function Test-Azurite([int] $port) {
 # Runs SQL with psql and returns its unaligned output lines.
 function Invoke-Psql($state, [string] $sql, [string] $database = 'postgres') {
 	if ($state.Mode -eq 'docker') {
-		$output = & docker exec $script:PostgresContainer psql -U postgres -d $database -v ON_ERROR_STOP=1 -tAc $sql 2>&1
+		# Over TCP, not the socket: the image's first-start initialization runs a temporary server on the socket only,
+		# then restarts; only the final server listens on TCP.
+		$output = & docker exec -e PGPASSWORD=postgres $script:PostgresContainer psql -h 127.0.0.1 -U postgres -d $database -v ON_ERROR_STOP=1 -tAc $sql 2>&1
 	}
 	else {
 		$psql = Join-Path $state.PostgresBin ($script:OnWindows ? 'psql.exe' : 'psql')
@@ -384,7 +386,10 @@ function Invoke-Up {
 	}
 
 	foreach ($port in @(@{ Port = $blobPort; Up = $status.Azurite; Name = 'Azurite' }, @{ Port = $pgPort; Up = $status.Postgres; Name = 'PostgreSQL' })) {
-		if (-not $port.Up -and (Test-Port $port.Port)) {
+		# A port held by our own container (say, a PostgreSQL still initializing) is not another program's.
+		$ours = $mode -eq 'docker' -and (Test-DockerDaemon) -and
+			(& docker ps --filter "name=^$(($port.Name -eq 'Azurite') ? $script:AzuriteContainer : $script:PostgresContainer)$" --format '{{.State}}') -eq 'running'
+		if (-not $port.Up -and -not $ours -and (Test-Port $port.Port)) {
 			throw "Port $($port.Port) for $($port.Name) is taken by another program. Pick another with -$(($port.Name -eq 'Azurite') ? 'BlobPort' : 'PostgresPort')."
 		}
 	}
