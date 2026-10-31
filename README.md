@@ -36,6 +36,10 @@ bassia workspace create fix-login-tests -on fix-login                 # stacked:
 bassia workspace clone -from fix-login -name fix-login-alt            # the same work as a new change: try another way
 ```
 
+On Windows, keep the monorepo on a [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive/) and workspaces are
+created by block cloning: each file's content is stored once and every workspace shares it copy-on-write, so a new
+workspace over a large monorepo costs metadata, not bytes (`bassia devdrive status` tells whether a folder qualifies).
+
 Every mutation is an operation in the workspace's own log, so `workspace undo` and `workspace restore -op <n>` recover
 any earlier state, and an abandoned run is never lost. Workspaces never contend with each other, however many agents
 snapshot at once.

@@ -147,6 +147,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
 | Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]` |
 | Git | `import -git <url\|path>,... [-prefix <folder>,...] [-history] [-limit <n>]`, `export -git <dir> [-branch <b>]` |
+| Dev Drive | `devdrive status [-path <dir>]` |
 | Maintenance | `gc [-dry-run] [-grace-hours <n>] [-retention-days <n>]`, `scrub [-sample <n>]` |
 | Dashboard | `web [-port <n>] [-no-open]` |
 | Feedback | `feedback send [-kind bug\|idea\|question] [-yes] <message...>`, `feedback reports [-mode off\|ask\|auto]`, `feedback pending [-send]` |
@@ -180,6 +181,31 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
   the last operation and `restore -op <seq|id>` any earlier one (by its seq, or 4+ characters of its id), each as a new operation, and the folder follows.
 - **Close.** `workspace close [-abandon] [-remove]` ends a workspace; its operations stay recoverable until
   `gc.retention_days` after it closed.
+
+## Workspaces on a Dev Drive (Windows)
+
+On Windows, put the monorepo folder (and with it `workspaces/`) on a [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive/)
+- or any ReFS volume with block cloning - and workspaces are created by **block cloning** instead of writing files:
+
+- Bassia keeps one copy of each file's content in `.bassia/clones` (read-only, by content id). The first workspace
+  that needs a file writes it there once from the object store; every workspace then gets the file as a
+  copy-on-write clone (`FSCTL_DUPLICATE_EXTENTS_TO_FILE`): its clusters are shared, no data is read or written.
+- Editing a cloned file in a workspace reallocates only the clusters written; the cache and every other workspace
+  keep their content. Snapshots, landing and everything else work as on any folder.
+- Files under 8 KiB, symlinks and conflicts are written as before. A clone the volume refuses (for example too many
+  references to one cluster) falls back to a copy, and then to writing the file; cloning never makes a command fail.
+- `workspace create`, `clone` and `checkout` report `files_cloned` and `files_written`.
+- `bassia devdrive status [-path <dir>]` tells whether workspaces in a folder are cloned and why not: the file system,
+  whether the volume is a Dev Drive and trusted (Defender's performance mode), whether it supports block cloning, and
+  the clone cache's size.
+- `workspace.clone = off` turns cloning off. `bassia gc` prunes cache entries that no workspace on this machine and no
+  file of mainline's head uses.
+
+Requirements: Windows 11 24H2 or Windows Server 2025 or later (block cloning on Dev Drive), and the workspace folder on
+the same volume as the monorepo folder (clones never cross volumes). Creating a Dev Drive needs an administrator:
+**Settings > System > Storage > Advanced storage settings > Disks & volumes > Create dev drive**, or
+`Format-Volume -DriveLetter D -DevDrive`. Trusting it (`fsutil devdrv trust D:`) lets Defender scan it in
+performance mode.
 
 ## Landing on mainline
 
@@ -361,6 +387,7 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 | `server.token` (`BASSIA_SERVER_TOKEN`) | | The server's shared token. |
 | `merge.semantic_driver` | `weave-driver` | The driver of the semantic policy, git merge-driver style (`%O %A %B`); `off` disables it. The release packages bundle it. |
 | `land.validate` | | A shell command a machine-merged tree must pass before it lands (local monorepo). |
+| `workspace.clone` | `auto` | On Windows, block-clone workspace files from `.bassia/clones` on a Dev Drive (or another block-cloning ReFS volume); `off` always writes them. |
 | `workspace.dir` | `workspaces` | Where new workspaces' folders go. |
 | `lease.ttl` | `600` | Seconds a lease lives unless renewed. |
 | `gc.grace_hours` | `24` | Unreferenced blobs younger than this are kept (uploads for landings in flight). |
@@ -425,11 +452,13 @@ Bassia has four projects; each depends only on the ones before it.
      (create, stack, clone, amend, sync, undo, restore, close), `LandingService` (the only writer of `main`),
      `RepoPolicy` and `ConflictResolver` (the conflict policies), `GarbageCollector`.
    - `Workspaces`: `IWorkspaceProvider` - the plain-checkout `CheckoutProvider` (a ProjFS provider on Windows would
-     implement the same interface) - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
+     implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
+     them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
    may use (`Stores`: `SqliteState` for heads, path index and leases; `S3ObjectStore`; the remote stores and landing of
    a clone over HTTP), `Monorepo` (a local monorepo or a clone, giving every command the same core), agentic runs
-   (`Agents`), git interop and the merge driver (`Interop`), and the dashboard (`Web`).
+   (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
+   (`Platform`), and the dashboard (`Web`).
 3. **`Bassia.Server`** - `bassia-server`: the same core over the server's stores, the RPC surface, signed blob URLs,
    the watch stream and the dashboard.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
@@ -474,3 +503,7 @@ stores to the same contract. `CliTests` drives the command line in-process on lo
 command line across two clones, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, and every dashboard page.
 `GitInteropTests` imports several repositories with interleaved history and exports mainline back, incrementally.
+`CloneCacheTests` covers the clone cache with a stand-in cloner on every platform (clones, fallbacks, the setting,
+pruning, status); `DevDriveTests` clone for real on the volume named by `BASSIA_TEST_DEVDRIVE_DIR` - the
+`Dev Drive (Windows)` CI job formats a VHD as a Dev Drive (plain ReFS where it cannot) for them; without the variable
+they check nothing.

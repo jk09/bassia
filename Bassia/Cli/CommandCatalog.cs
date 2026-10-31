@@ -16,7 +16,7 @@ internal static class CommandCatalog
 		"status", "version", "help", "config list", "config get",
 		"workspace list", "workspace show", "workspace status", "workspace diff", "workspace check", "workspace log",
 		"mainline log", "mainline show", "mainline ls", "mainline cat", "mainline changed",
-		"lease list", "agent list", "agent show", "agent logs", "agent wait", "scrub", "web"
+		"lease list", "devdrive status", "agent list", "agent show", "agent logs", "agent wait", "scrub", "web"
 	};
 
 	/// <summary>Commands meant for a person: feedback asks before anything leaves the machine, the dashboard serves until Ctrl-C.</summary>

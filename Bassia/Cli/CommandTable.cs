@@ -202,11 +202,19 @@ internal static class CommandTable
 		new("export", null, "Export mainline into a git repository with git fast-import, incrementally: one git commit per landing, with a Change-Id trailer.",
 			[new("git", "dir", "The git repository (created if missing).", Required: true), new("branch", "name", "The branch (default main).")],
 			["bassia export -git ../acme-mirror"], MonorepoCommands.ExportAsync),
-		new("gc", null, "Sweep blobs no retained operation reaches (older than the grace period); prune closed workspaces past retention.",
+		new("gc", null, "Sweep blobs no retained operation reaches (older than the grace period); prune closed workspaces past retention and the clone cache.",
 			[new("dry-run", null, "Only report."), new("grace-hours", "n", "Default gc.grace_hours."), new("retention-days", "n", "Default gc.retention_days.")],
 			["bassia gc -dry-run", "bassia gc"], MonorepoCommands.GcAsync),
 		new("scrub", null, "Re-hash stored blobs and report any whose bytes do not match their id.", [new("sample", "n", "Check only n random blobs.")],
 			["bassia scrub -sample 1000"], MonorepoCommands.ScrubAsync),
+		new("devdrive", "status", "Whether workspaces in a folder are block-cloned on a Windows Dev Drive (copy-on-write, no bytes written), and why not.",
+			[new("path", "dir", "The folder (default: where workspaces go, workspace.dir).")],
+			["bassia devdrive status", "bassia devdrive status -path D:\\acme\\workspaces"], MonorepoCommands.DevDriveStatusAsync, Positional: "path",
+			Details: "On a Dev Drive (Windows 11 24H2 / Windows Server 2025 or later; any ReFS volume with block cloning), Bassia keeps one copy of each " +
+				"file's content in .bassia/clones and block-clones it into workspaces on the same volume: creating a workspace costs metadata, not the " +
+				"files' bytes, and an edited file reallocates only what was written. Put the monorepo folder on the Dev Drive; workspace.clone = off " +
+				"turns it off. Files under 8 KiB are written directly. Creating a Dev Drive needs an administrator: Settings > System > Storage > Disks & " +
+				"volumes > Create dev drive, or Format-Volume -DevDrive."),
 		new("web", null, "Serve the dashboard: workspaces and whether they can land, live runs, mainline, conflicts and leases.",
 			[new("port", "n", "The port (default 8080, or the next free one)."), new("no-open", null, "Do not open the browser.")],
 			["bassia web", "bassia web -port 9000 -no-open"], WebCommand.RunAsync),

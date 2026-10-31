@@ -62,6 +62,17 @@ public sealed class TreeState
 	}
 }
 
+/// <summary>
+/// Writes a file's content somewhere cheaper than streaming it from the object store - for example by block-cloning
+/// it from a local cache on a copy-on-write volume (Windows Dev Drive). It may decline; the provider then writes the
+/// file itself.
+/// </summary>
+public interface IFileMaterializer
+{
+	/// <summary>Creates <paramref name="destination"/> (which does not exist) with the leaf's content; false when it did not.</summary>
+	Task<bool> TryWriteAsync(Leaf leaf, string destination, CancellationToken ct = default);
+}
+
 /// <summary>What a scan of the working directory found: the path changes to snapshot and the paths it hashed.</summary>
 public sealed record ScanResult(IReadOnlyList<PathChange> Changes, int Hashed, int Unchanged);
 
@@ -94,6 +105,14 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 	/// mode its tree recorded: a snapshot must not read "not executable" from a file system that cannot say.
 	/// </summary>
 	public bool TracksExecutable { get; init; } = !OperatingSystem.IsWindows();
+
+	/// <summary>Tried first for every file; null writes every file from the store.</summary>
+	public IFileMaterializer? Materializer { get; init; }
+
+	/// <summary>Files the materializer created, and files written from the store, by this provider.</summary>
+	public int Materialized { get; private set; }
+
+	public int Written { get; private set; }
 
 	private string Full(string path) => Path.Combine(Root, path.Replace('/', Path.DirectorySeparatorChar));
 
@@ -153,9 +172,18 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		}
 		else
 		{
-			await using (var stream = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None))
+			if (Materializer is not null && await TryMaterializeAsync(leaf, full, ct))
 			{
-				await repo.Objects.CopyContentAsync(leaf, stream, ct);
+				Materialized++;
+			}
+			else
+			{
+				await using (var stream = new FileStream(full, FileMode.Create, FileAccess.Write, FileShare.None))
+				{
+					await repo.Objects.CopyContentAsync(leaf, stream, ct);
+				}
+
+				Written++;
 			}
 
 			diskId = leaf.Id;
@@ -167,6 +195,28 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		}
 		var info = new FileInfo(full);
 		return new TreeStateEntry(leaf, LinkOrLength(info), Mtime(info), diskId);
+	}
+
+	private async Task<bool> TryMaterializeAsync(Leaf leaf, string full, CancellationToken ct)
+	{
+		try
+		{
+			if (await Materializer!.TryWriteAsync(leaf, full, ct))
+			{
+				return true;
+			}
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+		{
+			// The cheap way failed; the store still has the content.
+		}
+
+		if (File.Exists(full))
+		{
+			File.Delete(full);
+		}
+
+		return false;
 	}
 
 	/// <summary>A conflict as text with markers: the workspace's side, the base, then mainline's side.</summary>
