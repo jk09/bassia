@@ -31,14 +31,14 @@ and disk space. Everywhere else nothing changes. `bassia devdrive status` tells 
 - [x] Cloning is used only on Windows, when `workspace.clone` is `auto` (the default), the workspace folder is on
       the same volume as the cache, and the volume supports block cloning. A failed clone (e.g. too many references to
       a cluster) falls back to a copy, then to writing; nothing fails because cloning is unavailable. `off` disables it.
-- [ ] A cloned file edited in one workspace changes neither the cache nor another workspace (copy-on-write).
+- [x] A cloned file edited in one workspace changes neither the cache nor another workspace (copy-on-write).
 - [x] `workspace create`, `checkout` and `clone` report how many files were cloned and written.
 - [x] `bassia devdrive status [-path <dir>]` reports for a folder: the file system, whether it is a Dev Drive and
       trusted, whether it supports block cloning, whether workspaces of this monorepo there will be cloned (and why
       not), and the clone cache's size. Off Windows it says cloning is Windows-only.
 - [x] `bassia gc` (local monorepos and clones) prunes cache entries no local workspace and no file of mainline's head
       uses; in a clone it prunes only the cache.
-- [ ] Unit tests cover the cache, fallbacks, isolation and pruning on every platform with a stand-in cloner; a
+- [x] Unit tests cover the cache, fallbacks, isolation and pruning on every platform with a stand-in cloner; a
       Windows CI job creates a Dev Drive (ReFS VHD) and runs the real block cloning tests.
 - [x] `docs/reference.md` and `README.md` describe Dev Drive use.
 
@@ -68,7 +68,8 @@ the `workspace.clone` setting, pruning in `gc`. CI: a `windows-2025` job that cr
 - [x] Core hook, cloner, cache, wiring.
 - [x] CLI: status command, statistics, setting, gc.
 - [x] Tests with a stand-in cloner pass on Linux (149 tests); the Windows CI job and docs are written.
-- [ ] Real block cloning verified by the `Dev Drive (Windows)` CI job.
+- [x] Real block cloning verified by the `Dev Drive (Windows)` CI job on windows-2025: a VHD formatted as a trusted Dev
+      Drive (ReFS, block cloning supported); clone isolation and block-cloned workspaces pass.
 
 ## Validation
 
