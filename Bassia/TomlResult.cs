@@ -5,9 +5,9 @@ using Tomlyn.Model;
 
 /// <summary>
 /// Serializes a command result as the TOML document <c>bassia</c> prints for machine consumption. TOML (rather than
-/// JSON) keeps results in the same notation as everything else Bassia stores - <c>config.toml</c>,
-/// <c>components.toml</c>, <c>run.toml</c> - so a caller reading a result and a caller reading a run record use one
-/// parser and one vocabulary of snake_case keys.
+/// JSON) keeps results in the same notation as Bassia's own files - <c>config.toml</c>, <c>repo.toml</c>,
+/// <c>.bassia.toml</c> - so a caller reading a result and a caller reading a setting use one parser and one vocabulary
+/// of snake_case keys.
 /// </summary>
 internal static class TomlResult
 {

@@ -1,243 +1,559 @@
 namespace Bassia.Server;
 
-using System.Diagnostics;
-using System.Text.Json;
-using Bassia.Server.Api;
-using Bassia.Server.Auth;
-using Bassia.Storage;
-using Bassia.Storage.Cloud;
-using Bassia.Storage.Remote;
+using System.Diagnostics.Metrics;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Channels;
+using Amazon;
+using Amazon.S3;
+using Bassia.Core.Model;
+using Bassia.Core.Storage;
+using Bassia.Core.Version;
+using Bassia.Interop;
+using Bassia.Stores;
+using Bassia.Web;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
 
 /// <summary>
-/// The server as an ASP.NET Core app: health endpoints, the API (<c>/api/v1</c>, every request but <c>/info</c> and the
-/// login exchanges authenticated, every write replayed by its idempotency key), the git gateway (<c>/git</c>), and the
-/// dashboard for every signed-in user (<c>/</c>, with <c>/login</c> and the live changes at <c>/events</c>).
+/// The single-node server: the version core over the server's stores (a blob container - local disk or S3 - and
+/// SQLite for heads, path index and leases), the RPC surface clients' remote stores call, signed URLs so large chunks
+/// never pass through it, the landing service (the only writer of mainline), a watch stream, and the dashboard.
 /// </summary>
-internal static class ServerApp
+internal sealed class ServerApp : IAsyncDisposable
 {
-	public const string CallerItem = "bassia.caller";
+	public static readonly Meter Meter = new("Bassia.Server");
+	private static readonly Counter<long> Landings = Meter.CreateCounter<long>("bassia.landings", description: "Landing attempts by outcome");
+	private static readonly Counter<long> ObjectsStored = Meter.CreateCounter<long>("bassia.objects.stored", description: "Objects stored through the server");
+	private static readonly Counter<long> BytesServed = Meter.CreateCounter<long>("bassia.bytes.served", description: "Object bytes served by the server itself");
+	private static readonly Counter<long> Redirects = Meter.CreateCounter<long>("bassia.reads.redirected", description: "Reads sent to blob storage on a signed URL");
 
-	public static WebApplication Build(ServerState state, string? url = null)
+	private readonly ServerOptions options;
+	private readonly byte[] signingKey;
+	private readonly List<Channel<Api.WatchEvent>> watchers = [];
+	private readonly Lock watchGate = new();
+	private WebApplication? app;
+
+	public ServerApp(ServerOptions options)
 	{
-		var builder = WebApplication.CreateSlimBuilder();
-		builder.Logging.ClearProviders();
-		builder.WebHost.UseUrls(url ?? state.Config.Url);
-		builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = null);
-		if (Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") is { Length: > 0 })
+		this.options = options;
+		Directory.CreateDirectory(options.Data);
+		signingKey = LoadKey(Path.Combine(options.Data, "blob.key"));
+		State = new SqliteState(Path.Combine(options.Data, "state.db"));
+		if (options.Storage.Equals("s3", StringComparison.OrdinalIgnoreCase))
 		{
-			// The OTLP exporter reads its endpoint, protocol and interval from the OTEL_* variables.
-			builder.Services.AddOpenTelemetry()
-				.ConfigureResource(resource => resource.AddService(Environment.GetEnvironmentVariable("OTEL_SERVICE_NAME") ?? "bassia-server"))
-				.WithMetrics(metrics => metrics.AddMeter(ServerMetrics.MeterName, "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Server.Kestrel").AddOtlpExporter());
+			var client = options.Region is null ? new AmazonS3Client() : new AmazonS3Client(RegionEndpoint.GetBySystemName(options.Region));
+			var s3 = new S3ObjectStore(client, options.Bucket ?? throw new ArgumentException("-bucket is required with -storage s3."), options.BucketPrefix);
+			Blobs = s3;
+			Maintenance = s3;
+			S3 = s3;
+		}
+		else
+		{
+			var disk = new DiskObjectStore(Path.Combine(options.Data, "objects"));
+			disk.UploadUrls = (id, _) => new UploadTicket(id, SignedUrl(id, "put"), DateTimeOffset.UtcNow + UrlLifetime);
+			Blobs = disk;
+			Maintenance = disk;
+			Disk = disk;
 		}
 
-		var app = builder.Build();
+		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks);
+		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
+		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
+		Landing.Landed += landed => Publish(new Api.WatchEvent("landed", landed.Seq, landed.Prefixes, landed.Workspace, landed.Time));
+	}
 
-		app.Use((context, next) => LogAsync(state, context, next));
-		app.Use(ErrorsAsync);
-		app.Use((context, next) => AuthenticateAsync(state, context, next));
-		app.Use((context, next) => IdempotentAsync(state, context, next));
+	private static readonly TimeSpan UrlLifetime = TimeSpan.FromMinutes(30);
 
-		app.MapGet("/healthz", () => Results.Text("ok\n"));
-		app.MapGet("/readyz", async () =>
+	public SqliteState State { get; }
+
+	public IObjectStore Blobs { get; }
+
+	public IObjectStoreMaintenance Maintenance { get; }
+
+	public DiskObjectStore? Disk { get; }
+
+	public S3ObjectStore? S3 { get; }
+
+	public Repository Repo { get; }
+
+	public LandingService Landing { get; }
+
+	/// <summary>Where the server listens once started (the actual port when the options asked for port 0).</summary>
+	public string? Address { get; private set; }
+
+	private string PublicUrl => (options.PublicUrl ?? Address ?? options.Url).TrimEnd('/');
+
+	public async Task StartAsync()
+	{
+		await Repo.InitializeAsync("bassia-server");
+		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
+		builder.Logging.ClearProviders();
+		builder.WebHost.UseUrls(options.Url);
+		if (Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") is { Length: > 0 })
+		{
+			builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter(Meter.Name).AddOtlpExporter());
+		}
+
+		app = builder.Build();
+		var dashboard = new Dashboard(context => Task.FromResult(new DashboardScope(Repo, Landing, $"bassia-server · {options.Data}", ReadLogAsync,
+			Events: "/events")));
+		app.Use(AuthorizeAsync);
+		app.UseWhen(context => Dashboard.IsDashboardPath(context.Request.Path), branch => branch.Use(dashboard.ServeAsync));
+		dashboard.Map(app);
+		MapApi(app);
+		await app.StartAsync();
+		Address = app.Urls.First();
+	}
+
+	public Task WaitForShutdownAsync() => app!.WaitForShutdownAsync();
+
+	private async Task<string> ReadLogAsync(RunRecord run) =>
+		run.Log is { } id && await Blobs.ReadAsync(id) is { } bytes ? Encoding.UTF8.GetString(bytes.Span) : run.LastLine ?? "";
+
+	// ----- authorization -----
+
+	private async Task AuthorizeAsync(HttpContext context, RequestDelegate next)
+	{
+		var path = context.Request.Path;
+		if (options.Token is null || path.StartsWithSegments("/blobs") || path == "/healthz" || Dashboard.IsAsset(path))
+		{
+			await next(context);
+			return;
+		}
+
+		var presented = context.Request.Headers.Authorization.ToString() is { } header && header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..]
+			: context.Request.Query["token"].FirstOrDefault() ?? context.Request.Cookies["bassia_token"];
+		if (presented is not null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(options.Token)))
+		{
+			if (context.Request.Query.ContainsKey("token"))
+			{
+				context.Response.Cookies.Append("bassia_token", presented, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict });
+			}
+
+			await next(context);
+			return;
+		}
+
+		context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+		await context.Response.WriteAsJsonAsync(new Api.ErrorReply("A bearer token is required (or ?token=<token> once for the dashboard)."), Api.Json);
+	}
+
+	// ----- signed blob URLs -----
+
+	private static byte[] LoadKey(string file)
+	{
+		if (File.Exists(file))
+		{
+			return File.ReadAllBytes(file);
+		}
+
+		var key = RandomNumberGenerator.GetBytes(32);
+		File.WriteAllBytes(file, key);
+		return key;
+	}
+
+	private string Signature(ObjectId id, string operation, long expires) =>
+		Convert.ToHexStringLower(HMACSHA256.HashData(signingKey, Encoding.UTF8.GetBytes($"{operation}:{id.Hex}:{expires}")));
+
+	/// <summary>A URL that lets its holder read or write one blob until it expires, without the server's token: the disk store's presigned URL.</summary>
+	public Uri SignedUrl(ObjectId id, string operation)
+	{
+		var expires = (DateTimeOffset.UtcNow + UrlLifetime).ToUnixTimeSeconds();
+		return new Uri($"{PublicUrl}/blobs/{id.Hex}?op={operation}&exp={expires}&sig={Signature(id, operation, expires)}");
+	}
+
+	private bool Verify(ObjectId id, string operation, HttpRequest request) =>
+		request.Query["op"] == operation && long.TryParse(request.Query["exp"], out var expires) && expires >= DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+		&& CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(Signature(id, operation, expires)), Encoding.ASCII.GetBytes(request.Query["sig"].ToString()));
+
+	private async Task<Uri> ReadUrlAsync(ObjectId id) => S3 is not null ? await S3.ReadUrlAsync(id) : SignedUrl(id, "get");
+
+	// ----- watch -----
+
+	private void Publish(Api.WatchEvent change)
+	{
+		lock (watchGate)
+		{
+			foreach (var watcher in watchers)
+			{
+				watcher.Writer.TryWrite(change);
+			}
+		}
+	}
+
+	/// <summary>Publishes a moved workspace head to watchers (the dashboard refreshes on it).</summary>
+	private sealed class NotifyingViewStore(IViewStore inner, ServerApp server) : IViewStore
+	{
+		public ValueTask<ObjectId?> GetHeadAsync(HeadName name, CancellationToken ct = default) => inner.GetHeadAsync(name, ct);
+
+		public async ValueTask<HeadUpdate> AdvanceHeadAsync(HeadName name, ObjectId? expected, ObjectId next, CancellationToken ct = default)
+		{
+			var update = await inner.AdvanceHeadAsync(name, expected, next, ct);
+			if (update.Success && name.IsWorkspace)
+			{
+				server.Publish(new Api.WatchEvent("workspace", Workspace: name.WorkspaceId, Time: DateTimeOffset.UtcNow));
+			}
+
+			return update;
+		}
+
+		public IAsyncEnumerable<(HeadName Name, ObjectId Head)> ListHeadsAsync(string prefix = "", CancellationToken ct = default) => inner.ListHeadsAsync(prefix, ct);
+
+		public ValueTask<bool> DeleteHeadAsync(HeadName name, ObjectId expected, CancellationToken ct = default) => inner.DeleteHeadAsync(name, expected, ct);
+	}
+
+	private async Task WatchAsync(HttpContext context)
+	{
+		var channel = Channel.CreateBounded<Api.WatchEvent>(new BoundedChannelOptions(256) { FullMode = BoundedChannelFullMode.DropOldest });
+		lock (watchGate)
+		{
+			watchers.Add(channel);
+		}
+
+		try
+		{
+			context.Response.ContentType = "text/event-stream";
+			context.Response.Headers.CacheControl = "no-cache";
+			await context.Response.WriteAsync(": watching\n\n", context.RequestAborted);
+			await context.Response.Body.FlushAsync(context.RequestAborted);
+			await foreach (var change in channel.Reader.ReadAllAsync(context.RequestAborted))
+			{
+				var json = System.Text.Json.JsonSerializer.Serialize(change, Api.Json);
+				await context.Response.WriteAsync($"event: change\ndata: {json}\n\n", context.RequestAborted);
+				await context.Response.Body.FlushAsync(context.RequestAborted);
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		finally
+		{
+			lock (watchGate)
+			{
+				watchers.Remove(channel);
+			}
+		}
+	}
+
+	// ----- API -----
+
+	private static IResult Json(object value) => Results.Json(value, Api.Json);
+
+	private static IResult Error(int status, string message) => Results.Json(new Api.ErrorReply(message), Api.Json, statusCode: status);
+
+	private static async Task<T> BodyAsync<T>(HttpRequest request) =>
+		await request.ReadFromJsonAsync<T>(Api.Json) ?? throw new BadHttpRequestException("A JSON body is required.");
+
+	private static bool TryId(string text, out ObjectId id) => ObjectId.TryParse(text, out id);
+
+	private void MapApi(WebApplication web)
+	{
+		web.MapGet("/healthz", () => Results.Text("ok"));
+		web.MapGet("/events", WatchAsync);
+		var api = web.MapGroup(Api.Prefix);
+		api.AddEndpointFilter(async (context, next) =>
 		{
 			try
 			{
-				await state.Database.QueryAsync("SELECT 1;", reader => reader.GetValue(0));
-				await state.Meta.GitAsync();
-				return Results.Text("ready\n");
+				return await next(context);
 			}
-			catch (Exception ex)
+			catch (Exception ex) when (ex is VersionException or MonorepoException or InvalidDataException or BadHttpRequestException or System.Text.Json.JsonException)
 			{
-				return Results.Text($"not ready: {ex.Message}\n", statusCode: StatusCodes.Status503ServiceUnavailable);
+				return Error(StatusCodes.Status400BadRequest, ex.Message);
 			}
 		});
 
-		var api = app.MapGroup(Bassia.Storage.Remote.Api.Prefix);
-		IdentityEndpoints.Map(api, state);
-		MetaEndpoints.Map(api, state);
-		StateEndpoints.Map(api, state);
-		ComponentEndpoints.Map(api, state);
-		AccessEndpoints.Map(api, state);
+		api.MapGet("/info", () => Json(new Api.Info("bassia-server", typeof(ServerApp).Assembly.GetName().Version?.ToString() ?? "0", options.Chunks.Min, options.Chunks.Average,
+			options.Chunks.Max, options.Storage)));
+		api.MapGet("/watch", WatchAsync);
 
-		new GitGateway(state.GitHost, new ServerGatewayPolicy(state)).Map(app);
-		Web.ServerDashboard.Map(app, state);
-
-		// Every instance follows the change table for the browsers connected to it.
-		app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(() => state.Changes.RunAsync(app.Lifetime.ApplicationStopping)));
-		return app;
-	}
-
-	public static Caller CallerOf(HttpContext context) => (Caller)context.Items[CallerItem]!;
-
-	public static string RemoteOf(HttpContext context) => context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-
-	public static IResult Error(int status, string message) => Results.Json(new ErrorBody(message), Bassia.Storage.Remote.Api.Json, statusCode: status);
-
-	public static IResult Json<T>(T value) => Results.Json(value, Bassia.Storage.Remote.Api.Json);
-
-	/// <summary>Whether the path is an API path anyone may call: the server's description and the login exchanges.</summary>
-	private static bool IsOpen(PathString path) =>
-		path.StartsWithSegments(Bassia.Storage.Remote.Api.Prefix + "/info") || path.StartsWithSegments(Bassia.Storage.Remote.Api.Prefix + "/auth");
-
-	private static async Task AuthenticateAsync(ServerState state, HttpContext context, RequestDelegate next)
-	{
-		if (context.Request.Path.StartsWithSegments(Bassia.Storage.Remote.Api.Prefix) && !IsOpen(context.Request.Path))
+		// GetHead: mainline's head and seq.
+		api.MapGet("/main", async () =>
 		{
-			if (await state.Authenticator.AuthenticateAsync(context.Request) is not { } caller)
+			var main = await Repo.GetMainAsync();
+			return Json(new Api.MainReply(main.Head, main.Seq, main.CommitId, main.Tree));
+		});
+
+		// Heads (the view store).
+		api.MapGet("/heads/{*name}", async (string name) => Json(new Api.HeadReply(await State.GetHeadAsync(new HeadName(Uri.UnescapeDataString(name))))));
+		api.MapGet("/heads", async (string? prefix) =>
+		{
+			var list = new List<Api.HeadEntry>();
+			await foreach (var (name, head) in State.ListHeadsAsync(prefix ?? ""))
 			{
-				var reason = Authenticator.TokenOf(context.Request) is { } token ? await ReasonAsync(state, token) : "No credential: log in with 'bassia login'.";
-				await Error(StatusCodes.Status401Unauthorized, reason).ExecuteAsync(context);
-				return;
+				list.Add(new Api.HeadEntry(name.Value, head));
 			}
 
-			context.Items[CallerItem] = caller;
-		}
-
-		await next(context);
-	}
-
-	private static async Task<string> ReasonAsync(ServerState state, string token)
-	{
-		try
+			return Json(list);
+		});
+		api.MapPost("/heads/advance", async (HttpRequest request) =>
 		{
-			await state.Authenticator.AuthenticateAsync(token);
-			return "Not authenticated.";
-		}
-		catch (AuthException ex)
-		{
-			return ex.Message;
-		}
-	}
-
-	/// <summary>An expected failure is an error reply with its message, not a broken connection.</summary>
-	private static async Task ErrorsAsync(HttpContext context, RequestDelegate next)
-	{
-		try
-		{
-			await next(context);
-		}
-		catch (Exception ex) when (!context.Response.HasStarted && Status(ex) is { } status)
-		{
-			context.Response.Clear();
-			if (ex is BranchesMovedException moved)
+			var body = await BodyAsync<Api.AdvanceRequest>(request);
+			var name = new HeadName(body.Name);
+			if (name == HeadName.Main)
 			{
-				await Results.Json(new LandRefused(moved.Message, moved.Moved), Bassia.Storage.Remote.Api.Json, statusCode: status).ExecuteAsync(context);
-				return;
+				return Error(StatusCodes.Status403Forbidden, "Only the landing service advances mainline; call land.");
 			}
 
-			await Error(status, ex.Message).ExecuteAsync(context);
-		}
-		catch (Exception ex) when (!context.Response.HasStarted && ex is not OperationCanceledException)
-		{
-			Console.Error.WriteLine(JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow.ToString("O"), path = context.Request.Path.Value, error = ex.ToString() }));
-			context.Response.Clear();
-			await Error(StatusCodes.Status500InternalServerError, $"The server failed: {ex.GetType().Name}: {ex.Message}").ExecuteAsync(context);
-		}
-	}
-
-	private static int? Status(Exception ex) => ex switch
-	{
-		ForbiddenException => StatusCodes.Status403Forbidden,
-		NotFoundException => StatusCodes.Status404NotFound,
-		AuthException => StatusCodes.Status401Unauthorized,
-		StorageException => StatusCodes.Status409Conflict,
-		MonorepoException or ArgumentException or ServerConfigException or JsonException or BadHttpRequestException => StatusCodes.Status400BadRequest,
-		_ => null
-	};
-
-	/// <summary>
-	/// A write with an idempotency key is done once: its reply is kept, and a retry with the same key (the client's,
-	/// after losing the reply) gets the kept reply without the write happening again.
-	/// </summary>
-	private static async Task IdempotentAsync(ServerState state, HttpContext context, RequestDelegate next)
-	{
-		if (HttpMethods.IsGet(context.Request.Method) || context.Request.Headers[Bassia.Storage.Remote.Api.IdempotencyHeader].FirstOrDefault() is not { Length: > 0 } key
-			|| context.Items[CallerItem] is not Caller caller)
-		{
-			await next(context);
-			return;
-		}
-
-		if (await state.Access.ReplyOfAsync(key, caller.Id) is { } kept)
-		{
-			context.Response.StatusCode = kept.Status;
-			context.Response.ContentType = "application/json";
-			await context.Response.WriteAsync(kept.Body);
-			return;
-		}
-
-		var original = context.Response.Body;
-		using var captured = new MemoryStream();
-		context.Response.Body = captured;
-		try
-		{
-			await next(context);
-		}
-		finally
-		{
-			context.Response.Body = original;
-		}
-
-		captured.Position = 0;
-		if (context.Response.StatusCode < 500 && context.Response.StatusCode != StatusCodes.Status409Conflict)
-		{
-			await state.Access.RememberAsync(key, caller.Id, context.Response.StatusCode, System.Text.Encoding.UTF8.GetString(captured.ToArray()));
-		}
-
-		await captured.CopyToAsync(original);
-	}
-
-	/// <summary>
-	/// One JSON line per request: when, what, how it ended, how long it took, and for whom; and the request's metrics -
-	/// its duration by route, and for the git gateway the bytes that went in and out.
-	/// </summary>
-	private static async Task LogAsync(ServerState state, HttpContext context, RequestDelegate next)
-	{
-		var clock = Stopwatch.StartNew();
-		var git = context.Request.Path.StartsWithSegments("/git");
-		CountingStream? received = null, sent = null;
-		Stream? body = null;
-		if (git)
-		{
-			context.Request.Body = received = new CountingStream(context.Request.Body);
-			body = context.Response.Body;
-			context.Response.Body = sent = new CountingStream(body);
-		}
-
-		try
-		{
-			await next(context);
-		}
-		finally
-		{
-			var status = context.Response.StatusCode;
-			ServerMetrics.RequestDuration.Record(clock.Elapsed.TotalSeconds, ServerMetrics.Tag("method", context.Request.Method),
-				ServerMetrics.Tag("route", ServerMetrics.RouteOf(context)), ServerMetrics.Tag("status", status));
-			if (git)
+			if (!name.IsWorkspace && !name.Value.StartsWith("pin/", StringComparison.Ordinal))
 			{
-				context.Response.Body = body!;
-				var service = ServerMetrics.GitServiceOf(context.Request);
-				ServerMetrics.GitRequests.Add(1, ServerMetrics.Tag("service", service), ServerMetrics.Tag("status", status));
-				ServerMetrics.GitBytes.Add(received!.Count, ServerMetrics.Tag("service", service), ServerMetrics.Tag("direction", "in"));
-				ServerMetrics.GitBytes.Add(sent!.Count, ServerMetrics.Tag("service", service), ServerMetrics.Tag("direction", "out"));
+				return Error(StatusCodes.Status400BadRequest, $"'{name}' is not a head a client may move.");
 			}
 
-			if (state.Config.RequestLog)
+			// The operation and its view must be stored and well formed before a head may point at them.
+			var op = await Repo.Objects.ReadOperationAsync(body.Next);
+			await Repo.Objects.ReadViewAsync(op.View);
+			var update = await Repo.Views.AdvanceHeadAsync(name, body.Expected, body.Next);
+			return Json(new Api.AdvanceReply(update.Success, update.Current));
+		});
+		api.MapPost("/heads/delete", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.DeleteHeadRequest>(request);
+			var name = new HeadName(body.Name);
+			return name == HeadName.Main ? Error(StatusCodes.Status403Forbidden, "Mainline cannot be deleted.") : Json(new Api.AdvanceReply(await State.DeleteHeadAsync(name, body.Expected), null));
+		});
+
+		// Objects.
+		api.MapPost("/objects/have", async (HttpRequest request) => Json(new Api.HaveReply(await Blobs.HasAsync((await BodyAsync<Api.IdsRequest>(request)).Ids))));
+		api.MapGet("/objects/{id}/stat", async (string id) =>
+			TryId(id, out var objectId) && await Blobs.StatAsync(objectId) is { } stat ? Json(new Api.StatReply(stat.Length)) : Error(404, $"No object {id}."));
+		api.MapGet("/objects/{id}", ReadObjectAsync);
+		api.MapPut("/objects/{id}", PutObjectAsync);
+		api.MapPost("/objects/batch", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.BatchRequest>(request);
+			var result = new List<Api.BatchObject>();
+			var pending = new Queue<(ObjectId Id, int Depth)>(body.Ids.Select(id => (id, 0)));
+			var seen = new HashSet<ObjectId>();
+			while (pending.TryDequeue(out var item) && result.Count < 5000)
 			{
-				Console.Out.WriteLine(JsonSerializer.Serialize(new
+				if (!seen.Add(item.Id) || await Blobs.ReadAsync(item.Id) is not { } bytes || ObjectCodec.TypeOf(bytes) is null)
 				{
-					time = DateTimeOffset.UtcNow.ToString("O"),
-					method = context.Request.Method,
-					path = context.Request.Path.Value,
-					status = context.Response.StatusCode,
-					ms = Math.Round(clock.Elapsed.TotalMilliseconds, 1),
-					user = (context.Items[CallerItem] as Caller)?.Id,
-					remote = RemoteOf(context)
-				}));
+					continue;
+				}
+
+				result.Add(new Api.BatchObject(item.Id, Convert.ToBase64String(bytes.Span)));
+				if (item.Depth < body.Depth && ObjectCodec.Decode(bytes) is Tree tree)
+				{
+					foreach (var entry in tree.Entries.Where(entry => entry.Kind == EntryKind.Tree))
+					{
+						pending.Enqueue((entry.Id, item.Depth + 1));
+					}
+				}
 			}
+
+			return Json(new Api.BatchReply(result));
+		});
+		api.MapPost("/objects/upload-urls", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.UploadRequest>(request);
+			var urls = new List<Api.UrlEntry>();
+			for (var index = 0; index < body.Ids.Count; index++)
+			{
+				var ticket = await Blobs.BeginUploadAsync(body.Ids[index], index < body.Lengths.Count ? body.Lengths[index] : 0);
+				urls.Add(new Api.UrlEntry(ticket.Id, ticket.Url?.ToString(), ticket.Expires));
+			}
+
+			return Json(new Api.UrlsReply(urls));
+		});
+		api.MapPost("/objects/read-urls", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.IdsRequest>(request);
+			var urls = new List<Api.UrlEntry>();
+			foreach (var id in body.Ids)
+			{
+				urls.Add(new Api.UrlEntry(id, (await ReadUrlAsync(id)).ToString(), DateTimeOffset.UtcNow + UrlLifetime));
+			}
+
+			return Json(new Api.UrlsReply(urls));
+		});
+
+		// Path index (StatPaths, ChangedSince).
+		api.MapPost("/paths/stat", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.StatPathsRequest>(request);
+			await IndexAsync();
+			var versions = new List<Api.VersionDto?>();
+			foreach (var path in body.Paths)
+			{
+				versions.Add(await State.GetAsync(path, body.Seq) is { } version ? Api.VersionDto.From(version) : null);
+			}
+
+			return Json(new Api.StatPathsReply(versions));
+		});
+		api.MapGet("/paths/list", async (string? dir, long seq) =>
+		{
+			await IndexAsync();
+			var list = new List<Api.ListingDto>();
+			await foreach (var item in State.ListAsync(dir ?? "", seq))
+			{
+				list.Add(new Api.ListingDto(item.Path, item.IsDirectory, item.Version is null ? null : Api.VersionDto.From(item.Version)));
+			}
+
+			return Json(list);
+		});
+		api.MapGet("/paths/changed", async (string? prefix, long after) =>
+		{
+			await IndexAsync();
+			var list = new List<Api.VersionDto>();
+			await foreach (var version in State.ChangedSinceAsync(prefix ?? "", after))
+			{
+				list.Add(Api.VersionDto.From(version));
+			}
+
+			return Json(list);
+		});
+		api.MapGet("/paths/indexed", async () =>
+		{
+			await IndexAsync();
+			return Json(new Api.SeqReply(await State.IndexedSeqAsync()));
+		});
+
+		// Leases.
+		api.MapPost("/leases/acquire", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.AcquireRequest>(request);
+			var wait = TimeSpan.FromSeconds(Math.Clamp(body.WaitSeconds, 0, 3600));
+			var result = await State.AcquireAsync(new LeaseRequest(body.Prefix, body.Mode, body.Owner, TimeSpan.FromSeconds(Math.Max(1, body.TtlSeconds)), wait, body.Run),
+				request.HttpContext.RequestAborted);
+			return Json(new Api.LeaseReply(result.Lease, result.Blocking));
+		});
+		api.MapPost("/leases/renew", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.RenewRequest>(request);
+			return Json(new Api.LeaseReply(await State.RenewAsync(body.Id, body.Token, TimeSpan.FromSeconds(Math.Max(1, body.TtlSeconds))), []));
+		});
+		api.MapPost("/leases/release", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.ReleaseRequest>(request);
+			await State.ReleaseAsync(body.Id, body.Token);
+			return Json(new Api.LeaseReply(null, []));
+		});
+		api.MapGet("/leases", async (string? prefix) => Json(await State.ListAsync(prefix)));
+		api.MapGet("/leases/{id}", async (string id) => Json(new Api.LeaseReply(await State.GetAsync(id), [])));
+
+		// Land.
+		api.MapPost("/land", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.LandRequestDto>(request);
+			var result = await Landing.LandAsync(body.ToRequest());
+			Landings.Add(1, new KeyValuePair<string, object?>("outcome", result.Outcome));
+			return Json(result);
+		});
+
+		// Signed blob access: the disk store's stand-in for presigned cloud URLs.
+		web.MapGet("/blobs/{id}", async (string id, HttpRequest request, HttpResponse response) =>
+		{
+			if (Disk is null || !TryId(id, out var objectId) || !Verify(objectId, "get", request))
+			{
+				return Error(StatusCodes.Status403Forbidden, "The signature is invalid or expired.");
+			}
+
+			var path = Disk.PathOf(objectId);
+			return File.Exists(path) ? Results.File(path, "application/octet-stream", enableRangeProcessing: true) : Error(404, $"No object {id}.");
+		});
+		web.MapPut("/blobs/{id}", async (string id, HttpRequest request) =>
+		{
+			if (Disk is null || !TryId(id, out var objectId) || !Verify(objectId, "put", request))
+			{
+				return Error(StatusCodes.Status403Forbidden, "The signature is invalid or expired.");
+			}
+
+			var bytes = await ReadBodyAsync(request);
+			if (ObjectId.Of(bytes) != objectId)
+			{
+				return Error(StatusCodes.Status400BadRequest, "The bytes do not hash to the object's id.");
+			}
+
+			await Disk.PutAsync(objectId, bytes);
+			ObjectsStored.Add(1);
+			return Results.NoContent();
+		});
+	}
+
+	private async Task IndexAsync() => await Repo.EnsureIndexedAsync(await Repo.GetMainAsync());
+
+	private static async Task<byte[]> ReadBodyAsync(HttpRequest request)
+	{
+		using var buffer = new MemoryStream();
+		await request.Body.CopyToAsync(buffer, request.HttpContext.RequestAborted);
+		return buffer.ToArray();
+	}
+
+	/// <summary>Serves an object: small ones and structural objects directly, large chunks by redirect to a signed URL.</summary>
+	private async Task<IResult> ReadObjectAsync(string id, HttpRequest request)
+	{
+		if (!TryId(id, out var objectId) || await Blobs.StatAsync(objectId) is not { } stat)
+		{
+			return Error(404, $"No object {id}.");
+		}
+
+		if (stat.Length >= ServerConnection.DirectTransferThreshold)
+		{
+			Redirects.Add(1);
+			return Results.Redirect((await ReadUrlAsync(objectId)).ToString(), permanent: false, preserveMethod: true);
+		}
+
+		ByteRange? range = null;
+		if (RangeHeaderValue.TryParse(request.Headers.Range.ToString(), out var header) && header.Ranges.FirstOrDefault() is { From: { } from } item)
+		{
+			range = new ByteRange(from, (item.To ?? stat.Length - 1) - from + 1);
+		}
+
+		var bytes = await Blobs.ReadAsync(objectId, range);
+		if (bytes is null)
+		{
+			return Error(404, $"No object {id}.");
+		}
+
+		BytesServed.Add(bytes.Value.Length);
+		return Results.Bytes(bytes.Value.ToArray(), "application/octet-stream");
+	}
+
+	/// <summary>
+	/// Stores an object sent through the server. Structural objects (tree, file, conflict, commit, operation, view) are
+	/// decoded and so validated synchronously; chunks need only hash to their id.
+	/// </summary>
+	private async Task<IResult> PutObjectAsync(string id, HttpRequest request)
+	{
+		if (!TryId(id, out var objectId))
+		{
+			return Error(StatusCodes.Status400BadRequest, $"'{id}' is not an object id.");
+		}
+
+		var bytes = await ReadBodyAsync(request);
+		if (ObjectId.Of(bytes) != objectId)
+		{
+			return Error(StatusCodes.Status400BadRequest, "The bytes do not hash to the object's id.");
+		}
+
+		if (ObjectCodec.TypeOf(bytes) is not null)
+		{
+			try
+			{
+				ObjectCodec.Decode(bytes);
+			}
+			catch (InvalidDataException ex)
+			{
+				return Error(StatusCodes.Status400BadRequest, $"Refused a malformed object: {ex.Message}");
+			}
+		}
+
+		await Blobs.PutAsync(objectId, bytes);
+		ObjectsStored.Add(1);
+		return Results.NoContent();
+	}
+
+	public async ValueTask DisposeAsync()
+	{
+		if (app is not null)
+		{
+			await app.StopAsync();
+			await app.DisposeAsync();
 		}
 	}
 }

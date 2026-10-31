@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, main-client-server]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -56,53 +56,11 @@ jobs:
           ./packaging/Get-Weave.ps1 -Rid linux-x64 -Destination "$env:RUNNER_TEMP/weave"
           "$env:RUNNER_TEMP/weave" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-      # The end-to-end tests clone their components from BASSIA_E2E_COMPONENT_URL; a local upstream keeps them
-      # independent of the network and of the (private) default one.
-      - name: Create the end-to-end upstream
-        run: |
-          upstream="$RUNNER_TEMP/e2e-upstream"
-          git init -q -b main "$upstream"
-          printf '# example\n' > "$upstream/README.md"
-          printf '*.o\n*.out\n' > "$upstream/.gitignore"
-          git -C "$upstream" add .
-          git -C "$upstream" -c user.name='Bassia CI' -c user.email=ci@bassia.invalid commit -q -m 'Initial commit'
-          echo "BASSIA_E2E_COMPONENT_URL=$upstream" >> "$GITHUB_ENV"
-
       - name: Build
         run: dotnet build --configuration Release
 
       - name: Test
         run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
-
-  infrastructure:
-    name: Infrastructure
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: deploy/aws/package-lock.json
-
-      # The CDK app of bassia-b9581afe: its assertion tests, and both environments synthesized.
-      - name: Test and synthesize the AWS deployment
-        working-directory: deploy/aws
-        run: |
-          npm ci --no-audit --no-fund
-          npm test
-          npx cdk synth --quiet -c env=production
-          npx cdk synth --quiet -c env=staging -o cdk.out.staging
-
-      # The images are built on every change, so a release never finds a broken Dockerfile; they are published by
-      # .github/workflows/deploy.yml.
-      - name: Build the server and worker images
-        run: |
-          docker build --file deploy/docker/server.Dockerfile --tag bassia-server:ci .
-          docker build --file deploy/docker/worker.Dockerfile --tag bassia-worker:ci .
-          docker run --rm bassia-server:ci help
 
   package:
     name: Package (${{ matrix.rid }})

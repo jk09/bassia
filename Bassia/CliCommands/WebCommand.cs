@@ -1,4 +1,4 @@
-namespace Bassia;
+namespace Bassia.CliCommands;
 
 using System.Diagnostics;
 using System.Net;
@@ -8,48 +8,37 @@ using Bassia.Web;
 using Microsoft.Extensions.Hosting;
 
 /// <summary>
-/// <c>bassia web</c>: serves the read-only web dashboard over the monorepo the current directory belongs to, on the
-/// loopback interface only, until Ctrl-C. Everything it shows is changed with the command line.
+/// <c>bassia web</c>: serves the read-only dashboard over the monorepo the current folder belongs to (a local monorepo or
+/// a clone of a server), on the loopback interface only, until Ctrl-C.
 /// </summary>
 internal static class WebCommand
 {
 	public const int DefaultPort = 8080;
 
-	/// <summary>How many ports after the requested one are tried when it is taken.</summary>
 	private const int PortAttempts = 20;
 
 	public static async Task<int> RunAsync(Invocation invocation)
 	{
 		var port = invocation.Int("port", DefaultPort, 1, 65535);
-		var open = !invocation.Has("no-open");
-
-		var root = Monorepo.FindRoot(Environment.CurrentDirectory);
-		if (root is null)
-		{
-			return ProgramCli.WriteResult(false, "web", $"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' first.");
-		}
-
-		Monorepo monorepo;
-		try
-		{
-			monorepo = Monorepo.Load(root);
-		}
-		catch (MonorepoException ex)
-		{
-			return ProgramCli.WriteResult(false, "web", ex.Message);
-		}
-
+		using var monorepo = Monorepo.Current();
 		if (FreePort(port) is not { } free)
 		{
 			return ProgramCli.WriteResult(false, "web", $"No free port in {port}-{port + PortAttempts - 1} on 127.0.0.1; choose one with -port.");
 		}
 
 		var url = $"http://127.0.0.1:{free}/";
-		await using var app = new Dashboard(monorepo).Build(url);
+		var runner = new Agents.AgentRunner(monorepo);
+		var settings = MonorepoConfig.Keys.Select(key =>
+		{
+			var (value, source) = monorepo.Config.Resolve(key.Key);
+			return (key.Key, key.Key == "server.token" && value.Length > 0 ? "(set)" : value, source);
+		}).ToList();
+		var scope = new DashboardScope(monorepo.Repo, monorepo.Landing, monorepo.IsRemote ? $"{monorepo.Root} (clone of {monorepo.Url})" : monorepo.Root,
+			run => runner.ReadLogAsync(run), Settings: settings);
+		await using var app = new Dashboard(_ => Task.FromResult(scope)).Build(url);
 		await app.StartAsync();
-
-		Console.Error.WriteLine($"bassia: dashboard for '{root}' at {url} (Ctrl-C stops it).");
-		if (open)
+		Console.Error.WriteLine($"bassia: dashboard for '{monorepo.Root}' at {url} (Ctrl-C stops it).");
+		if (!invocation.Has("no-open"))
 		{
 			OpenBrowser(url);
 		}
@@ -71,30 +60,28 @@ internal static class WebCommand
 			}
 			catch (SocketException)
 			{
-				// Taken; try the next one.
 			}
 		}
 
 		return null;
 	}
 
-	/// <summary>Best effort: a machine without a browser (or a display) still gets the URL on stderr. <c>BROWSER</c> names the browser to use.</summary>
-	internal static void OpenBrowser(string url)
+	private static void OpenBrowser(string url)
 	{
 		try
 		{
-			// BROWSER, as many command line tools honor it: the program to open URLs with.
-			var startInfo = Environment.GetEnvironmentVariable("BROWSER") is { Length: > 0 } browser ? new ProcessStartInfo(browser, [url])
-				: OperatingSystem.IsWindows() ? new ProcessStartInfo(url) { UseShellExecute = true }
-				: OperatingSystem.IsMacOS() ? new ProcessStartInfo("open", url)
-				: new ProcessStartInfo("xdg-open", url);
-			startInfo.RedirectStandardError = !startInfo.UseShellExecute;
-			startInfo.RedirectStandardOutput = !startInfo.UseShellExecute;
-			Process.Start(startInfo)?.Dispose();
+			if (OperatingSystem.IsWindows())
+			{
+				Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+			}
+			else
+			{
+				Process.Start(OperatingSystem.IsMacOS() ? "open" : "xdg-open", url);
+			}
 		}
-		catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or PlatformNotSupportedException)
+		catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
 		{
-			// No browser to open; the URL is printed.
+			// No browser here; the URL is printed.
 		}
 	}
 }

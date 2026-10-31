@@ -13,12 +13,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Bassia.Core\Bassia.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.109.2" />
     <PackageReference Include="AWSSDK.S3" Version="4.0.104.7" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
     <PackageReference Include="Tomlyn.Signed" Version="2.10.1" />
   </ItemGroup>
 

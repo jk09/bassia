@@ -1,209 +1,221 @@
 namespace Bassia;
 
-/// <summary>
-/// A component registered in the meta-repo's <c>components.toml</c>. <paramref name="References"/> are the
-/// outgoing edges of the (acyclic) component reference graph: components this one nests as subfolders.
-/// </summary>
-/// <remarks>
-/// <paramref name="ForkOf"/> and <paramref name="ForkCommit"/> name the component this one was forked from and the commit it
-/// forked at. <see cref="Tags"/>, <see cref="Visibility"/> and <see cref="Owners"/> place it in the monorepo's architecture:
-/// the boundary rules (<see cref="Core.Boundaries"/>) are written over tags.
-/// </remarks>
-internal sealed record ComponentDefinition(string Name, string Url, IReadOnlyList<ComponentReference> References, string? ForkOf = null, string? ForkCommit = null)
-{
-	/// <summary>Its tags (<c>type:lib</c>, <c>scope:billing</c>), besides the implicit <c>component:&lt;name&gt;</c>.</summary>
-	public IReadOnlyList<string> Tags { get; init; } = [];
+using Bassia.Core.Model;
+using Bassia.Core.Storage;
+using Bassia.Core.Version;
+using Bassia.Core.Workspaces;
+using Bassia.Interop;
+using Bassia.Stores;
+using Tomlyn;
+using Tomlyn.Model;
 
-	/// <summary>Tag patterns a referrer must match one of; null means anyone may reference it, empty means nobody.</summary>
-	public IReadOnlyList<string>? Visibility { get; init; }
-
-	/// <summary>Who owns it: people or teams, as the monorepo names them.</summary>
-	public IReadOnlyList<string> Owners { get; init; } = [];
-
-	/// <summary>
-	/// Its public API: path patterns (as in split plans) a referrer's code may use; null means every path is exported.
-	/// </summary>
-	public IReadOnlyList<string>? Exports { get; init; }
-}
-
-/// <summary>A nested component and the subfolder (relative to the referencing component) where it is expected.</summary>
-internal sealed record ComponentReference(string Name, string Path);
-
-internal class MonorepoException(string message) : Exception(message);
+/// <summary>A monorepo folder that cannot be opened, or a request it cannot serve.</summary>
+internal sealed class MonorepoException(string message) : Exception(message);
 
 /// <summary>
-/// The Bassia monorepo as laid out on disk: the <c>.bassia</c> meta-repo, its configuration and component registry,
-/// plus the derived workspace location.
+/// A monorepo folder on this machine: <c>.bassia/repo.toml</c> says whether it is a local monorepo (the version core
+/// runs in-process over a local-disk blob store and SQLite) or a clone of a <c>bassia-server</c> (the same core over the
+/// server's stores, with a local cache of objects). Both modes give commands the same <see cref="Repository"/>,
+/// <see cref="ILanding"/> and <see cref="WorkspaceClient"/>, so every command behaves the same in both.
 /// </summary>
-internal sealed class Monorepo
+internal sealed class Monorepo : IDisposable
 {
-	public const string MetaRepoFolderName = ".bassia";
-	public const string DefaultWorkspaceFolderName = ".workspace";
-	public const string RunsRepoFolderName = ".agentic-runs";
-	public const string DefaultCommitSubject = "agent({short_id}): {summary}";
+	public const string DirName = ".bassia";
+	public const string RepoFile = "repo.toml";
 
-	/// <summary>
-	/// Resolver of semantic merges. The brief arrives on stdin, which is how <c>claude -p</c> takes a prompt that is too
-	/// long for a command line.
-	/// </summary>
-	public const string DefaultResolver = "claude -p --permission-mode acceptEdits";
+	private readonly ServerConnection? server;
 
-	/// <summary>
-	/// The structural (entity-level) merge driver the integration tries where git's merge conflicts: weave's
-	/// <c>weave-driver</c>, used when it is installed. <c>off</c> disables it; see <see cref="Integration.StructuralMerge"/>.
-	/// </summary>
-	public const string DefaultStructuralDriver = "weave-driver";
-
-	/// <summary>Agent command a run composed from a prompt starts with (<c>bassia agent start -prompt</c>, the frontends).</summary>
-	public const string DefaultAgentCommand = "claude -p --permission-mode acceptEdits";
-
-	public string Root { get; }
-	public string MetaRepoDir => Path.Combine(Root, MetaRepoFolderName);
-
-	/// <summary>Folder holding the isolated per-run areas. Configurable via <c>[workspace] path</c> in <c>config.toml</c>.</summary>
-	public string WorkspaceDir { get; }
-
-	/// <summary>
-	/// Subject line of the commits an agentic run makes in a component. Configurable via <c>[agent.commit] subject</c>
-	/// in <c>config.toml</c>; see <see cref="ResultCommitMessage"/> for the placeholders.
-	/// </summary>
-	public string CommitSubject { get; }
-
-	/// <summary>Command that resolves a semantic merge. Configurable via <c>[integration] resolver</c> in <c>config.toml</c>.</summary>
-	public string Resolver { get; }
-
-	/// <summary>Structural merge driver, or <c>off</c>. Configurable via <c>[integration] weave</c> in <c>config.toml</c>.</summary>
-	public string StructuralDriver { get; }
-
-	/// <summary>Agent command for runs composed from a prompt. Configurable via <c>[agent] command</c> in <c>config.toml</c>.</summary>
-	public string AgentCommand { get; }
-
-	/// <summary>
-	/// Bare repo (<c>.agentic-runs/.git</c>) that stores agentic run metadata. It lives at the monorepo root,
-	/// next to <c>.bassia</c> and <c>.workspace</c>, not inside either of them: it isn't meta-repo content (so it
-	/// must not sit in the <c>.bassia</c> working tree, which git would otherwise try to track it as part of), and
-	/// unlike a run folder - scratch that may be discarded once its results are pushed - the mapping from a run to
-	/// the tags it created in the components is durable monorepo state that must outlive the workspace.
-	/// </summary>
-	public string RunsRepoDir => Path.Combine(Root, RunsRepoFolderName, ".git");
-
-	/// <summary>The component graph as the meta-repo holds it.</summary>
-	public Core.ComponentRegistry Registry { get; }
-
-	public IReadOnlyList<ComponentDefinition> Components => Registry.Components;
-
-	/// <summary>The configuration layers as read when the monorepo was loaded (see <see cref="ConfigSnapshot"/>).</summary>
-	public ConfigSnapshot Config { get; }
-
-	/// <summary>How the integration merges <paramref name="component"/>'s results: the <c>merge.*</c> settings for it.</summary>
-	public Integration.MergePolicy MergePolicyFor(string component) => Integration.MergePolicy.For(Config, component);
-
-	/// <summary>Where everything this monorepo keeps is stored (see <see cref="Storage.IMonorepoBackend"/>).</summary>
-	public Storage.IMonorepoBackend Backend { get; }
-
-	private Monorepo(Storage.IMonorepoBackend backend, string root, string workspaceDir, string commitSubject, string resolver, string structuralDriver, string agentCommand,
-		Core.ComponentRegistry registry, ConfigSnapshot config)
+	private Monorepo(string root, TomlTable settings)
 	{
-		Backend = backend;
-		Config = config;
 		Root = root;
-		WorkspaceDir = workspaceDir;
-		CommitSubject = commitSubject;
-		Resolver = resolver;
-		StructuralDriver = structuralDriver;
-		AgentCommand = agentCommand;
-		Registry = registry;
+		Config = new MonorepoConfig(Path.Combine(BassiaDir, MonorepoConfig.FileName));
+		Kind = settings.TryGetValue("kind", out var kind) ? (string)kind : "local";
+		var chunks = settings.TryGetValue("chunk_average", out var average)
+			? new ChunkParameters((int)(long)settings["chunk_min"], (int)(long)average, (int)(long)settings["chunk_max"])
+			: ChunkParameters.Default;
+		if (IsRemote)
+		{
+			Url = Config.GetOrNull("server.url") ?? (settings.TryGetValue("url", out var url) ? (string)url : throw new MonorepoException("The clone has no server.url."));
+			server = new ServerConnection(Url, Config.GetOrNull("server.token"));
+			Objects = new CachingObjectStore(new DiskObjectStore(Path.Combine(BassiaDir, "cache")), new RemoteObjectStore(server));
+			Repo = new Repository(Objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks);
+			Landing = new RemoteLanding(server);
+		}
+		else
+		{
+			var disk = new DiskObjectStore(Path.Combine(BassiaDir, "objects"));
+			Objects = disk;
+			Maintenance = disk;
+			State = new SqliteState(Path.Combine(BassiaDir, "state.db"));
+			Repo = new Repository(disk, State, State, State, chunks);
+			var semantic = MergeDrivers.Semantic(Config.Get("merge.semantic_driver"));
+			var validate = Config.GetOrNull("land.validate") is { } command ? new ShellValidationHook(Repo, command) : null;
+			LocalLanding = new LandingService(Repo, semantic, validate);
+			Landing = LocalLanding;
+		}
+
+		Workspaces = new WorkspaceClient(Repo, Landing, Path.Combine(BassiaDir, "workspaces"), User, monorepoRoot: Root);
 	}
 
-	/// <summary>Finds the monorepo root by walking up from <paramref name="startDirectory"/> until a <c>.bassia</c> folder is found.</summary>
-	public static string? FindRoot(string startDirectory)
+	public string Root { get; }
+
+	public string BassiaDir => Path.Combine(Root, DirName);
+
+	public string Kind { get; }
+
+	public bool IsRemote => Kind == "remote";
+
+	public string? Url { get; }
+
+	public MonorepoConfig Config { get; }
+
+	public IObjectStore Objects { get; }
+
+	public IObjectStoreMaintenance? Maintenance { get; }
+
+	public SqliteState? State { get; }
+
+	public Repository Repo { get; }
+
+	public ILanding Landing { get; }
+
+	public LandingService? LocalLanding { get; }
+
+	public WorkspaceClient Workspaces { get; }
+
+	public ServerConnection? Server => server;
+
+	public string User => Config.User;
+
+	public string RunsDir => Path.Combine(BassiaDir, "runs");
+
+	/// <summary>The monorepo folder at or above <paramref name="start"/>, or the one a workspace there belongs to.</summary>
+	public static string? FindRoot(string start)
 	{
-		for (var directory = new DirectoryInfo(startDirectory); directory is not null; directory = directory.Parent)
+		for (var dir = new DirectoryInfo(Path.GetFullPath(start)); dir is not null; dir = dir.Parent)
 		{
-			if (Directory.Exists(Path.Combine(directory.FullName, MetaRepoFolderName)))
+			if (File.Exists(Path.Combine(dir.FullName, DirName, RepoFile)))
 			{
-				return directory.FullName;
+				return dir.FullName;
+			}
+
+			if (WorkspaceClient.ReadMarker(dir.FullName) is { Monorepo: { } root } && File.Exists(Path.Combine(root, DirName, RepoFile)))
+			{
+				return root;
 			}
 		}
 
 		return null;
 	}
 
-	/// <summary>
-	/// The monorepo at <paramref name="root"/>: on this machine's disk (<see cref="LocalBackend"/>), or - in a clone of a
-	/// Bassia server (<c>server.url</c>) - the server's (<see cref="Storage.Remote.RemoteBackend"/>).
-	/// </summary>
-	public static Monorepo Load(string root) => Load(BackendOf(root));
-
-	/// <summary>The backend of the monorepo at <paramref name="root"/> (see <see cref="Load(string)"/>).</summary>
-	public static Storage.IMonorepoBackend BackendOf(string root) =>
-		ConfigSnapshot.Load(root).Raw(ConfigLayer.User, ConfigFile.Find("server.url")) is { Length: > 0 } server
-			? new Storage.Remote.RemoteBackend(root, server)
-			: new LocalBackend(root);
-
-	/// <summary>The Bassia server this monorepo is a clone of (<c>server.url</c>), or null.</summary>
-	public string? Server => Config.Value("server.url").Trim() is { Length: > 0 } server ? server : null;
-
-	/// <summary>
-	/// The monorepo <paramref name="backend"/> keeps: its settings and its registry as of now. It waits for the backend in
-	/// place, which costs nothing on the local backend, whose meta store reads files.
-	/// </summary>
-	public static Monorepo Load(Storage.IMonorepoBackend backend)
+	public static Monorepo Open(string root)
 	{
-		var root = backend.Root;
-		var config = backend.Config.Read();
-		if (config.Problems() is { Count: > 0 } problems)
+		var file = Path.Combine(root, DirName, RepoFile);
+		if (!File.Exists(file))
 		{
-			throw new MonorepoException($"Invalid configuration: {string.Join("; ", problems)}.");
+			throw new MonorepoException($"'{root}' is not a Bassia monorepo folder (no {DirName}/{RepoFile}).");
 		}
 
-		var workspace = config.Resolve(ConfigFile.Find("workspace.path"));
-		var workspaceDir = Path.GetFullPath(workspace.Value, root);
-
-		var registry = Core.MetaRepo.OpenAsync(backend.Meta).GetAwaiter().GetResult().Registry;
-		return new Monorepo(backend, root, workspaceDir, config.Value("agent.commit.subject"), config.Value("integration.resolver"),
-			config.Value("integration.weave").Trim(), config.Value("agent.command"), registry, config);
+		return new Monorepo(Path.GetFullPath(root), TomlSerializer.Deserialize<TomlTable>(File.ReadAllText(file)) ?? new TomlTable());
 	}
 
-	public ComponentDefinition? FindComponent(string name) => Registry.Find(name);
+	/// <summary>The monorepo of the current directory, or a clear error.</summary>
+	public static Monorepo Current() =>
+		Open(FindRoot(Environment.CurrentDirectory)
+			?? throw new MonorepoException($"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' or 'bassia clone' first."));
 
-	/// <summary>
-	/// Source-of-truth repository of a component: the folder next to the meta-repo, holding either a bare
-	/// <c>.git</c> (as created by <c>component add</c>) or a regular clone. Git resolves both.
-	/// </summary>
-	public string SourceRepoDir(string componentName) => Path.Combine(Root, componentName);
+	/// <summary>Creates a local monorepo: a local-disk blob store standing in for the cloud, SQLite for heads, path index and leases.</summary>
+	public static async Task<Monorepo> InitAsync(string path, ChunkParameters? chunks = null, CancellationToken ct = default)
+	{
+		var root = Path.GetFullPath(path);
+		Prepare(root);
+		chunks ??= ChunkParameters.Default;
+		chunks.Validate();
+		var settings = new TomlTable
+		{
+			["kind"] = "local",
+			["chunk_min"] = (long)chunks.Min,
+			["chunk_average"] = (long)chunks.Average,
+			["chunk_max"] = (long)chunks.Max
+		};
+		WriteSettings(root, settings);
+		var monorepo = Open(root);
+		await monorepo.Repo.InitializeAsync(monorepo.User, ct);
+		return monorepo;
+	}
 
-	/// <summary>
-	/// Returns the reference-graph closure of <paramref name="roots"/> (roots included), in dependency order
-	/// (a component precedes every component it references). Throws when the graph reachable from the roots
-	/// contains a cycle or refers to an unregistered component.
-	/// </summary>
-	public IReadOnlyList<ComponentDefinition> Closure(IEnumerable<string> roots) => Registry.Closure(roots);
+	/// <summary>Creates a clone of a server's monorepo: settings and an empty cache; everything else is read on demand.</summary>
+	public static async Task<Monorepo> CloneAsync(string url, string path, string? token, CancellationToken ct = default)
+	{
+		var root = Path.GetFullPath(path);
+		using (var probe = new ServerConnection(url, token ?? Environment.GetEnvironmentVariable("BASSIA_SERVER_TOKEN")))
+		{
+			var info = await probe.GetAsync<Api.Info>("info", ct);
+			Prepare(root);
+			WriteSettings(root, new TomlTable
+			{
+				["kind"] = "remote",
+				["url"] = url.TrimEnd('/'),
+				["chunk_min"] = (long)info.ChunkMin,
+				["chunk_average"] = (long)info.ChunkAverage,
+				["chunk_max"] = (long)info.ChunkMax
+			});
+		}
 
-	/// <summary>
-	/// The component graph of this monorepo on its backend's storage: the meta store and the component histories.
-	/// Commands change components and the registry through it.
-	/// </summary>
-	public Core.MonorepoGraph Graph() => new(Core.MetaRepo.Open(Backend.Meta, Registry), Backend.Components);
+		var config = new MonorepoConfig(Path.Combine(root, DirName, MonorepoConfig.FileName));
+		config.Set("server.url", url.TrimEnd('/'));
+		if (token is not null)
+		{
+			config.Set("server.token", token);
+		}
 
-	/// <summary>The monorepo this one is a clone of (<c>depot.url</c>), or null for a monorepo of its own.</summary>
-	public Core.Depot? Depot => Config.Value("depot.url").Trim() is { Length: > 0 } url ? new Core.Depot(url) : null;
+		return Open(root);
+	}
 
-	/// <summary>The views of this monorepo (<c>bassia view</c>), importing missing components from the depot in a clone.</summary>
-	public Core.Views Views() => new(Graph(), Root, WorkspaceDir, Depot);
+	private static void Prepare(string root)
+	{
+		if (FindRoot(root) is { } existing)
+		{
+			throw new MonorepoException($"'{root}' is already inside the Bassia monorepo at '{existing}'.");
+		}
 
-	/// <summary>The lock table every run of the monorepo shares.</summary>
-	public Storage.ILockStore Locks => Backend.Locks;
+		if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
+		{
+			throw new MonorepoException($"'{root}' is not empty; choose a new or empty folder.");
+		}
 
-	/// <summary>The cache of task results.</summary>
-	public Storage.ITaskCache TaskCache => Backend.TaskCache;
+		Directory.CreateDirectory(Path.Combine(root, DirName));
+	}
 
-	/// <summary>The live jobs - runs and integrations being executed - of this monorepo.</summary>
-	public Storage.IJobScheduler Jobs => Backend.Jobs;
+	private static void WriteSettings(string root, TomlTable settings) =>
+		File.WriteAllText(Path.Combine(root, DirName, RepoFile),
+			"# What this monorepo folder is: a local monorepo, or a clone of a bassia-server. Written by bassia init / clone.\n" + TomlSerializer.Serialize(settings));
 
-	/// <summary>The store of the agentic run records.</summary>
-	public Storage.IRunRecordStore RunRecords() => Backend.Records;
+	/// <summary>Where a new workspace's folder goes by default.</summary>
+	public string DefaultWorkspacePath(string name) => Path.Combine(Root, Config.Get("workspace.dir"), name);
 
-	/// <summary>The integration records, kept beside the run records.</summary>
-	public Integration.IntegrationStore Integrations() => new(RunRecords());
+	/// <summary>The workspace the current directory is in, if any.</summary>
+	public async Task<WorkspaceState?> CurrentWorkspaceAsync(CancellationToken ct = default)
+	{
+		if (WorkspaceClient.FindEnclosing(Environment.CurrentDirectory) is not { } found)
+		{
+			return null;
+		}
+
+		return await Repo.FindWorkspaceAsync(found.Marker.Workspace, ct);
+	}
+
+	/// <summary>A workspace by reference, or the one the current directory is in.</summary>
+	public async Task<WorkspaceState> WorkspaceAsync(string? reference, CancellationToken ct = default)
+	{
+		if (reference is not null)
+		{
+			return await Repo.ResolveWorkspaceAsync(reference, ct);
+		}
+
+		return await CurrentWorkspaceAsync(ct)
+			?? throw new MonorepoException("Name the workspace (-workspace <name>), or run the command inside a workspace's folder.");
+	}
+
+	public void Dispose() => server?.Dispose();
 }

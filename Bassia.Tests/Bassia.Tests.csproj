@@ -23,6 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Bassia.Core\Bassia.Core.csproj" />
     <ProjectReference Include="..\Bassia\Bassia.csproj" />
     <ProjectReference Include="..\Bassia.Server\Bassia.Server.csproj" />
   </ItemGroup>

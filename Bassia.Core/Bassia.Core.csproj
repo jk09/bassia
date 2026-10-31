@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The version core: object model, encoding, chunking, the four storage traits and the operations over them.
+    It may not reference an HTTP client, a cloud SDK or a database driver (Bassia.Tests checks its references).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Bassia.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Blake3" Version="3.0.2" />
+    <PackageReference Include="System.Formats.Cbor" Version="10.0.14" />
+    <PackageReference Include="Tomlyn.Signed" Version="2.10.1" />
+  </ItemGroup>
+
+</Project>

@@ -3,7 +3,7 @@ namespace Bassia.Cli;
 using System.Text;
 
 /// <summary>
-/// A plain-ASCII table for list results (<c>agent list</c>, <c>component list</c>, ...): a header row, a rule, and one
+/// A plain-ASCII table for list results (<c>agent list</c>, <c>workspace list</c>, ...): a header row, a rule, and one
 /// row per item, columns padded to their widest cell. It is for reading at a glance; the same data is in the
 /// result's keys for parsing.
 /// </summary>
