@@ -1,13 +1,17 @@
-# Shared by the hand-check scripts: locates the Debug build of bassia.exe and runs it, parsing its TOML result.
+# Shared by the hand-check scripts and bassia-local-cloud.ps1: locates the Debug build of bassia and runs it, parsing its TOML result.
 
 $PSNativeCommandUseErrorActionPreference = $false
 
-$exe = Join-Path $PSScriptRoot '..\Bassia\bin\Debug\net10.0\Bassia.exe'
-if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-	throw "Bassia.exe not found at '$exe'. Build it first: dotnet build $(Join-Path $PSScriptRoot '..\Bassia\Bassia.csproj')"
-}
+# A caller may set $script:BassiaExe before dot-sourcing this file to run another build (an installed bassia, say).
+if (-not $script:BassiaExe) {
+	$name = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'Bassia.exe' } else { 'Bassia' }
+	$exe = Join-Path $PSScriptRoot "../Bassia/bin/Debug/net10.0/$name"
+	if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+		throw "$name not found at '$exe'. Build it first: dotnet build $(Join-Path $PSScriptRoot '../Bassia/Bassia.csproj')"
+	}
 
-$script:BassiaExe = (Resolve-Path -LiteralPath $exe).Path
+	$script:BassiaExe = (Resolve-Path -LiteralPath $exe).Path
+}
 
 # The comment line every bassia result opens with (TomlResult.Marker).
 $script:BassiaResultMarker = '# bassia result'

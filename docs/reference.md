@@ -548,7 +548,8 @@ command line across two clones, a swarm of agents landing overlapping trees over
 the server, object validation, mainline's protection and signed blob URLs, and every dashboard page.
 `PostgresStateTests`, `ObjectStoreContractTests` and `SyncEfficiencyTests` run against PostgreSQL
 (`BASSIA_TEST_POSTGRES`, a connection string; every test gets its own schema) and Azure Blob Storage
-(`BASSIA_TEST_AZURE_BLOB`, a connection string to Azurite; every test gets its own container) - CI provides both, and
+(`BASSIA_TEST_AZURE_BLOB`, a connection string to Azurite; every test gets its own container) - CI provides both,
+locally `/bassia-local-cloud` does (below), and
 without them those tests check nothing. `SyncEfficiencyTests` counts the requests a clone sends for a checkout, a
 second checkout and a snapshot, on the disk backend and on Azure + PostgreSQL, and runs two clones end to end on the
 latter.
@@ -557,3 +558,34 @@ latter.
 pruning, status); `DevDriveTests` clone for real on the volume named by `BASSIA_TEST_DEVDRIVE_DIR` - the
 `Dev Drive (Windows)` CI job formats a VHD as a Dev Drive (plain ReFS where it cannot) for them; without the variable
 they check nothing.
+
+### The cloud backend on this machine: Azurite and PostgreSQL
+
+`scripts/bassia-local-cloud.ps1` (PowerShell 7; the `/bassia-local-cloud` skill drives it) emulates the Azure backend
+locally, so the cloud tests and a server on it run without an Azure account:
+
+```sh
+pwsh scripts/bassia-local-cloud.ps1 check     # Docker? Node.js and PostgreSQL? git, .NET? which mode up would use
+pwsh scripts/bassia-local-cloud.ps1 up        # -Mode auto|docker|native, -BlobPort 10000, -PostgresPort 55432
+pwsh scripts/bassia-local-cloud.ps1 smoke     # server + two clones + git import, landing, git export; -Keep, -Bassia/-Server <exe>
+pwsh scripts/bassia-local-cloud.ps1 test      # dotnet test with BASSIA_TEST_*; -Filter cloud for the cloud tests only
+pwsh scripts/bassia-local-cloud.ps1 env       # the connection strings as BASSIA_TEST_* and BASSIA_SERVER_*; -Shell pwsh|sh|cmd
+pwsh scripts/bassia-local-cloud.ps1 down      # stop; -Purge also deletes the data
+```
+
+- `docker` mode runs the containers `bassia-azurite` (`mcr.microsoft.com/azure-storage/azurite:3.37.0`, blob service
+  only) and `bassia-postgres` (`postgres:16`), with named volumes. `native` mode installs Azurite 3.37.0 from npm into
+  the state folder and runs it under Node.js, detached. It also runs the installed PostgreSQL server: `initdb` once,
+  then `pg_ctl`; as root on Linux it runs as the `postgres` user, with its data under `/var/tmp/bassia-local-cloud`.
+  `auto` picks Docker when its daemon answers.
+- Both listen on 127.0.0.1 only. The state (mode, ports, data folders) is kept in `<root>/local-cloud`, `<root>` being
+  the install root (`$BASSIA_HOME`, `%LOCALAPPDATA%\Bassia`, `~/.local/share/bassia`), so it outlives clones and never
+  shows in `git status`. `up` is idempotent.
+- `smoke` builds `bassia` and `bassia-server` (or takes `-Bassia`/`-Server` executables, e.g. an installed version).
+  It then starts the server on Azurite + PostgreSQL in a fresh container and database. Two clones import two git
+  repositories with interleaved history, land a change and see each other's landings, then export mainline to git
+  twice, the second time incrementally. It checks the git history and files, the heads and path index in PostgreSQL,
+  and every object in Azurite (`bassia-server scrub`). It exits 1 on the first failed check, keeping the folder and the
+  database for inspection.
+- `test` refuses to run while a service is down, since the cloud tests check nothing without them. The `Local cloud`
+  CI jobs run `up`, `smoke`, `test -Filter cloud` and `down -Purge` in Docker on Linux and natively on Windows.

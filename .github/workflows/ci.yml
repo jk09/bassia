@@ -137,6 +137,75 @@ jobs:
       - name: Test block cloning
         run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName~DevDrive|FullyQualifiedName~CloneCache" --logger "console;verbosity=normal"
 
+  local-cloud:
+    name: Local cloud (${{ matrix.mode }}, ${{ matrix.os }})
+    # scripts/bassia-local-cloud.ps1, behind the /bassia-local-cloud skill: Azurite and PostgreSQL in Docker (Linux) or as
+    # local processes (Windows, whose runner has PostgreSQL and Node.js installed), the cloud tests against them, and
+    # the end-to-end smoke test (a server on both, two clones, git import, a landing, git export).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            mode: docker
+          - os: windows-2025
+            mode: native
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the .NET SDK
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$DOTNET_CHANNEL/latest.version" | tr -d '\r' | sed '/^$/d' | tail -n 1)
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-linux-x64.tar.gz" | tar -xz -C "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+
+      - name: Install the .NET SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = ((Invoke-RestMethod "$env:DOTNET_FEED/Sdk/$env:DOTNET_CHANNEL/latest.version" -MaximumRetryCount 3) -split "`n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+          $zip = Join-Path $env:RUNNER_TEMP 'dotnet-sdk.zip'
+          Invoke-WebRequest "$env:DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-win-x64.zip" -OutFile $zip -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Check
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 check
+
+      - name: Up
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          ./scripts/bassia-local-cloud.ps1 up -Mode ${{ matrix.mode }}
+          ./scripts/bassia-local-cloud.ps1 up
+          ./scripts/bassia-local-cloud.ps1 status
+
+      - name: Smoke test
+        timeout-minutes: 12
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 smoke
+
+      - name: Cloud tests
+        timeout-minutes: 12
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 test -Filter cloud
+
+      - name: Down
+        if: always()
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 down -Purge
+
   package:
     name: Package (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
