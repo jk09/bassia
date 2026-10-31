@@ -305,7 +305,13 @@ function Start-NativeAzurite($state) {
 	$arguments = @($main, '--blobHost', '127.0.0.1', '--blobPort', "$($state.BlobPort)", '--location', $data, '--skipApiVersionCheck', '--loose')
 	$node = Find-Command node
 	if ($script:OnWindows) {
-		$process = Start-Process -FilePath $node -ArgumentList ($arguments | ForEach-Object { "`"$_`"" }) -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru
+		# Created by WMI, outside this shell's job object, with a console of its own: Azurite outlives this script, its
+		# console, and hosts that end a job's processes when a command finishes (CI steps, agents' tool sessions).
+		$quoted = ((@($node) + $arguments) | ForEach-Object { "`"$_`"" }) -join ' '
+		$commandLine = "cmd.exe /d /c `"$quoted > `"$log`" 2> `"$log.err`"`""
+		$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16] 0 }
+		$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; ProcessStartupInformation = $startup }
+		if ($created.ReturnValue -ne 0) { throw "Could not start Azurite (Win32_Process.Create returned $($created.ReturnValue))." }
 	}
 	else {
 		# Detached through sh: its own session (setsid), no file descriptor of this shell inherited, so Azurite outlives
@@ -314,10 +320,10 @@ function Start-NativeAzurite($state) {
 		$line = ((@($node) + $arguments) | ForEach-Object { & $quote $_ }) -join ' '
 		$detach = (Find-Command setsid) ? 'setsid ' : 'nohup '
 		& /bin/sh -c "$detach$line > $(& $quote $log) 2> $(& $quote "$log.err") < /dev/null &"
-		$process = $null
-		Wait-Until { $script:found = Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($main) } | Select-Object -First 1; $null -ne $script:found } 'The Azurite process' 10
-		$process = $script:found
 	}
+
+	Wait-Until { $script:found = Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($main) } | Select-Object -First 1; $null -ne $script:found } 'The Azurite process' 30
+	$process = $script:found
 
 	$state.AzuritePid = $process.Id
 	Write-Host "Azurite: started (pid $($process.Id), data in $data)."
