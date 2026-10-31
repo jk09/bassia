@@ -5,6 +5,7 @@ using Bassia.Core.Storage;
 using Bassia.Core.Version;
 using Bassia.Core.Workspaces;
 using Bassia.Interop;
+using Bassia.Platform;
 using Bassia.Stores;
 using Tomlyn;
 using Tomlyn.Model;
@@ -54,7 +55,11 @@ internal sealed class Monorepo : IDisposable
 			Landing = LocalLanding;
 		}
 
-		Workspaces = new WorkspaceClient(Repo, Landing, Path.Combine(BassiaDir, "workspaces"), User, monorepoRoot: Root);
+		// On a Windows Dev Drive (block-cloning ReFS), workspace files are cloned from a local content cache.
+		Clones = new CloneCache(Path.Combine(BassiaDir, "clones"), Repo, Cloner ?? FileCloners.Platform());
+		var cloneSetting = Config.Get("workspace.clone");
+		Workspaces = new WorkspaceClient(Repo, Landing, Path.Combine(BassiaDir, "workspaces"), User,
+			(folder, _) => new CheckoutProvider(folder, Repo) { Materializer = Clones.For(folder, cloneSetting) }, monorepoRoot: Root);
 	}
 
 	public string Root { get; }
@@ -82,6 +87,12 @@ internal sealed class Monorepo : IDisposable
 	public LandingService? LocalLanding { get; }
 
 	public WorkspaceClient Workspaces { get; }
+
+	/// <summary>The content cache workspace files are block-cloned from on a Dev Drive.</summary>
+	public CloneCache Clones { get; }
+
+	/// <summary>Replaces the platform's file cloner (tests stand one in where the platform has none).</summary>
+	internal static IFileCloner? Cloner { get; set; }
 
 	public ServerConnection? Server => server;
 

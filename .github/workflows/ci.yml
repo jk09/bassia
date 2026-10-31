@@ -62,6 +62,58 @@ jobs:
       - name: Test
         run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
 
+  devdrive:
+    name: Dev Drive (Windows)
+    # Block cloning of workspace files on a real ReFS volume: a VHD formatted as a Dev Drive (plain ReFS where this
+    # Windows cannot format a Dev Drive), whose folder the DevDrive tests get in BASSIA_TEST_DEVDRIVE_DIR.
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the .NET SDK (Windows)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = ((Invoke-RestMethod "$env:DOTNET_FEED/Sdk/$env:DOTNET_CHANNEL/latest.version" -MaximumRetryCount 3) -split "`n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+          $zip = Join-Path $env:RUNNER_TEMP 'dotnet-sdk.zip'
+          Invoke-WebRequest "$env:DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-win-x64.zip" -OutFile $zip -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          & (Join-Path $dir 'dotnet.exe') --version
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Create a Dev Drive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vhd = Join-Path $env:RUNNER_TEMP 'devdrive.vhdx'
+          $script = Join-Path $env:RUNNER_TEMP 'devdrive.txt'
+          @("create vdisk file=`"$vhd`" maximum=51200 type=expandable", "select vdisk file=`"$vhd`"", 'attach vdisk',
+            'create partition primary', 'assign letter=R') | Set-Content -Encoding ascii $script
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed ($LASTEXITCODE)" }
+          try {
+            Format-Volume -DriveLetter R -DevDrive -NewFileSystemLabel BassiaDev -Confirm:$false -Force | Out-Null
+            Write-Host 'Formatted R: as a Dev Drive.'
+          }
+          catch {
+            Write-Host "No Dev Drive here ($($_.Exception.Message)); formatting R: as ReFS."
+            Format-Volume -DriveLetter R -FileSystem ReFS -NewFileSystemLabel BassiaDev -Confirm:$false -Force | Out-Null
+          }
+          fsutil fsinfo volumeinfo R:
+          fsutil devdrv query R:
+          New-Item -ItemType Directory -Path 'R:\bassia-tests' | Out-Null
+          'BASSIA_TEST_DEVDRIVE_DIR=R:\bassia-tests' | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build
+        run: dotnet build --configuration Release
+
+      - name: Test block cloning
+        run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName~DevDrive|FullyQualifiedName~CloneCache" --logger "console;verbosity=normal"
+
   package:
     name: Package (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
@@ -143,7 +195,7 @@ jobs:
   release:
     name: Release
     if: github.ref_type == 'tag'
-    needs: [test, package]
+    needs: [test, devdrive, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write

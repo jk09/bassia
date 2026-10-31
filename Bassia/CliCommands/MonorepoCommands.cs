@@ -216,16 +216,20 @@ internal static class MonorepoCommands
 	public static async Task<int> GcAsync(Invocation invocation)
 	{
 		using var monorepo = Monorepo.Current();
+		var dryRun = invocation.Has("dry-run");
+		var (cacheFiles, cacheBytes) = dryRun ? (0, 0L) : await PruneClonesAsync(monorepo);
+		var cache = cacheFiles == 0 ? "" : $" Pruned {cacheFiles} clone cache entr{(cacheFiles == 1 ? "y" : "ies")} ({Size(cacheBytes)}).";
 		if (monorepo.Maintenance is null)
 		{
-			return Fail(invocation, "Garbage collection runs where the blobs are: on the server ('bassia-server gc'), not in a clone.");
+			return Ok(invocation, "Blob garbage collection runs where the blobs are: on the server ('bassia-server gc')." + cache,
+				new Dictionary<string, object?> { ["dry_run"] = dryRun, ["clone_cache_pruned"] = cacheFiles, ["clone_cache_pruned_bytes"] = cacheBytes });
 		}
 
 		var grace = TimeSpan.FromHours(invocation.Int("grace-hours", monorepo.Config.GetInt("gc.grace_hours")));
 		var retention = TimeSpan.FromDays(invocation.Int("retention-days", monorepo.Config.GetInt("gc.retention_days")));
-		var report = await new GarbageCollector(monorepo.Repo, monorepo.Maintenance).CollectAsync(grace, retention, invocation.Has("dry-run"));
+		var report = await new GarbageCollector(monorepo.Repo, monorepo.Maintenance).CollectAsync(grace, retention, dryRun);
 		return Ok(invocation, $"{(report.DryRun ? "Would sweep" : "Swept")} {report.Swept} of {report.Blobs} blob(s) ({Size(report.SweptBytes)}); {report.Live} live object(s) " +
-			$"from {report.Roots} head(s); {report.Young} unreferenced blob(s) are younger than the grace period; {report.PrunedWorkspaces} closed workspace(s) pruned.",
+			$"from {report.Roots} head(s); {report.Young} unreferenced blob(s) are younger than the grace period; {report.PrunedWorkspaces} closed workspace(s) pruned." + cache,
 			new Dictionary<string, object?>
 			{
 				["dry_run"] = report.DryRun,
@@ -235,8 +239,76 @@ internal static class MonorepoCommands
 				["swept"] = report.Swept,
 				["swept_bytes"] = report.SweptBytes,
 				["young"] = report.Young,
-				["pruned_workspaces"] = report.PrunedWorkspaces
+				["pruned_workspaces"] = report.PrunedWorkspaces,
+				["clone_cache_pruned"] = cacheFiles,
+				["clone_cache_pruned_bytes"] = cacheBytes
 			});
+	}
+
+	/// <summary>
+	/// Prunes the clone cache down to what is still useful here: the content of this machine's open workspaces and of
+	/// mainline's head (what the next workspace will hold).
+	/// </summary>
+	private static async Task<(int Files, long Bytes)> PruneClonesAsync(Monorepo monorepo)
+	{
+		if (!Directory.Exists(monorepo.Clones.Directory))
+		{
+			return (0, 0);
+		}
+
+		var keep = new HashSet<ObjectId>();
+		var states = Path.Combine(monorepo.BassiaDir, "workspaces");
+		if (Directory.Exists(states))
+		{
+			foreach (var file in Directory.EnumerateFiles(states, "*.json"))
+			{
+				foreach (var entry in Core.Workspaces.TreeState.Load(file).Entries.Values)
+				{
+					keep.Add(entry.Leaf.Id);
+				}
+			}
+		}
+
+		await foreach (var (_, leaf) in monorepo.Repo.Trees.WalkAsync((await monorepo.Repo.GetMainAsync()).Tree))
+		{
+			keep.Add(leaf.Id);
+		}
+
+		return monorepo.Clones.Prune(keep);
+	}
+
+	/// <summary><c>bassia devdrive status</c>: whether workspaces in a folder are block-cloned, and why (not).</summary>
+	public static Task<int> DevDriveStatusAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var folder = Path.GetFullPath(invocation.Get("path") ?? Path.Combine(monorepo.Root, monorepo.Config.Get("workspace.dir")));
+		var probe = Directory.Exists(folder) ? folder : monorepo.Root;
+		var volume = monorepo.Clones.Cloner.Describe(probe);
+		var decision = monorepo.Clones.Decide(probe, monorepo.Config.Get("workspace.clone"));
+		var (files, bytes) = monorepo.Clones.Size();
+		var data = new Dictionary<string, object?>
+		{
+			["path"] = folder,
+			["windows"] = OperatingSystem.IsWindows(),
+			["volume"] = volume.Volume,
+			["file_system"] = volume.FileSystem,
+			["dev_drive"] = volume.DevDrive,
+			["trusted"] = volume.Trusted,
+			["block_cloning"] = volume.BlockCloning,
+			["cluster_size"] = volume.ClusterSize,
+			["setting"] = monorepo.Config.Get("workspace.clone"),
+			["clone"] = decision.Cloned,
+			["reason"] = decision.Reason,
+			["clone_cache"] = monorepo.Clones.Directory,
+			["clone_cache_files"] = files,
+			["clone_cache_bytes"] = bytes
+		};
+		var devDrive = volume.DevDrive switch { true => volume.Trusted == true ? "a trusted Dev Drive" : "a Dev Drive (not trusted: Defender scans in real time)", false => "not a Dev Drive", _ => "maybe a Dev Drive (Windows did not say)" };
+		var message = OperatingSystem.IsWindows()
+			? $"'{folder}' is on {volume.Volume ?? "?"} ({volume.FileSystem ?? "unknown file system"}, {devDrive}, block cloning {(volume.BlockCloning ? "supported" : "not supported")}). " +
+				$"Workspaces there are {(decision.Cloned ? "block-cloned" : "written file by file")}: {decision.Reason}. Clone cache: {files} file(s), {Size(bytes)}."
+			: $"Workspaces are written file by file: {decision.Reason}.";
+		return Task.FromResult(Ok(invocation, message, data));
 	}
 
 	public static async Task<int> ScrubAsync(Invocation invocation)

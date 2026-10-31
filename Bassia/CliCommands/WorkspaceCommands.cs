@@ -26,9 +26,10 @@ internal static class WorkspaceCommands
 
 		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "");
 		var data = await WorkspaceAsync(monorepo.Repo, state);
-		return Ok(invocation, state.Record.Parent is null
+		var files = Materialization(local, data);
+		return Ok(invocation, (state.Record.Parent is null
 			? $"Created workspace '{name}' on mainline seq {state.Record.BaseSeq} in '{local.Root}'. Edit there; 'bassia workspace check' tells whether it can land."
-			: $"Created workspace '{name}' stacked on '{invocation.Get("on")}' in '{local.Root}'. It lands after the workspace it is stacked on.", data);
+			: $"Created workspace '{name}' stacked on '{invocation.Get("on")}' in '{local.Root}'. It lands after the workspace it is stacked on.") + files, data);
 	}
 
 	public static async Task<int> CloneAsync(Invocation invocation)
@@ -39,8 +40,8 @@ internal static class WorkspaceCommands
 		var name = invocation.Require("name");
 		var path = invocation.Get("path") is { } given ? Path.GetFullPath(given) : monorepo.DefaultWorkspacePath(name);
 		var (state, local) = await monorepo.Workspaces.CloneAsync(source.Id, name, path);
-		return Ok(invocation, $"Cloned workspace '{source.Name}' as '{name}' in '{local.Root}': same base and work, a new change.",
-			await WorkspaceAsync(monorepo.Repo, state));
+		var data = await WorkspaceAsync(monorepo.Repo, state);
+		return Ok(invocation, $"Cloned workspace '{source.Name}' as '{name}' in '{local.Root}': same base and work, a new change." + Materialization(local, data), data);
 	}
 
 	public static async Task<int> CheckoutAsync(Invocation invocation)
@@ -54,7 +55,21 @@ internal static class WorkspaceCommands
 		}
 
 		var local = await monorepo.Workspaces.CheckOutAsync(state, path);
-		return Ok(invocation, $"Checked out workspace '{state.Name}' into '{local.Root}'.", await WorkspaceAsync(monorepo.Repo, (await monorepo.Repo.FindWorkspaceAsync(state.Id))!));
+		var data = await WorkspaceAsync(monorepo.Repo, (await monorepo.Repo.FindWorkspaceAsync(state.Id))!);
+		return Ok(invocation, $"Checked out workspace '{state.Name}' into '{local.Root}'." + Materialization(local, data), data);
+	}
+
+	/// <summary>How a new folder's files were made: block-cloned from the clone cache (Dev Drive), or written.</summary>
+	private static string Materialization(Core.Workspaces.LocalWorkspace local, Dictionary<string, object?> data)
+	{
+		if (local.Provider is not Core.Workspaces.CheckoutProvider provider)
+		{
+			return "";
+		}
+
+		data["files_cloned"] = provider.Materialized;
+		data["files_written"] = provider.Written;
+		return provider.Materialized > 0 ? $" {provider.Materialized} file(s) cloned from the clone cache, {provider.Written} written." : "";
 	}
 
 	public static async Task<int> ListAsync(Invocation invocation)
