@@ -89,6 +89,12 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 
 	public string Root { get; } = Path.GetFullPath(root);
 
+	/// <summary>
+	/// Whether the file system has an executable bit to read and write (not on Windows). Without one, a file keeps the
+	/// mode its tree recorded: a snapshot must not read "not executable" from a file system that cannot say.
+	/// </summary>
+	public bool TracksExecutable { get; init; } = !OperatingSystem.IsWindows();
+
 	private string Full(string path) => Path.Combine(Root, path.Replace('/', Path.DirectorySeparatorChar));
 
 	public async Task UpdateAsync(TreeState state, ObjectId to, CancellationToken ct = default)
@@ -155,7 +161,10 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			diskId = leaf.Id;
 		}
 
-		SetExecutable(full, leaf.Executable);
+		if (TracksExecutable)
+		{
+			SetExecutable(full, leaf.Executable);
+		}
 		var info = new FileInfo(full);
 		return new TreeStateEntry(leaf, LinkOrLength(info), Mtime(info), diskId);
 	}
@@ -261,8 +270,8 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 				var info = (FileInfo)(entry is FileInfo file ? file : new FileInfo(entry.FullName));
 				var size = LinkOrLength(info);
 				var mtime = Mtime(info);
-				var executable = IsExecutable(info);
 				state.Entries.TryGetValue(path, out var known);
+				var executable = TracksExecutable ? IsExecutable(info) : known?.Leaf.Executable ?? false;
 				if (known is not null && known.Mtime != 0 && known.Size == size && known.Mtime == mtime && known.Leaf.Executable == executable
 					&& (known.Leaf.Kind == EntryKind.Symlink) == (info.LinkTarget is not null))
 				{

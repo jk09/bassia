@@ -182,6 +182,25 @@ public class TreeAlgebraTests
 	}
 
 	[Fact]
+	public async Task Diffs_LabelAnExecutableBitChangeAsMode_NotAsModified()
+	{
+		var repo = new TestRepo();
+		var script = await repo.Repo.Objects.WriteContentAsync("echo hi\n"u8.ToArray(), executable: true);
+		var plain = await repo.Repo.Objects.WriteContentAsync("echo hi\n"u8.ToArray());
+		var edited = await repo.Repo.Objects.WriteContentAsync("echo bye\n"u8.ToArray());
+		var empty = await repo.Repo.Trees.EmptyTreeAsync();
+		var before = await repo.Repo.Trees.EditAsync(empty, [new PathChange("run.sh", script), new PathChange("b.sh", script)]);
+		var after = await repo.Repo.Trees.EditAsync(empty, [new PathChange("run.sh", plain), new PathChange("b.sh", edited)]);
+
+		var records = await repo.Repo.Diffs.DiffAsync(before, after);
+		Assert.Equal(ChangeStatus.Mode, records.Single(record => record.Path == "run.sh").Status);
+		Assert.Equal(ChangeStatus.Modified, records.Single(record => record.Path == "b.sh").Status);
+		var patch = await repo.Repo.Diffs.PatchAsync(records.Single(record => record.Path == "run.sh"));
+		Assert.Null(patch.Hunks);
+		Assert.Equal("mode changed: executable (100755) -> not executable (100644), content unchanged", patch.Summary);
+	}
+
+	[Fact]
 	public void TextMerge_MergesDisjointEditsAndMarksOverlaps()
 	{
 		var baseLines = LineDiff.Lines("a\nb\nc\nd\ne\n");

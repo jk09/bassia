@@ -194,7 +194,8 @@ internal static class WorkspaceCommands
 			data["stat"] = Table(["STATUS", "PATH", "OLD", "NEW"], records.Select(record => (IReadOnlyList<string>)
 			[
 				record.Status, record.OldPath is null ? record.Path : $"{record.OldPath} -> {record.Path}",
-				record.Old is null ? "-" : Size(record.Old.Size), record.New is null ? "-" : Size(record.New.Size)
+				record.Status == ChangeStatus.Mode ? (record.Old!.Executable ? "100755" : "100644") : record.Old is null ? "-" : Size(record.Old.Size),
+				record.Status == ChangeStatus.Mode ? (record.New!.Executable ? "100755" : "100644") : record.New is null ? "-" : Size(record.New.Size)
 			]));
 		}
 
@@ -279,17 +280,19 @@ internal static class WorkspaceCommands
 		return Ok(invocation, $"Restored workspace '{state.Name}' to operation {op.Short}.", await WorkspaceAsync(monorepo.Repo, after));
 	}
 
+	/// <summary>An operation of the workspace's log by its seq, or by a prefix of its id of at least 4 characters.</summary>
 	private static async Task<ObjectId> ResolveOperationAsync(Monorepo monorepo, WorkspaceState state, string reference)
 	{
-		await foreach (var entry in monorepo.Repo.LogAsync(HeadName.Workspace(state.Id)))
+		var entries = await monorepo.Repo.LogAsync(HeadName.Workspace(state.Id)).ToListAsync();
+		var bySeq = long.TryParse(reference, out var seq) ? entries.Where(entry => entry.Operation.Seq == seq).ToList() : [];
+		var byId = reference.Length >= 4 ? entries.Where(entry => entry.Id.Hex.StartsWith(reference, StringComparison.OrdinalIgnoreCase)).ToList() : [];
+		var matches = bySeq.Count > 0 ? bySeq : byId;
+		return matches.Count switch
 		{
-			if (entry.Id.Hex.StartsWith(reference, StringComparison.OrdinalIgnoreCase) || entry.Operation.Seq.ToString() == reference)
-			{
-				return entry.Id;
-			}
-		}
-
-		throw new MonorepoException($"No operation '{reference}' in workspace '{state.Name}'. Run 'bassia workspace log {state.Name}'.");
+			1 => matches[0].Id,
+			0 => throw new MonorepoException($"No operation '{reference}' in workspace '{state.Name}' (give its seq, or 4+ characters of its id). Run 'bassia workspace log {state.Name}'."),
+			_ => throw new MonorepoException($"'{reference}' matches several operations of workspace '{state.Name}'; give more of the id.")
+		};
 	}
 
 	public static async Task<int> LogAsync(Invocation invocation)
