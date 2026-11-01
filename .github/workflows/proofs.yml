@@ -1,0 +1,45 @@
+# Checks the Lean model of landing (proofs/README.md): builds every proof and fails on any unfinished one.
+name: Proofs
+
+on:
+  push:
+    branches: [main]
+    paths: ['proofs/**', '.github/workflows/proofs.yml']
+  pull_request:
+    paths: ['proofs/**', '.github/workflows/proofs.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lean:
+    name: Lean proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install elan
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 3 https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build the proofs
+        working-directory: proofs
+        run: lake build
+
+      - name: No unfinished proof
+        working-directory: proofs
+        run: |
+          set -euo pipefail
+          if grep -rnwE 'sorry|admit|axiom' BassiaProofs BassiaProofs.lean; then
+            echo "::error::A proof is unfinished or adds an axiom." >&2
+            exit 1
+          fi
+          lake env lean Axioms.lean | tee axioms.txt
+          if grep -q sorryAx axioms.txt; then
+            echo "::error::A theorem depends on sorry." >&2
+            exit 1
+          fi

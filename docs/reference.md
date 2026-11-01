@@ -1277,6 +1277,16 @@ as well. A monorepo kept elsewhere is another `IMonorepoBackend`: in a clone of 
 what lives on it: working copies (git checkouts, whatever the backend), `bassia init` and `bassia clone` (which create
 a local monorepo), and the uncommitted hand edits of the meta-repo that `bassia status` reports.
 
+### Formal model of landing
+
+`proofs/` holds a [Lean 4](https://lean-lang.org/) model of the storage contract's landing operations - publishing a
+working copy (`IComponentWorkspace.PublishAsync`, fast-forward only) and advancing an integration
+(`IComponentStorage.MoveBranchesAsync`, compare-and-swap, all or none) - with machine-checked proofs that landing puts
+exactly the committed tree at the branch's tip, never changes or loses a commit the store held, keeps everything the
+old tip reached reachable, and, without merge commits, makes the branch's history the new trees followed by every
+earlier one. `proofs/README.md` lists the theorems and what the model leaves out; CI checks them on every change under
+`proofs/`.
+
 ## Build
 
 ```powershell
