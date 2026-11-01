@@ -26,21 +26,21 @@ integrations but has so far only been tested by examples. A formal model makes t
 
 ## Acceptance criteria
 
-- [ ] A Lean 4 project (no Mathlib, pinned toolchain) under `proofs/` builds with `lake build` and contains no `sorry`
+- [x] A Lean 4 project (no Mathlib, pinned toolchain) under `proofs/` builds with `lake build` and contains no `sorry`
       or added axioms.
-- [ ] The model covers: commits with parents and a tree, a store (append-only object map + branches), a workspace
+- [x] The model covers: commits with parents and a tree, a store (append-only object map + branches), a workspace
       started at a base commit that commits a working tree, and landing = publish with compare-and-swap and
       fast-forward check, and the multi-component all-or-none branch move.
-- [ ] Proved: after a successful land, the branch tip's tree is the workspace's tree (the tree of its last commit).
-- [ ] Proved: every commit present before landing is present after it with the same parents and tree, and every
+- [x] Proved: after a successful land, the branch tip's tree is the workspace's tree (the tree of its last commit).
+- [x] Proved: every commit present before landing is present after it with the same parents and tree, and every
       commit reachable from the old tip is reachable from the new tip (old trees are retained).
-- [ ] Proved: for a workspace without merge commits (every commit made with a single parent), the first-parent
+- [x] Proved: for a workspace without merge commits (every commit made with a single parent), the first-parent
       history of the new tip is the workspace's commits (newest first) followed by the old tip's history, so the
       list of trees is the new trees followed by exactly the old ones.
-- [ ] Proved: a land refused by the compare-and-swap or the fast-forward check leaves the store unchanged; a
+- [x] Proved: a land refused by the compare-and-swap or the fast-forward check leaves the store unchanged; a
       multi-component move either applies every move or changes nothing.
-- [ ] CI checks the proofs on every pull request.
-- [ ] `docs/reference.md` says what is proved, what is modeled and what is not (the C# code is not extracted from
+- [x] CI checks the proofs on every pull request.
+- [x] `docs/reference.md` says what is proved, what is modeled and what is not (the C# code is not extracted from
       the model; the correspondence is by review).
 
 ## Approach
@@ -67,7 +67,7 @@ integrations but has so far only been tested by examples. A formal model makes t
 ## Progress
 
 - [x] Specification agreed.
-- [x] Model and theorems (written; verified by CI).
+- [x] Model and theorems (verified by the Proofs workflow: Lean v4.15.0 builds every module; the main theorems rest only on propext, Classical.choice and Quot.sound).
 - [x] CI job and docs.
 
 ## Validation
