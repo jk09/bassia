@@ -16,7 +16,7 @@ Both listen on 127.0.0.1 only: Azurite's blob service on port 10000, PostgreSQL 
 5432 is left alone). Their data persists between runs in `<root>/local-cloud`, where `<root>` is the install root that
 `/bassia-install` uses.
 
-Run the script with PowerShell 7 from the root of this clone: `pwsh -NoProfile -File scripts/bassia-local-cloud.ps1 <step> ...`.
+Run the script with PowerShell 7 from the root of this checkout: `pwsh -NoProfile -File scripts/bassia-local-cloud.ps1 <step> ...`.
 On Windows without `pwsh`, use `powershell -NoProfile -ExecutionPolicy Bypass -File ...`. That works only if Windows
 PowerShell is 7+, so prefer installing PowerShell 7 (`winget install Microsoft.PowerShell`).
 
@@ -28,7 +28,7 @@ PowerShell is 7+, so prefer installing PowerShell 7 (`winget install Microsoft.P
 | `docker` / `native` | `up -Mode docker` / `up -Mode native` (the default `auto` prefers Docker when its daemon answers) |
 | `purge` | `down -Purge`: delete the containers and volumes, or the data folders |
 | `keep` | `smoke -Keep`: keep the smoke test's folder and database for inspection |
-| `installed` | `smoke -Bassia <root>/current/bassia -Server <bassia-server>`: test an installed build instead of building this clone |
+| `installed` | `smoke -Bassia <root>/current/bassia -Server <bassia-server>`: test an installed build instead of building this checkout |
 | `all-tests` | `test` with no filter: the whole suite with the cloud tests enabled (instead of `-Filter cloud`) |
 
 Other switches: `-BlobPort`, `-PostgresPort` (on `up`), `-Shell pwsh|sh|cmd` (on `env`), `-Filter <expr>` (on `test`), `-NoBuild` (on `smoke`).
