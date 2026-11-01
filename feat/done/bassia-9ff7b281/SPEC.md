@@ -52,7 +52,7 @@ Landing prefetches the versions of all touched paths before its loop.
       1-2 ms or more). 50,000 paths with 20 versions each (1,000,100 rows):
       - lookup of all 50,000 paths: 12,678 ms one by one (the old landing) vs 407 ms batched (31x faster);
       - `ChangedSince("src", after 20)`: 4,789 ms with the old query vs 1 ms (100 rows either way).
-- [ ] CI green on the PR.
+- [x] CI green on the PR (Test with PostgreSQL and Azurite, Dev Drive, both Local cloud jobs, packages).
 
 ## Validation
 
