@@ -31,7 +31,7 @@ pwsh scripts/bassia-versions.ps1 uninstall <version> | -All
 
 Versions are installed side by side, like nvm does it. `<version>` is a release tag (`v0.2.0` or `0.2.0`), `latest`
 (the default), or a branch or commit, which is installed as `<ref>-<commit>`. A Debug build adds `-debug` to the
-version id. The build runs in a temporary git worktree, so the clone's own working tree is never touched, and it
+version id. The build runs in a temporary git worktree, so the checkout's own working tree is never touched, and it
 publishes a framework-dependent build (`-SelfContained` for one that doesn't need an installed .NET runtime). The
 install root is `$BASSIA_HOME`, else `%LOCALAPPDATA%\Bassia` on Windows or `~/.local/share/bassia` elsewhere:
 
@@ -55,9 +55,10 @@ pin a version.
 
 | Concept | What it is |
 | --- | --- |
-| monorepo | One tree of files, versioned as immutable objects in blob storage. A folder with `.bassia/` is a **local monorepo** (`bassia init`) or a **clone** of a `bassia-server` (`bassia clone`). |
+| monorepo | One tree of files, versioned as immutable objects in blob storage, held by a `bassia-server` (the **server**). |
+| client | A folder connected to a server by `bassia clone` (say `D:\clients\a`): `.bassia/` holds its settings, run logs and the cache of objects it fetched, and `workspaces/` the workspaces made in it. Many clients share one server. `bassia init` makes a **local monorepo**: a client with its own storage and no server. Every command runs in a client (its folder, or `-C <folder>`). |
 | mainline | The single trunk. Every landing is the next **seq** (1, 2, 3, ...) and its history is linear. There are no branches and no tags. |
-| workspace | Where work happens instead of a branch: a folder holding a tree, with a **base** (mainline at a seq, or another workspace it is **stacked** on) and a **working commit**. |
+| workspace | Where work happens instead of a branch, always made in a client: a folder (`<client>/workspaces/<name>`) holding a tree, plus a record on the server with its **base** (mainline at a seq, or another workspace it is **stacked** on) and its **working commit**. Every agentic run gets one. |
 | implicit commits | Every command that reads a workspace snapshots its folder first. Nobody stages or commits. |
 | landing | Moving a workspace's change onto mainline (`workspace land`); `workspace check` says whether it can land now. |
 | change id | The stable identity of a unit of work. It survives snapshots, sync, landing and replay; the commit id (a hash) changes every time. |
@@ -185,8 +186,8 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
 ## Load rules: what a workspace fetches, caches and holds
 
 A workspace's folder need not hold the whole monorepo. Its **load rules** select the paths it holds, like the load rules
-of a ClearCase snapshot view's config spec. The clone fetches the content of those paths only, and caches it in
-`.bassia/cache`, shared by all workspaces of the clone. It never reads the trees below a directory nothing of which is
+of a ClearCase snapshot view's config spec. The client fetches the content of those paths only, and caches it in
+`.bassia/cache`, shared by all workspaces of the client. It never reads the trees below a directory nothing of which is
 loaded. Many clients can then each run agents on their own part of a large monorepo, each downloading only that part.
 
 ```sh
@@ -226,7 +227,7 @@ bassia workspace load api-fix                                                # s
 
 ## Workspaces on a Dev Drive (Windows)
 
-On Windows, put the monorepo folder (and with it `workspaces/`) on a [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive/)
+On Windows, put the client folder (and with it `workspaces/`) on a [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive/)
 - or any ReFS volume with block cloning - and workspaces are created by **block cloning** instead of writing files:
 
 - Bassia keeps one copy of each file's content in `.bassia/clones` (read-only, by content id). The first workspace
@@ -234,7 +235,7 @@ On Windows, put the monorepo folder (and with it `workspaces/`) on a [Dev Drive]
   copy-on-write clone (`FSCTL_DUPLICATE_EXTENTS_TO_FILE`): its clusters are shared, no data is read or written.
 - Editing a cloned file in a workspace reallocates only the clusters written; the cache and every other workspace
   keep their content. Snapshots, landing and everything else work as on any folder.
-- Files under 8 KiB, symlinks and conflicts are written as before. A clone the volume refuses (for example too many
+- Files under 8 KiB, symlinks and conflicts are written as before. A block clone the volume refuses (for example too many
   references to one cluster) falls back to a copy, and then to writing the file; cloning never makes a command fail.
 - `workspace create`, `clone` and `checkout` report `files_cloned` and `files_written`.
 - `bassia devdrive status [-path <dir>]` tells whether workspaces in a folder are cloned and why not: the file system,
@@ -244,7 +245,7 @@ On Windows, put the monorepo folder (and with it `workspaces/`) on a [Dev Drive]
   file of mainline's head uses.
 
 Requirements: Windows 11 24H2 or Windows Server 2025 or later (block cloning on Dev Drive), and the workspace folder on
-the same volume as the monorepo folder (clones never cross volumes). Creating a Dev Drive needs an administrator:
+the same volume as the client folder (block clones never cross volumes). Creating a Dev Drive needs an administrator:
 **Settings > System > Storage > Advanced storage settings > Disks & volumes > Create dev drive**, or
 `Format-Volume -DriveLetter D -DevDrive`. Trusting it (`fsutil devdrv trust D:`) lets Defender scan it in
 performance mode.
@@ -389,9 +390,9 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   `BASSIA_SERVER_AZURE_CONNECTION`, `BASSIA_SERVER_STATE`, `BASSIA_SERVER_POSTGRES`, ...). `bassia-server gc` and `scrub`
   run against the same backends.
 
-### Client sync: what a clone downloads and uploads
+### Client sync: what a client downloads and uploads
 
-A clone only ever fetches the objects a command needs, and caches each forever (`.bassia/cache`, shared by every
+A client only ever fetches the objects a command needs, and caches each forever (`.bassia/cache`, shared by every
 workspace on the machine: objects never change).
 
 | Operation | What travels |
@@ -410,7 +411,7 @@ its tests run without a cloud account. Every switch can also come from a `BASSIA
 Authentication is out of scope for this design: `-token` sets one shared bearer token for the API and the dashboard
 (`?token=<token>` once in a browser sets a cookie).
 
-The RPC surface under `/api/v1` is what a clone's remote stores call:
+The RPC surface under `/api/v1` is what a client's remote stores call:
 
 | Call | Purpose |
 | --- | --- |
@@ -427,7 +428,7 @@ The RPC surface under `/api/v1` is what a clone's remote stores call:
 | `POST /leases/acquire`, `renew`, `release`, `GET /leases` | Leases; waiting happens on the server. |
 | `POST /land` | Land (or check, with `dry_run`) a workspace. |
 
-Objects are immutable, so a clone caches every object it reads in `.bassia/cache`, shared by all its workspaces, and
+Objects are immutable, so a client caches every object it reads in `.bassia/cache`, shared by all its workspaces, and
 never asks again. Chunks of 256 KiB and more go between the client and the blob container directly on signed URLs
 (S3 presigned URLs, or the server's own `/blobs/{id}?op=...&sig=...` for the disk container), so the server never
 proxies file bytes. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set the server exports OpenTelemetry metrics (landings by
@@ -440,7 +441,7 @@ bassia web                       # http://127.0.0.1:8080/, opened in the browser
 bassia web -port 9000 -no-open
 ```
 
-`web` serves a read-only dashboard over the monorepo (local or a clone), on 127.0.0.1 only; `bassia-server` serves the
+`web` serves a read-only dashboard over the monorepo (a local monorepo or a client), on 127.0.0.1 only; `bassia-server` serves the
 same pages at its root. Pages and pictures are drawn on the server and work without JavaScript; the script refreshes the
 live parts (on the server, when it pushes a change). Every page shows the `bassia` commands for what it describes;
 click one to copy it.
@@ -461,7 +462,7 @@ click one to copy it.
 
 ## Configuration
 
-Settings of a monorepo folder live in `.bassia/config.toml` (`config list|get|set|unset`); an environment variable,
+Settings of a client live in `.bassia/config.toml` (`config list|get|set|unset`); an environment variable,
 where a setting has one, wins over the file. Repository policy is not a setting: it is versioned in `.bassia.toml`.
 
 | Key | Default | Meaning |
@@ -469,7 +470,7 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 | `user.id` (`BASSIA_USER`) | the login name | Who acts: the agent of operations, the owner of workspaces. |
 | `agent.command` | `claude -p --permission-mode acceptEdits` | The agent a run starts; the prompt is appended as one quoted argument. To let Claude Code also run builds and tests, allow them and keep `-p` last, since `--allowedTools` takes a list that would swallow the prompt: `claude --permission-mode acceptEdits --allowedTools "Bash(dotnet:*)" -p`. |
 | `agent.model` | | Passed to the agent as `--model`. |
-| `server.url` | | The server a clone talks to (set by `clone`). |
+| `server.url` | | The server a client talks to (set by `bassia clone`). |
 | `server.token` (`BASSIA_SERVER_TOKEN`) | | The server's shared token. |
 | `merge.semantic_driver` | `weave-driver` | The driver of the semantic policy, git merge-driver style (`%O %A %B`); `off` disables it. The release packages bundle it. |
 | `land.validate` | | A shell command a machine-merged tree must pass before it lands (local monorepo). |
@@ -543,7 +544,7 @@ Bassia has four projects; each depends only on the ones before it.
      them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
    may use (`Stores`: `SqliteState` and `PostgresState` for heads, path index and leases; `S3ObjectStore` and
-   `AzureBlobObjectStore`; the remote stores and landing of a clone over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a clone, giving every command the same core), agentic runs
+   `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
    (`Platform`), and the dashboard (`Web`).
 3. **`Bassia.Server`** - `bassia-server`: the same core over the server's stores, the RPC surface, signed blob URLs,
@@ -586,15 +587,15 @@ agents landing through several landing services, a replay landing with the origi
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` holds the in-memory and SQLite
 stores to the same contract. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
-`bassia-server` in the test process over the local-disk blob storage and runs clones and raw clients against it: the
-command line across two clones, a swarm of agents landing overlapping trees over HTTP, laziness of status against
+`bassia-server` in the test process over the local-disk blob storage and runs clients and raw HTTP clients against it: the
+command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, and every dashboard page.
 `PostgresStateTests`, `ObjectStoreContractTests` and `SyncEfficiencyTests` run against PostgreSQL
 (`BASSIA_TEST_POSTGRES`, a connection string; every test gets its own schema) and Azure Blob Storage
 (`BASSIA_TEST_AZURE_BLOB`, a connection string to Azurite; every test gets its own container) - CI provides both,
 locally `/bassia-local-cloud` does (below), and
-without them those tests check nothing. `SyncEfficiencyTests` counts the requests a clone sends for a checkout, a
-second checkout and a snapshot, on the disk backend and on Azure + PostgreSQL, and runs two clones end to end on the
+without them those tests check nothing. `SyncEfficiencyTests` counts the requests a client sends for a checkout, a
+second checkout and a snapshot, on the disk backend and on Azure + PostgreSQL, and runs two clients end to end on the
 latter.
 `GitInteropTests` imports several repositories with interleaved history and exports mainline back, incrementally.
 `CloneCacheTests` covers the clone cache with a stand-in cloner on every platform (clones, fallbacks, the setting,
@@ -610,7 +611,7 @@ locally, so the cloud tests and a server on it run without an Azure account:
 ```sh
 pwsh scripts/bassia-local-cloud.ps1 check     # Docker? Node.js and PostgreSQL? git, .NET? which mode up would use
 pwsh scripts/bassia-local-cloud.ps1 up        # -Mode auto|docker|native, -BlobPort 10000, -PostgresPort 55432
-pwsh scripts/bassia-local-cloud.ps1 smoke     # server + two clones + git import, landing, git export; -Keep, -Bassia/-Server <exe>
+pwsh scripts/bassia-local-cloud.ps1 smoke     # server + two clients + git import, landing, git export; -Keep, -Bassia/-Server <exe>
 pwsh scripts/bassia-local-cloud.ps1 test      # dotnet test with BASSIA_TEST_*; -Filter cloud for the cloud tests only
 pwsh scripts/bassia-local-cloud.ps1 env       # the connection strings as BASSIA_TEST_* and BASSIA_SERVER_*; -Shell pwsh|sh|cmd
 pwsh scripts/bassia-local-cloud.ps1 down      # stop; -Purge also deletes the data
@@ -622,10 +623,10 @@ pwsh scripts/bassia-local-cloud.ps1 down      # stop; -Purge also deletes the da
   then `pg_ctl`; as root on Linux it runs as the `postgres` user, with its data under `/var/tmp/bassia-local-cloud`.
   `auto` picks Docker when its daemon answers.
 - Both listen on 127.0.0.1 only. The state (mode, ports, data folders) is kept in `<root>/local-cloud`, `<root>` being
-  the install root (`$BASSIA_HOME`, `%LOCALAPPDATA%\Bassia`, `~/.local/share/bassia`), so it outlives clones and never
+  the install root (`$BASSIA_HOME`, `%LOCALAPPDATA%\Bassia`, `~/.local/share/bassia`), so it outlives checkouts of this repository and never
   shows in `git status`. `up` is idempotent.
 - `smoke` builds `bassia` and `bassia-server` (or takes `-Bassia`/`-Server` executables, e.g. an installed version).
-  It then starts the server on Azurite + PostgreSQL in a fresh container and database. Two clones import two git
+  It then starts the server on Azurite + PostgreSQL in a fresh container and database. Two clients import two git
   repositories with interleaved history, land a change and see each other's landings, then export mainline to git
   twice, the second time incrementally. It checks the git history and files, the heads and path index in PostgreSQL,
   and every object in Azurite (`bassia-server scrub`). It exits 1 on the first failed check, keeping the folder and the
@@ -636,22 +637,22 @@ pwsh scripts/bassia-local-cloud.ps1 down      # stop; -Purge also deletes the da
 #### A lasting server on the emulators, initialized from git repositories
 
 The same script runs a `bassia-server` on Azurite and PostgreSQL that keeps running, and imports git repositories
-into it through a clone (the `/bassia-cloud-server` skill drives it):
+into it through a client (the `/bassia-cloud-server` skill drives it):
 
 ```sh
 pwsh scripts/bassia-local-cloud.ps1 serve          # -Port 8080 -Database bassia -Container bassia [-Token <t>] [-Data <dir>]
 pwsh scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Limit 200
 pwsh scripts/bassia-local-cloud.ps1 server-status  # URL, mainline seq, data, database, container, clone; exit 1 when down
 pwsh scripts/bassia-local-cloud.ps1 server-stop    # serve or import starts it again, with its data
-pwsh scripts/bassia-local-cloud.ps1 server-reset   # deletes its data, database contents, blobs and the clone
+pwsh scripts/bassia-local-cloud.ps1 server-reset   # deletes its data, database contents, blobs and the client
 ```
 
-- `serve` publishes this clone's `bassia-server` (Release) into `<state>/server-bin` (or runs `-Server <exe>`). It
+- `serve` publishes this checkout's `bassia-server` (Release) into `<state>/server-bin` (or runs `-Server <exe>`). It
   creates the PostgreSQL database and starts the server detached on the Azurite container, so the server outlives
   the script and its terminal. It is idempotent; the server's settings are kept in `<state>/server.json`.
-- `import` starts the server if needed, makes the clone (default `~/bassia-monorepo`, or `-Clone <dir>`) or reuses
+- `import` starts the server if needed, makes the client (default `~/bassia-monorepo`, or `-Clone <dir>`) or reuses
   it, and runs `bassia import` through it. It uses the installed `bassia`, or `-Bassia`, or a build of this clone.
   `-Prefix` names the folders, `-History`/`-Limit` import first-parent history. Private repositories use the user's
   git credentials.
 - `server-reset` sweeps the container's blobs with `bassia-server gc -grace-hours 0` against the emptied database
-  (nothing is referenced), and deletes the data folder and the clone. `down` also stops the server.
+  (nothing is referenced), and deletes the data folder and the client. `down` also stops the server.
