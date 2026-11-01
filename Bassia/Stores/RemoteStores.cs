@@ -256,12 +256,25 @@ public sealed class RemoteViewStore(ServerConnection server) : IViewStore
 /// <summary>Mainline's path index on the server (StatPaths, ChangedSince); only the server's landing service applies to it.</summary>
 public sealed class RemotePathIndex(ServerConnection server) : IPathIndex
 {
-	public async ValueTask<PathVersion?> GetAsync(string path, long seq, CancellationToken ct = default) =>
-		(await StatAsync([path], seq, ct))[0];
+	/// <summary>Paths per <c>/paths/stat</c> request.</summary>
+	public const int StatBatch = 5_000;
 
-	/// <summary>Several paths in one call.</summary>
-	public async Task<IReadOnlyList<PathVersion?>> StatAsync(IReadOnlyList<string> paths, long seq, CancellationToken ct = default) =>
-		(await server.PostAsync<Api.StatPathsReply>("paths/stat", new Api.StatPathsRequest(paths, seq), ct)).Versions.Select(version => version?.ToVersion()).ToList();
+	public async ValueTask<PathVersion?> GetAsync(string path, long seq, CancellationToken ct = default) =>
+		(await GetManyAsync([path], seq, ct))[0];
+
+	/// <summary>Many paths in one request per batch of <see cref="StatBatch"/>.</summary>
+	public async ValueTask<IReadOnlyList<PathVersion?>> GetManyAsync(IReadOnlyList<string> paths, long seq, CancellationToken ct = default)
+	{
+		var versions = new List<PathVersion?>(paths.Count);
+		for (var start = 0; start < paths.Count; start += StatBatch)
+		{
+			var batch = paths.Skip(start).Take(StatBatch).ToList();
+			var reply = await server.PostAsync<Api.StatPathsReply>("paths/stat", new Api.StatPathsRequest(batch, seq), ct);
+			versions.AddRange(reply.Versions.Select(version => version?.ToVersion()));
+		}
+
+		return versions;
+	}
 
 	public async IAsyncEnumerable<PathListing> ListAsync(string dir, long seq, [EnumeratorCancellation] CancellationToken ct = default)
 	{

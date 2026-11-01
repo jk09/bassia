@@ -30,6 +30,21 @@ public sealed class StoreContractTests : IDisposable
 
 	[Theory]
 	[MemberData(nameof(Kinds))]
+	public async Task PathIndex_BatchedLookup_MatchesSingleLookups_AndChangedSinceReadsOnlyLaterHistory(string kind) =>
+		await PathIndexContract.BatchedLookupAndChangedSinceAsync(Create(kind).Paths);
+
+	[Theory]
+	[MemberData(nameof(Kinds))]
+	public async Task PathIndex_Listing_FollowsDeletionsAndRecreatedSubtrees(string kind) =>
+		await PathIndexContract.ListingAsync(Create(kind).Paths);
+
+	[Theory]
+	[MemberData(nameof(Kinds))]
+	public async Task PathIndex_BatchedLookup_KeepsOrderAcrossBatches(string kind) =>
+		await PathIndexContract.ManyPathsAsync(Create(kind).Paths, 12_345);
+
+	[Theory]
+	[MemberData(nameof(Kinds))]
 	public async Task Heads_MoveOnlyByCompareAndSwap(string kind)
 	{
 		var (views, _, _) = Create(kind);

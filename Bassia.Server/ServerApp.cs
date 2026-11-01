@@ -459,13 +459,8 @@ internal sealed class ServerApp : IAsyncDisposable
 		{
 			var body = await BodyAsync<Api.StatPathsRequest>(request);
 			await IndexAsync();
-			var versions = new List<Api.VersionDto?>();
-			foreach (var path in body.Paths)
-			{
-				versions.Add(await State.GetAsync(path, body.Seq) is { } version ? Api.VersionDto.From(version) : null);
-			}
-
-			return Json(new Api.StatPathsReply(versions));
+			var versions = await State.GetManyAsync(body.Paths, body.Seq);
+			return Json(new Api.StatPathsReply(versions.Select(version => version is null ? null : Api.VersionDto.From(version)).ToList()));
 		});
 		api.MapGet("/paths/list", async (string? dir, long seq) =>
 		{
