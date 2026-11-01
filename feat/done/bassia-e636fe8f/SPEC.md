@@ -58,7 +58,7 @@ every blob in the container is swept.
       repository with history (seq 5), server-status, server-stop, import restarting it and reusing the clone,
       server-reset (83 of 87 blobs swept; the 4 left are the new empty monorepo), status exit 1, serve after reset
       (seq 0), down stopping the server; and the CI step's script end to end.
-- [ ] CI `Local cloud` jobs (Docker on Linux, native on Windows) pass the new step.
+- [x] CI `Local cloud` jobs (Docker on Linux, native on Windows) pass the new step.
 
 ## Validation
 
