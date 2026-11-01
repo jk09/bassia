@@ -1,0 +1,5 @@
+name = "bassia-proofs"
+defaultTargets = ["BassiaProofs"]
+
+[[lean_lib]]
+name = "BassiaProofs"
