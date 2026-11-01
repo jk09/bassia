@@ -63,7 +63,7 @@ Landing prefetches the versions of all touched paths before its loop.
         250-file directory 9 ms vs 4 ms.
 - [x] CI green on the PR for the batched lookup and ChangedSince (Test with PostgreSQL and Azurite, Dev Drive, both
       Local cloud jobs, packages).
-- [ ] CI green with the listing change; 203 tests pass locally with PostgreSQL and Azurite.
+- [x] CI green with the listing change (every check); 203 tests pass locally with PostgreSQL and Azurite.
 
 ## Validation
 
