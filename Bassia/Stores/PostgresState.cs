@@ -142,6 +142,32 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		return await reader.ReadAsync(ct) ? ReadVersion(reader) : null;
 	}
 
+	/// <summary>The paths in one statement per batch: each path's latest version at or before the seq, by the (path, seq) key.</summary>
+	public const int LookupBatch = 10_000;
+
+	public async ValueTask<IReadOnlyList<PathVersion?>> GetManyAsync(IReadOnlyList<string> paths, long seq, CancellationToken ct = default)
+	{
+		var versions = new PathVersion?[paths.Count];
+		await using var connection = await source.OpenConnectionAsync(ct);
+		for (var start = 0; start < paths.Count; start += LookupBatch)
+		{
+			var batch = paths.Skip(start).Take(LookupBatch).ToArray();
+			await using var command = Command(connection,
+				$"SELECT q.n, v.path, v.seq, v.kind, v.id, v.size, v.exec FROM unnest(@paths::text[]) WITH ORDINALITY AS q(path, n) " +
+				"CROSS JOIN LATERAL (SELECT path, seq, kind, id, size, exec FROM bassia_paths p WHERE p.path = q.path COLLATE \"C\" AND p.seq <= @seq " +
+				"ORDER BY p.seq DESC LIMIT 1) v", null, ("paths", batch), ("seq", seq));
+			await using var reader = await command.ExecuteReaderAsync(ct);
+			while (await reader.ReadAsync(ct))
+			{
+				var at = (int)reader.GetInt64(0) - 1;
+				versions[start + at] = new PathVersion(reader.GetString(1), reader.GetInt64(2),
+					reader.IsDBNull(3) ? null : new Leaf((EntryKind)reader.GetInt32(3), ObjectId.Parse(reader.GetString(4)), reader.GetInt64(5), reader.GetBoolean(6)));
+			}
+		}
+
+		return versions;
+	}
+
 	public async IAsyncEnumerable<PathListing> ListAsync(string dir, long seq, [EnumeratorCancellation] CancellationToken ct = default)
 	{
 		var (low, high) = Range(dir);
@@ -169,8 +195,9 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		var (low, high) = Range(prefix);
 		await using var connection = await source.OpenConnectionAsync(ct);
 		await using var command = Command(connection,
-			$"SELECT * FROM (SELECT DISTINCT ON (path) {VersionColumns} FROM bassia_paths WHERE (path >= @low AND path < @high) OR path = @exact " +
-			"ORDER BY path, seq DESC) latest WHERE seq > @after ORDER BY path", null,
+			// The latest version among those after the seq is the path's latest overall: only rows after it are read.
+			$"SELECT DISTINCT ON (path) {VersionColumns} FROM bassia_paths WHERE ((path >= @low AND path < @high) OR path = @exact) AND seq > @after " +
+			"ORDER BY path, seq DESC", null,
 			("low", low), ("high", high), ("exact", prefix.Trim('/')), ("after", afterSeq));
 		await using var reader = await command.ExecuteReaderAsync(ct);
 		while (await reader.ReadAsync(ct))

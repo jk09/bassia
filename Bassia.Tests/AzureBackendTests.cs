@@ -62,6 +62,27 @@ internal static class Backends
 /// <summary>The mutable stores' contract on PostgreSQL (the same cases as memory and SQLite, plus several nodes).</summary>
 public sealed class PostgresStateTests
 {
+	[Fact]
+	public async Task PathIndex_BatchedLookup_AndChangedSince_FollowTheContract()
+	{
+		if (Backends.FreshPostgres() is not { } connection)
+		{
+			return;
+		}
+
+		await using (var state = new PostgresState(connection))
+		{
+			await PathIndexContract.BatchedLookupAndChangedSinceAsync(state);
+		}
+
+		// More paths than one statement takes (PostgresState.LookupBatch), on a fresh schema.
+		if (Backends.FreshPostgres() is { } another)
+		{
+			await using var state = new PostgresState(another);
+			await PathIndexContract.ManyPathsAsync(state, PostgresState.LookupBatch * 2 + 17);
+		}
+	}
+
 	private static readonly ObjectId A = ObjectId.Of([1]);
 	private static readonly ObjectId B = ObjectId.Of([2]);
 

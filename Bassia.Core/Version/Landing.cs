@@ -160,9 +160,12 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 				}
 			}
 
-			foreach (var change in touched)
+			// Every touched path's mainline version in a few round trips, not one per path.
+			var versions = await repo.Paths.GetManyAsync(touched.Select(change => change.Path).ToList(), main.Seq, ct);
+			for (var index = 0; index < touched.Count; index++)
 			{
-				var version = await repo.Paths.GetAsync(change.Path, main.Seq, ct);
+				var change = touched[index];
+				var version = versions[index];
 				if (version is null || version.Seq <= record.BaseSeq)
 				{
 					changes.Add(new PathChange(change.Path, change.New));

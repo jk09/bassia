@@ -147,6 +147,14 @@ public sealed class MemoryPathIndex : IPathIndex
 		}
 	}
 
+	public ValueTask<IReadOnlyList<PathVersion?>> GetManyAsync(IReadOnlyList<string> paths, long seq, CancellationToken ct = default)
+	{
+		lock (gate)
+		{
+			return ValueTask.FromResult<IReadOnlyList<PathVersion?>>(paths.Select(path => Latest(path, seq)).ToList());
+		}
+	}
+
 	private PathVersion? Latest(string path, long seq) =>
 		paths.TryGetValue(path, out var versions) ? versions.LastOrDefault(version => version.Seq <= seq) : null;
 

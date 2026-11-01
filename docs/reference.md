@@ -386,6 +386,8 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
   transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
   order from the operation log - so any number of nodes can share one database. Use `SSL Mode=Require` on Azure.
+  A landing looks up every path it touched in one statement per 10,000 paths, and `mainline changed` and strict read
+  sets read only the history after their seq, so neither grows with the size of the monorepo's history.
 - Every switch also comes from its environment variable (`BASSIA_SERVER_STORAGE`, `BASSIA_SERVER_AZURE_URL`,
   `BASSIA_SERVER_AZURE_CONNECTION`, `BASSIA_SERVER_STATE`, `BASSIA_SERVER_POSTGRES`, ...). `bassia-server gc` and `scrub`
   run against the same backends.

@@ -151,6 +151,25 @@ public sealed class SqliteState : IServerState
 		return ValueTask.FromResult(reader.Read() ? ReadVersion(reader) : null);
 	}
 
+	/// <summary>All paths through one prepared statement on one connection: no round trips, SQLite is in process.</summary>
+	public ValueTask<IReadOnlyList<PathVersion?>> GetManyAsync(IReadOnlyList<string> paths, long seq, CancellationToken ct = default)
+	{
+		var versions = new PathVersion?[paths.Count];
+		using var connection = Open();
+		using var command = Command(connection, "SELECT path, seq, kind, id, size, exec FROM paths WHERE path = $path AND seq <= $seq ORDER BY seq DESC LIMIT 1",
+			("$path", ""), ("$seq", seq));
+		command.Prepare();
+		for (var index = 0; index < paths.Count; index++)
+		{
+			ct.ThrowIfCancellationRequested();
+			command.Parameters["$path"].Value = paths[index];
+			using var reader = command.ExecuteReader();
+			versions[index] = reader.Read() ? ReadVersion(reader) : null;
+		}
+
+		return ValueTask.FromResult<IReadOnlyList<PathVersion?>>(versions);
+	}
+
 	private static (string Low, string High) Range(string prefix)
 	{
 		prefix = prefix.Trim('/');

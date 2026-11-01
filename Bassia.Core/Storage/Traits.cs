@@ -118,6 +118,21 @@ public interface IPathIndex
 	/// <summary>The latest version of a path at or before <paramref name="seq"/>, or null if it never existed by then.</summary>
 	ValueTask<PathVersion?> GetAsync(string path, long seq, CancellationToken ct = default);
 
+	/// <summary>
+	/// <see cref="GetAsync"/> for many paths at once, in order (a landing asks about every path it touched). Stores
+	/// answer it in few round trips; this default asks one path at a time.
+	/// </summary>
+	async ValueTask<IReadOnlyList<PathVersion?>> GetManyAsync(IReadOnlyList<string> paths, long seq, CancellationToken ct = default)
+	{
+		var versions = new PathVersion?[paths.Count];
+		for (var index = 0; index < paths.Count; index++)
+		{
+			versions[index] = await GetAsync(paths[index], seq, ct);
+		}
+
+		return versions;
+	}
+
 	/// <summary>The files and directories directly in <paramref name="dir"/> as of <paramref name="seq"/>.</summary>
 	IAsyncEnumerable<PathListing> ListAsync(string dir, long seq, CancellationToken ct = default);
 
