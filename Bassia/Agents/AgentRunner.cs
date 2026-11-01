@@ -20,7 +20,8 @@ internal sealed record AgentRunOptions(
 	TimeSpan LeaseWait,
 	string? RunId = null,
 	string? ReplayOf = null,
-	ChangeId? ChangeId = null);
+	ChangeId? ChangeId = null,
+	IReadOnlyList<string>? Load = null);
 
 /// <summary>How a run ended.</summary>
 internal sealed record AgentRunResult(string RunId, WorkspaceState Workspace, RunRecord Run, IReadOnlyList<PathChange> Changes, LandResult? Land, string LogFile);
@@ -68,7 +69,8 @@ internal sealed class AgentRunner(Monorepo monorepo)
 
 			if (monorepo.Workspaces.Local(existing) is null)
 			{
-				await monorepo.Workspaces.CheckOutAsync(existing, existing.Record.Path is { } path && !Directory.Exists(path) ? path : monorepo.DefaultWorkspacePath(existing.Name), ct);
+				await monorepo.Workspaces.CheckOutAsync(existing, existing.Record.Path is { } path && !Directory.Exists(path) ? path : monorepo.DefaultWorkspacePath(existing.Name),
+					await monorepo.ResolveLoadAsync(options.Load, ct), ct);
 			}
 
 			return (await monorepo.Repo.FindWorkspaceAsync(existing.Id, ct))!;
@@ -78,7 +80,7 @@ internal sealed class AgentRunner(Monorepo monorepo)
 		var (agent, line) = CommandLine(options);
 		var recipe = new ReplayRecipe(options.Prompt, options.Command, agent, options.Model ?? monorepo.Config.GetOrNull("agent.model"));
 		var (state, _) = await monorepo.Workspaces.CreateAsync(name, monorepo.DefaultWorkspacePath(name), options.On, options.Prompt ?? line, recipe,
-			options.ChangeId, options.ReplayOf, ct);
+			options.ChangeId, options.ReplayOf, await monorepo.ResolveLoadAsync(options.Load, ct), ct);
 		return state;
 	}
 

@@ -44,6 +44,37 @@ public sealed class CliTests : IDisposable
 	}
 
 	[Fact]
+	public async Task LoadRules_FromAProfile_ShapeTheFolder_AndWorkspaceLoadChangesThem()
+	{
+		await InitAsync();
+		await OkAsync(Root, "workspace", "create", "base");
+		Directory.CreateDirectory(Path.Combine(Workspace("base"), "api"));
+		Directory.CreateDirectory(Path.Combine(Workspace("base"), "web"));
+		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), "api", "a.cs"), "a\n");
+		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), "web", "w.js"), "w\n");
+		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), ".bassia.toml"), "[load.profiles]\napi = [\"*\", \"api/\"]\n");
+		await OkAsync(Root, "workspace", "land", "base");
+
+		var created = await OkAsync(Root, "workspace", "create", "api-fix", "-load", "@api");
+		Assert.Equal(new[] { "*", "api/" }, ((TomlArray)created["load"]).Cast<string>());
+		Assert.Equal(2L, created["files_loaded"]);
+		Assert.True(File.Exists(Path.Combine(Workspace("api-fix"), "api", "a.cs")));
+		Assert.False(File.Exists(Path.Combine(Workspace("api-fix"), "web", "w.js")));
+
+		await File.WriteAllTextAsync(Path.Combine(Workspace("api-fix"), "api", "a.cs"), "a2\n");
+		var landed = await OkAsync(Root, "workspace", "land", "api-fix", "-keep");
+		Assert.Equal("landed", landed["outcome"]);
+		Assert.Equal("w\n", (string)(await OkAsync(Root, "mainline", "cat", "web/w.js"))["content"]);
+
+		var loaded = await OkAsync(Root, "workspace", "load", "api-fix", "-load", "all");
+		Assert.Equal(1L, loaded["files_added"]);
+		Assert.Equal("w\n", await File.ReadAllTextAsync(Path.Combine(Workspace("api-fix"), "web", "w.js")));
+
+		var missing = await FailAsync(Root, "workspace", "create", "nope", "-load", "@nope");
+		Assert.Contains("defines: api", (string)missing["error"]);
+	}
+
+	[Fact]
 	public async Task TwoWorkspacesRewritingAFile_TheSecondNeedsAReplay_OrSyncsAndResolves()
 	{
 		await InitAsync();

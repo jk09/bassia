@@ -142,7 +142,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | --- | --- |
 | Monorepo | `init [-path <dir>]`, `clone -from <url> [-path <dir>] [-token <t>]`, `status`, `version`, `help` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>`, `config unset -key <k>` |
-| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>]`, `workspace clone -from <w> -name <n>`, `workspace checkout <w>`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
+| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-load <rules>]`, `workspace clone -from <w> -name <n> [-load <rules>]`, `workspace checkout <w> [-load <rules>]`, `workspace load [<w>] [-load <rules>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
 | Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]` |
@@ -181,6 +181,48 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
   the last operation and `restore -op <seq|id>` any earlier one (by its seq, or 4+ characters of its id), each as a new operation, and the folder follows.
 - **Close.** `workspace close [-abandon] [-remove]` ends a workspace; its operations stay recoverable until
   `gc.retention_days` after it closed.
+
+## Load rules: what a workspace fetches, caches and holds
+
+A workspace's folder need not hold the whole monorepo. Its **load rules** select the paths it holds, like the load rules
+of a ClearCase snapshot view's config spec. The clone fetches the content of those paths only, and caches it in
+`.bassia/cache`, shared by all workspaces of the clone. It never reads the trees below a directory nothing of which is
+loaded. Many clients can then each run agents on their own part of a large monorepo, each downloading only that part.
+
+```sh
+bassia workspace create api-fix -load "*,api/,libs/shared/,!api/testdata/"   # top-level files, two projects, minus fixtures
+bassia agent start -load @api -prompt "..." -land                            # a profile from .bassia.toml
+bassia workspace load api-fix -load "*,api/,web/"                            # load more (or less) later
+bassia workspace load api-fix                                                # show the rules in force
+```
+
+- **Rules** are paths from the root of the tree. They are tried in order, and the last rule that matches a path
+  decides:
+  - `api` or `api/` loads that directory and everything below it; a literal path without a slash may also name a file.
+  - `*`, `*.md`, `docs/*.md` load the files matching the glob at that depth. `*` stays within one name and `**`
+    crosses folders (`**/*.proto`).
+  - `src/*/`, with a trailing slash, loads the matching directories whole.
+  - `!pattern` excludes what it matches.
+
+  `all`, or no rules, loads everything. `.bassia.toml` is always loaded.
+- **Defaults**, from first to last: `-load` on `workspace create|clone|checkout` and `agent start|replay`; this
+  machine's `workspace.load` setting; mainline's `.bassia.toml` `[load] default`; everything. `@name` expands to a
+  profile of `.bassia.toml`, and a replay loads what the original loaded.
+
+  ```toml
+  [load]
+  default = ["*"]
+  [load.profiles]
+  api = ["*", "api/", "!api/testdata/"]
+  web = ["*", "web/"]
+  ```
+- **What is not loaded stays as it is.** The workspace's tree still holds everything. A snapshot never reads an
+  unloaded path as deleted, and sync and landing carry unloaded paths along unchanged. A directory that is not loaded
+  shows as an empty folder, so an agent sees the monorepo's shape. A file an agent creates there is added like any
+  other.
+- **Changing the rules.** `workspace load` snapshots first, so edits to paths the new rules drop stay on the workspace.
+  It then removes those paths from the folder, and writes the paths the new rules add.
+- Results of `workspace create|clone|checkout|load` report `load` (the rules) and `files_loaded`.
 
 ## Workspaces on a Dev Drive (Windows)
 
@@ -425,12 +467,13 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `user.id` (`BASSIA_USER`) | the login name | Who acts: the agent of operations, the owner of workspaces. |
-| `agent.command` | `claude -p --permission-mode acceptEdits` | The agent a run starts; the prompt is appended as one quoted argument. |
+| `agent.command` | `claude -p --permission-mode acceptEdits` | The agent a run starts; the prompt is appended as one quoted argument. To let Claude Code also run builds and tests, allow them and keep `-p` last, since `--allowedTools` takes a list that would swallow the prompt: `claude --permission-mode acceptEdits --allowedTools "Bash(dotnet:*)" -p`. |
 | `agent.model` | | Passed to the agent as `--model`. |
 | `server.url` | | The server a clone talks to (set by `clone`). |
 | `server.token` (`BASSIA_SERVER_TOKEN`) | | The server's shared token. |
 | `merge.semantic_driver` | `weave-driver` | The driver of the semantic policy, git merge-driver style (`%O %A %B`); `off` disables it. The release packages bundle it. |
 | `land.validate` | | A shell command a machine-merged tree must pass before it lands (local monorepo). |
+| `workspace.load` | | The load rules a new workspace gets on this machine when `-load` is not given (comma-separated, `@name` for a profile); empty: `.bassia.toml` `[load] default`, else everything. |
 | `workspace.clone` | `auto` | On Windows, block-clone workspace files from `.bassia/clones` on a Dev Drive (or another block-cloning ReFS volume); `off` always writes them. |
 | `workspace.dir` | `workspaces` | Where new workspaces' folders go. |
 | `lease.ttl` | `600` | Seconds a lease lives unless renewed. |

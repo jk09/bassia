@@ -15,6 +15,9 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 
 	private readonly ConcurrentDictionary<ObjectId, StoredObject> cache = new();
 
+	/// <summary>Forgets the decoded objects held in memory (the store, and a clone's disk cache, keep them).</summary>
+	public void ClearCache() => cache.Clear();
+
 	public IObjectStore Store => store;
 
 	public Chunker Chunker { get; } = new(chunks);
