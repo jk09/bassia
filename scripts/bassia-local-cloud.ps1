@@ -27,11 +27,14 @@
 	./scripts/bassia-local-cloud.ps1 test                  # dotnet test against the emulators; -Filter cloud for those tests only
 	./scripts/bassia-local-cloud.ps1 smoke                 # -Bassia <exe> -Server <exe> to test installed builds; -Keep
 	./scripts/bassia-local-cloud.ps1 down -Purge
+	./scripts/bassia-local-cloud.ps1 serve                 # a lasting bassia-server on both; -Port 8080 -Database bassia -Container bassia -Token <t>
+	./scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Limit 200
+	./scripts/bassia-local-cloud.ps1 server-status         # also server-stop, server-reset (an empty monorepo again)
 #>
 [CmdletBinding()]
 param(
 	[Parameter(Mandatory, Position = 0)]
-	[ValidateSet('check', 'up', 'status', 'env', 'test', 'smoke', 'down')]
+	[ValidateSet('check', 'up', 'status', 'env', 'test', 'smoke', 'down', 'serve', 'import', 'server-status', 'server-stop', 'server-reset')]
 	[string] $Command,
 
 	# up: how to run the services.
@@ -61,7 +64,25 @@ param(
 	[switch] $Keep,
 
 	# down: also delete the services' data (containers and volumes, or data folders).
-	[switch] $Purge
+	[switch] $Purge,
+
+	# serve: the server's port on 127.0.0.1, data folder (default <state>/server), PostgreSQL database and blob
+	# container, and an optional shared token (clients then need it too).
+	[int] $Port = 8080,
+	[string] $Data,
+	[string] $Database = 'bassia',
+	[string] $Container = 'bassia',
+	[string] $Token,
+
+	# import: git repositories (URLs or paths), imported each under its own top-level folder (-Prefix), with
+	# first-parent history (-History, at most -Limit commits each) or as one snapshot each.
+	[string[]] $Git,
+	[string[]] $Prefix,
+	[switch] $History,
+	[int] $Limit = 1000,
+
+	# import: the clone of the server to import through (default ~/bassia-monorepo); made if it does not exist.
+	[string] $Clone
 )
 
 $ErrorActionPreference = 'Stop'
@@ -289,6 +310,33 @@ function Start-Docker([int] $blobPort, [int] $pgPort) {
 	}
 }
 
+# Starts a long-running process that outlives this script, its console, and hosts that end a command's processes when
+# it finishes (CI steps, agents' tool sessions); returns it, found by a marker in its command line.
+function Start-Detached([string] $exe, [string[]] $arguments, [string] $log, [string] $processName, [string] $marker, [string] $what) {
+	if ($script:OnWindows) {
+		# Created by WMI: outside this shell's job object, with a hidden console of its own.
+		$quoted = ((@($exe) + $arguments) | ForEach-Object { "`"$_`"" }) -join ' '
+		$commandLine = "cmd.exe /d /c `"$quoted > `"$log`" 2> `"$log.err`"`""
+		$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16] 0 }
+		$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; ProcessStartupInformation = $startup }
+		if ($created.ReturnValue -ne 0) { throw "Could not start $what (Win32_Process.Create returned $($created.ReturnValue))." }
+	}
+	else {
+		# Through sh: its own session (setsid), no file descriptor of this shell inherited.
+		$quote = { param($text) "'" + ($text -replace "'", "'\''") + "'" }
+		$line = ((@($exe) + $arguments) | ForEach-Object { & $quote $_ }) -join ' '
+		$detach = (Find-Command setsid) ? 'setsid ' : 'nohup '
+		& /bin/sh -c "$detach$line > $(& $quote $log) 2> $(& $quote "$log.err") < /dev/null &"
+	}
+
+	Wait-Until { $script:found = Find-ProcessByMarker $processName $marker; $null -ne $script:found } "The $what process" 30
+	$script:found
+}
+
+function Find-ProcessByMarker([string] $processName, [string] $marker) {
+	Get-Process -Name $processName -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($marker) } | Select-Object -First 1
+}
+
 function Start-NativeAzurite($state) {
 	if (Test-Azurite $state.BlobPort) { Write-Host 'Azurite: already running.'; return }
 	$package = Join-Path $script:StateDir "azurite-$($script:AzuriteVersion)"
@@ -305,28 +353,7 @@ function Start-NativeAzurite($state) {
 	$null = New-Item -ItemType Directory -Force -Path $data
 	$log = Join-Path $script:StateDir 'azurite.log'
 	$arguments = @($main, '--blobHost', '127.0.0.1', '--blobPort', "$($state.BlobPort)", '--location', $data, '--skipApiVersionCheck', '--loose')
-	$node = Find-Command node
-	if ($script:OnWindows) {
-		# Created by WMI, outside this shell's job object, with a console of its own: Azurite outlives this script, its
-		# console, and hosts that end a job's processes when a command finishes (CI steps, agents' tool sessions).
-		$quoted = ((@($node) + $arguments) | ForEach-Object { "`"$_`"" }) -join ' '
-		$commandLine = "cmd.exe /d /c `"$quoted > `"$log`" 2> `"$log.err`"`""
-		$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16] 0 }
-		$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; ProcessStartupInformation = $startup }
-		if ($created.ReturnValue -ne 0) { throw "Could not start Azurite (Win32_Process.Create returned $($created.ReturnValue))." }
-	}
-	else {
-		# Detached through sh: its own session (setsid), no file descriptor of this shell inherited, so Azurite outlives
-		# this script, its terminal and whatever runs it.
-		$quote = { param($text) "'" + ($text -replace "'", "'\''") + "'" }
-		$line = ((@($node) + $arguments) | ForEach-Object { & $quote $_ }) -join ' '
-		$detach = (Find-Command setsid) ? 'setsid ' : 'nohup '
-		& /bin/sh -c "$detach$line > $(& $quote $log) 2> $(& $quote "$log.err") < /dev/null &"
-	}
-
-	Wait-Until { $script:found = Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($main) } | Select-Object -First 1; $null -ne $script:found } 'The Azurite process' 30
-	$process = $script:found
-
+	$process = Start-Detached (Find-Command node) $arguments $log 'node' $main 'Azurite'
 	$state.AzuritePid = $process.Id
 	Write-Host "Azurite: started (pid $($process.Id), data in $data)."
 }
@@ -654,6 +681,186 @@ function Invoke-Smoke {
 	Write-Host "Smoke test passed: $($script:Checks.Count) checks against Azurite (127.0.0.1:$($state.BlobPort)) and PostgreSQL (127.0.0.1:$($state.PostgresPort))."
 }
 
+# ----- a lasting server on the emulators, and imports into it -----
+
+$script:ServerFile = Join-Path $script:StateDir 'server.json'
+$script:ServerExeName = $script:OnWindows ? 'bassia-server.exe' : 'bassia-server'
+
+function Read-Server {
+	if (-not (Test-Path -LiteralPath $script:ServerFile)) { return $null }
+	Get-Content -LiteralPath $script:ServerFile -Raw | ConvertFrom-Json
+}
+
+function Write-Server($srv) {
+	$null = New-Item -ItemType Directory -Force -Path $script:StateDir
+	$srv | ConvertTo-Json | Set-Content -LiteralPath $script:ServerFile -Encoding utf8
+}
+
+function Get-ServerArgs($state, $srv) {
+	$connections = Get-Connections $state
+	$postgres = $connections.Postgres -replace 'Database=postgres', "Database=$($srv.Database)"
+	@('-storage', 'azure', '-azure-connection', $connections.AzureBlob, '-azure-container', $srv.Container, '-state', 'postgres', '-postgres', $postgres)
+}
+
+function Get-ServerMain($srv) {
+	if (-not $srv) { return $null }
+	$headers = $srv.Token ? @{ Authorization = "Bearer $($srv.Token)" } : @{}
+	try { Invoke-RestMethod "$($srv.Url)/api/v1/main" -Headers $headers -TimeoutSec 3 } catch { $null }
+}
+
+function Test-ServerRunning($srv) {
+	$srv -and (Find-ProcessByMarker 'bassia-server' $srv.Data) -and (Get-ServerMain $srv)
+}
+
+function Invoke-Serve {
+	$state = Assert-Up
+	$srv = Read-Server
+	if ($srv -and (Test-ServerRunning $srv)) {
+		Write-Host "bassia-server: already running at $($srv.Url) (mainline seq $((Get-ServerMain $srv).seq))."
+		return $srv
+	}
+
+	$url = "http://127.0.0.1:$Port"
+	$new = [ordered]@{
+		Url = $url; Port = $Port
+		Data = $Data ? [IO.Path]::GetFullPath($Data) : (Join-Path $script:StateDir 'server')
+		Database = $Database; Container = $Container; Token = $Token
+		Clone = $srv ? $srv.Clone : $null
+		Exe = $null
+	}
+	if ($srv -and -not $PSBoundParameters.ContainsKey('Port')) { $new.Port = $srv.Port; $new.Url = $srv.Url }
+	foreach ($name in @('Data', 'Database', 'Container', 'Token')) {
+		if ($srv -and -not $PSBoundParameters.ContainsKey($name)) { $new[$name] = $srv.$name }
+	}
+	if ($new.Database -notmatch '^[a-z_][a-z0-9_]*$') { throw "-Database must be a plain lower-case name (letters, digits, _): $($new.Database)" }
+	if (Test-Port $new.Port) { throw "Port $($new.Port) is taken by another program. Pick another with -Port." }
+
+	if ($Server) { $new.Exe = (Get-Command $Server).Source }
+	else {
+		$bin = Join-Path $script:StateDir 'server-bin'
+		$new.Exe = Join-Path $bin $script:ServerExeName
+		if (-not $NoBuild -or -not (Test-Path -LiteralPath $new.Exe)) {
+			Write-Host "bassia-server: publishing this clone's bassia-server (Release) into $bin."
+			$output = & dotnet publish (Join-Path $script:RepoRoot 'Bassia.Server/Bassia.Server.csproj') -c Release -o $bin -v q -nologo 2>&1
+			if ($LASTEXITCODE -ne 0) { throw "dotnet publish bassia-server failed:`n$($output -join "`n")" }
+		}
+	}
+
+	if (-not ((Invoke-Psql $state "SELECT 1 FROM pg_database WHERE datname = '$($new.Database)'") -contains '1')) {
+		Invoke-Psql $state "CREATE DATABASE $($new.Database)" | Out-Null
+		Write-Host "bassia-server: created database $($new.Database)."
+	}
+
+	$null = New-Item -ItemType Directory -Force -Path $new.Data
+	$new = [pscustomobject] $new
+	$arguments = @('-data', $new.Data, '-url', $new.Url) + (Get-ServerArgs $state $new)
+	if ($new.Token) { $arguments += @('-token', $new.Token) }
+	$log = Join-Path $script:StateDir 'server.log'
+	$process = Start-Detached $new.Exe $arguments $log 'bassia-server' $new.Data 'bassia-server'
+	Write-Server $new
+	Wait-Until {
+		if ($process.HasExited) { throw "bassia-server exited:`n$((Get-Content "$log.err" -TotalCount 15 -ErrorAction SilentlyContinue) -join "`n")" }
+		$null -ne (Get-ServerMain $new)
+	} 'bassia-server'
+	Write-Host "bassia-server: running at $($new.Url) (pid $($process.Id)); blobs in Azurite container '$($new.Container)', state in PostgreSQL database '$($new.Database)', data in $($new.Data), log in $log."
+	$new
+}
+
+function Get-BassiaExe {
+	if ($Bassia) { return (Get-Command $Bassia).Source }
+	$installed = Find-Command 'bassia'
+	if ($installed -and -not $installed.EndsWith('.cmd')) { return $installed }
+	Write-Host '> dotnet build Bassia (Debug): no bassia on PATH' -ForegroundColor DarkGray
+	$output = & dotnet build (Join-Path $script:RepoRoot 'Bassia/Bassia.csproj') -c Debug -v q -nologo 2>&1
+	if ($LASTEXITCODE -ne 0) { throw "dotnet build Bassia failed:`n$($output -join "`n")" }
+	Join-Path $script:RepoRoot "Bassia/bin/Debug/net10.0/$($script:OnWindows ? 'Bassia.exe' : 'Bassia')"
+}
+
+function Invoke-Import {
+	if (-not $Git) { throw 'import needs -Git <url or path>,... (the repositories to import).' }
+	if (-not (Find-Command git)) { throw 'import needs git on PATH.' }
+	$srv = Invoke-Serve
+	$script:BassiaExe = Get-BassiaExe
+	. (Join-Path $PSScriptRoot 'Bassia.common.ps1')
+
+	$dir = $Clone ? [IO.Path]::GetFullPath($Clone) : ($srv.Clone ? $srv.Clone : (Join-Path $HOME 'bassia-monorepo'))
+	if (Test-Path -LiteralPath (Join-Path $dir '.bassia')) {
+		$status = Invoke-Bassia -C $dir status
+		if ($status.kind -ne 'remote' -or $status.url.TrimEnd('/') -ne $srv.Url) {
+			throw "'$dir' is a Bassia monorepo of something else ($($status.kind) $($status.url)). Pick another folder with -Clone."
+		}
+	}
+	elseif ((Test-Path -LiteralPath $dir) -and @(Get-ChildItem -LiteralPath $dir -Force).Count -gt 0) {
+		throw "'$dir' exists and is not empty. Pick another folder with -Clone."
+	}
+	else {
+		$cloneArgs = @('clone', '-from', $srv.Url, '-path', $dir)
+		if ($srv.Token) { $cloneArgs += @('-token', $srv.Token) }
+		Invoke-Bassia @cloneArgs | Out-Null
+	}
+
+	$srv.Clone = $dir
+	Write-Server $srv
+	$sources = @($Git | ForEach-Object { $_ -split ',' } | Where-Object { $_ } | ForEach-Object { (Test-Path -LiteralPath $_) ? [IO.Path]::GetFullPath($_) : $_ })
+	$importArgs = @('-C', $dir, 'import', '-git', ($sources -join ','))
+	if ($Prefix) { $importArgs += @('-prefix', (@($Prefix | ForEach-Object { $_ -split ',' }) -join ',')) }
+	if ($History) { $importArgs += @('-history', '-limit', "$Limit") }
+	$result = Invoke-Bassia @importArgs
+	foreach ($repository in @($result.repository)) {
+		Write-Host ("  {0,-24} {1,6} commit(s) {2,8} file(s)  {3}" -f $repository.prefix, $repository.commits, $repository.files, $repository.url)
+	}
+	Write-Host "Imported $(@($result.repository).Count) repositor$((@($result.repository).Count -eq 1) ? 'y' : 'ies'); mainline is at seq $($result.seq)."
+	Write-Host "Clone: $dir  (bassia -C `"$dir`" workspace create <name>)"
+	Write-Host "Dashboard: $($srv.Url)"
+}
+
+function Invoke-ServerStatus {
+	$srv = Read-Server
+	if (-not $srv) { Write-Host 'No server set up. Run: ./scripts/bassia-local-cloud.ps1 serve'; exit 1 }
+	$main = Get-ServerMain $srv
+	$running = (Find-ProcessByMarker 'bassia-server' $srv.Data) -and $main
+	Write-Host "server     $($running ? 'running' : 'stopped') at $($srv.Url)"
+	if ($main) { Write-Host "mainline   seq $($main.seq)" }
+	Write-Host "data       $($srv.Data)"
+	Write-Host "postgres   database $($srv.Database)"
+	Write-Host "azurite    container $($srv.Container)"
+	Write-Host "clone      $($srv.Clone ? $srv.Clone : '(none yet; import makes one)')"
+	if (-not $running) { exit 1 }
+}
+
+function Stop-Server($srv) {
+	$process = Find-ProcessByMarker 'bassia-server' $srv.Data
+	if ($process) {
+		Stop-Process -Id $process.Id -Force
+		Wait-Until { -not (Find-ProcessByMarker 'bassia-server' $srv.Data) } 'bassia-server to stop' 15
+		Write-Host "bassia-server: stopped (pid $($process.Id))."
+	}
+	else { Write-Host 'bassia-server: not running.' }
+}
+
+function Invoke-ServerReset {
+	$state = Assert-Up
+	$srv = Read-Server
+	if (-not $srv) { Write-Host 'No server set up; nothing to reset.'; return }
+	Stop-Server $srv
+	Invoke-Psql $state "DROP DATABASE IF EXISTS $($srv.Database) WITH (FORCE)" | Out-Null
+	Invoke-Psql $state "CREATE DATABASE $($srv.Database)" | Out-Null
+	# Against the empty database nothing is referenced, so gc sweeps every blob the container held.
+	$gcData = Join-Path ([IO.Path]::GetTempPath()) "bassia-reset-$(Get-Random)"
+	$output = & $srv.Exe gc -data $gcData -grace-hours 0 -retention-days 0 @(Get-ServerArgs $state $srv) 2>&1
+	if ($LASTEXITCODE -ne 0) { throw "bassia-server gc failed:`n$($output -join "`n")" }
+	Write-Host "bassia-server: $(@($output)[-1])"
+	foreach ($folder in @($srv.Data, $gcData, $srv.Clone)) {
+		if ($folder -and (Test-Path -LiteralPath $folder)) {
+			Remove-Item -LiteralPath $folder -Recurse -Force
+			Write-Host "Deleted $folder."
+		}
+	}
+	$srv.Clone = $null
+	Write-Server $srv
+	Write-Host "Reset: database '$($srv.Database)' and container '$($srv.Container)' hold an empty monorepo again; 'serve' or 'import' starts it."
+}
+
 switch ($Command) {
 	'check' { Invoke-Check }
 	'up' { Invoke-Up }
@@ -661,5 +868,10 @@ switch ($Command) {
 	'env' { $state = Read-State; if (-not $state) { throw 'Not set up. Run: ./scripts/bassia-local-cloud.ps1 up' }; Show-Env $state }
 	'test' { Invoke-Test }
 	'smoke' { Invoke-Smoke }
-	'down' { Invoke-Down }
+	'down' { $srv = Read-Server; if ($srv) { Stop-Server $srv }; if ($Purge) { Remove-Item -LiteralPath $script:ServerFile -Force -ErrorAction SilentlyContinue }; Invoke-Down }
+	'serve' { $null = Invoke-Serve }
+	'import' { Invoke-Import }
+	'server-status' { Invoke-ServerStatus }
+	'server-stop' { $srv = Read-Server; if ($srv) { Stop-Server $srv } else { Write-Host 'No server set up.' } }
+	'server-reset' { Invoke-ServerReset }
 }
