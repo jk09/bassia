@@ -24,6 +24,7 @@ internal sealed class MonorepoConfig(string file)
 		new("merge.semantic_driver", "weave-driver", "The language-aware merge driver for the semantic conflict policy (git merge-driver style: %O %A %B); 'off' disables it."),
 		new("land.validate", "", "A shell command that must pass on a machine-merged tree (semantic policy) before it lands; without one, semantic conflicts need a replay."),
 		new("workspace.clone", "auto", "auto: on Windows, block-clone workspace files from .bassia/clones when the monorepo folder and the workspace are on a Dev Drive (or another block-cloning ReFS volume); off: always write them."),
+		new("workspace.load", "", "The load rules a new workspace gets on this machine when -load is not given (comma-separated; @name for a profile of .bassia.toml's [load.profiles]); empty: .bassia.toml's [load] default, else everything."),
 		new("workspace.dir", "workspaces", "Where 'workspace create' puts a workspace's folder when -path is not given, relative to the monorepo folder."),
 		new("lease.ttl", "600", "Seconds a lease lives unless renewed."),
 		new("gc.grace_hours", "24", "Blobs younger than this are never swept (uploads for landings in flight)."),

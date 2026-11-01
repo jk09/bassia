@@ -217,6 +217,41 @@ internal sealed class Monorepo : IDisposable
 	}
 
 	/// <summary>A workspace by reference, or the one the current directory is in.</summary>
+	/// <summary>
+	/// The load rules for a new workspace folder: the ones given (null: none given), else this machine's
+	/// <c>workspace.load</c>, else the <c>[load] default</c> of mainline's <c>.bassia.toml</c>, else everything.
+	/// <c>@name</c> stands for that profile of <c>[load.profiles]</c>; "all" for everything.
+	/// </summary>
+	public async Task<LoadRules> ResolveLoadAsync(IReadOnlyList<string>? given, CancellationToken ct = default)
+	{
+		var configured = Config.GetOrNull("workspace.load");
+		RepoPolicy? policy = null;
+		async Task<RepoPolicy> Policy() => policy ??= await RepoPolicy.LoadAsync(Repo.Trees, (await Repo.GetMainAsync(ct)).Tree, ct);
+		var patterns = given ?? (configured is { Length: > 0 } ? configured.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : null)
+			?? (await Policy()).LoadDefault;
+		var expanded = new List<string>();
+		foreach (var pattern in patterns)
+		{
+			if (pattern.StartsWith('@'))
+			{
+				var profiles = (await Policy()).LoadProfiles;
+				if (!profiles.TryGetValue(pattern[1..], out var profile))
+				{
+					throw new MonorepoException($"No load profile '{pattern[1..]}' in {RepoPolicy.FileName} [load.profiles]" +
+						(profiles.Count == 0 ? " (it defines none)." : $"; it defines: {string.Join(", ", profiles.Keys)}."));
+				}
+
+				expanded.AddRange(profile);
+			}
+			else
+			{
+				expanded.Add(pattern);
+			}
+		}
+
+		return LoadRules.Parse(expanded);
+	}
+
 	public async Task<WorkspaceState> WorkspaceAsync(string? reference, CancellationToken ct = default)
 	{
 		if (reference is not null)

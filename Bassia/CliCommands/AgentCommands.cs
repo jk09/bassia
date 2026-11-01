@@ -20,7 +20,8 @@ internal static class AgentCommands
 		}
 
 		return new AgentRunOptions(prompt, command, invocation.Get("workspace"), invocation.Get("name"), invocation.Get("on"), invocation.Get("model"),
-			invocation.Has("land"), invocation.Has("keep"), invocation.List("lease"), TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"));
+			invocation.Has("land"), invocation.Has("keep"), invocation.List("lease"), TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"),
+			Load: invocation.Has("load") ? invocation.List("load") : null);
 	}
 
 	public static async Task<int> StartAsync(Invocation invocation)
@@ -79,6 +80,11 @@ internal static class AgentCommands
 		if (invocation.List("lease") is { Count: > 0 } leases)
 		{
 			args.AddRange(["-lease", string.Join(',', leases)]);
+		}
+
+		if (invocation.List("load") is { Count: > 0 } load)
+		{
+			args.AddRange(["-load", string.Join(',', load)]);
 		}
 
 		if (invocation.Get("prompt") is { } prompt)
@@ -223,7 +229,9 @@ internal static class AgentCommands
 
 		var name = $"{original.Name.Split("-replay")[0]}-replay{DateTimeOffset.UtcNow:HHmmss}";
 		var options = new AgentRunOptions(recipe.Prompt, recipe.Command, null, name, null, recipe.Model, invocation.Has("land"), false, invocation.List("lease"),
-			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), ReplayOf: original.Id, ChangeId: working.ChangeId);
+			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), ReplayOf: original.Id, ChangeId: working.ChangeId,
+			// A replay loads what the original loaded here, unless told otherwise.
+			Load: invocation.Has("load") ? invocation.List("load") : monorepo.Workspaces.Local(original)?.State.Rules is { IsAll: false } previous ? previous.Patterns : null);
 		await monorepo.Workspaces.Service.SetStatusAsync(original.Id, WorkspaceStatus.Replaced, "replaced by a replay", monorepo.User);
 		var result = await runner.RunAsync(options, Console.WriteLine);
 		var data = await WorkspaceAsync(monorepo.Repo, result.Workspace);

@@ -22,6 +22,9 @@ public sealed class TreeState
 
 	public Dictionary<string, TreeStateEntry> Entries { get; init; } = new(StringComparer.Ordinal);
 
+	/// <summary>What the folder loads (<see cref="LoadRules"/>); everything by default. Only loaded paths are tracked.</summary>
+	public LoadRules Rules { get; set; } = LoadRules.All;
+
 	private static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new IdConverter() } };
 
 	public static TreeState Load(string file)
@@ -35,6 +38,7 @@ public sealed class TreeState
 		return new TreeState
 		{
 			Tree = data.Tree,
+			Rules = data.Load is { Count: > 0 } load ? new LoadRules(load) : LoadRules.All,
 			Entries = data.Entries.ToDictionary(entry => entry.Path, entry => new TreeStateEntry(
 				new Leaf(entry.Kind, entry.Id, entry.LeafSize, entry.Executable), entry.Size, entry.Mtime, entry.DiskId), StringComparer.Ordinal)
 		};
@@ -43,14 +47,14 @@ public sealed class TreeState
 	public void Save(string file)
 	{
 		Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-		var data = new Stored(Tree, Entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new StoredEntry(pair.Key, pair.Value.Leaf.Kind,
+		var data = new Stored(Tree, Rules.IsAll ? null : Rules.Patterns.ToList(), Entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new StoredEntry(pair.Key, pair.Value.Leaf.Kind,
 			pair.Value.Leaf.Id, pair.Value.Leaf.Size, pair.Value.Leaf.Executable, pair.Value.Size, pair.Value.Mtime, pair.Value.DiskId)).ToList());
 		var temp = file + ".tmp";
 		File.WriteAllText(temp, JsonSerializer.Serialize(data, Json));
 		File.Move(temp, file, true);
 	}
 
-	private sealed record Stored(ObjectId Tree, List<StoredEntry> Entries);
+	private sealed record Stored(ObjectId Tree, List<string>? Load, List<StoredEntry> Entries);
 
 	private sealed record StoredEntry(string Path, EntryKind Kind, ObjectId Id, long LeafSize, bool Executable, long Size, long Mtime, ObjectId DiskId);
 
@@ -90,7 +94,16 @@ public interface IWorkspaceProvider
 
 	/// <summary>Finds what changed on disk since <paramref name="state"/> and stores the new content (only missing chunks are uploaded).</summary>
 	Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default);
+
+	/// <summary>
+	/// Changes what the directory loads: writes the paths <paramref name="rules"/> add and removes the ones it drops,
+	/// for the tree it holds. Snapshot first: a dropped path's local edits are not kept.
+	/// </summary>
+	Task<LoadResult> LoadAsync(TreeState state, LoadRules rules, CancellationToken ct = default);
 }
+
+/// <summary>What changing a workspace's load rules did.</summary>
+public sealed record LoadResult(int Loaded, int Unloaded);
 
 /// <summary>A plain directory checkout of a workspace's tree.</summary>
 public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceProvider
@@ -119,22 +132,76 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 	public async Task UpdateAsync(TreeState state, ObjectId to, CancellationToken ct = default)
 	{
 		Directory.CreateDirectory(Root);
-		var changes = await repo.Trees.DiffAsync(state.Tree.IsEmpty ? null : state.Tree, to, "", ct);
-		foreach (var change in changes.Where(change => change.New is null))
+		var rules = state.Rules;
+		var changes = await repo.Trees.DiffAsync(state.Tree.IsEmpty ? null : state.Tree, to, "", rules.IsAll ? null : rules.MayLoadUnder, ct);
+		var emptied = new List<string>();
+		foreach (var change in changes.Where(change => change.New is null || change.New.Kind == EntryKind.Tree))
 		{
-			Delete(change.Path);
-			state.Entries.Remove(change.Path);
+			if (change.Old?.Kind == EntryKind.Tree || change.New?.Kind == EntryKind.Tree)
+			{
+				// A directory nothing of which is loaded: shown empty, so the folder keeps the monorepo's shape.
+				if (change.New?.Kind == EntryKind.Tree)
+				{
+					Directory.CreateDirectory(Full(change.Path));
+				}
+				else
+				{
+					emptied.Add(change.Path);
+				}
+
+				continue;
+			}
+
+			if (state.Entries.Remove(change.Path))
+			{
+				Delete(change.Path);
+				emptied.Add(PathNames.Parent(change.Path));
+			}
 		}
 
+		var written = changes.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && rules.IsLoaded(change.Path)).ToList();
 		// The content of every new file in a few batched round trips, before any is written.
-		await repo.Objects.PrefetchContentAsync(changes.Where(change => change.New is not null).Select(change => change.New!), ct);
-		foreach (var change in changes.Where(change => change.New is not null))
+		await repo.Objects.PrefetchContentAsync(written.Select(change => change.New!), ct);
+		foreach (var change in written)
 		{
 			state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
 		}
 
-		RemoveEmptyDirectories(changes.Where(change => change.New is null).Select(change => PathNames.Parent(change.Path)));
+		RemoveEmptyDirectories(emptied);
 		state.Tree = to;
+	}
+
+	public async Task<LoadResult> LoadAsync(TreeState state, LoadRules rules, CancellationToken ct = default)
+	{
+		Directory.CreateDirectory(Root);
+		var dropped = state.Entries.Keys.Where(path => !rules.IsLoaded(path)).ToList();
+		foreach (var path in dropped)
+		{
+			Delete(path);
+			state.Entries.Remove(path);
+		}
+
+		RemoveEmptyDirectories(dropped.Select(PathNames.Parent));
+		state.Rules = rules;
+		var loaded = 0;
+		if (!state.Tree.IsEmpty)
+		{
+			var all = await repo.Trees.DiffAsync(null, state.Tree, "", rules.IsAll ? null : rules.MayLoadUnder, ct);
+			foreach (var change in all.Where(change => change.New?.Kind == EntryKind.Tree))
+			{
+				Directory.CreateDirectory(Full(change.Path));
+			}
+
+			var added = all.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && rules.IsLoaded(change.Path) && !state.Entries.ContainsKey(change.Path)).ToList();
+			await repo.Objects.PrefetchContentAsync(added.Select(change => change.New!), ct);
+			foreach (var change in added)
+			{
+				state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
+				loaded++;
+			}
+		}
+
+		return new LoadResult(loaded, dropped.Count);
 	}
 
 	private async Task<TreeStateEntry> WriteAsync(string path, Leaf leaf, CancellationToken ct)

@@ -178,7 +178,15 @@ public sealed class Trees(ObjectAccess objects)
 	/// The leaf-level differences between two trees (null = empty tree), pruning every subtree whose id is equal. A
 	/// directory replaced by a file shows as the directory's files deleted and the file added.
 	/// </summary>
-	public async Task<IReadOnlyList<TreeChange>> DiffAsync(ObjectId? oldTree, ObjectId? newTree, string prefix = "", CancellationToken ct = default)
+	public Task<IReadOnlyList<TreeChange>> DiffAsync(ObjectId? oldTree, ObjectId? newTree, string prefix = "", CancellationToken ct = default) =>
+		DiffAsync(oldTree, newTree, prefix, null, ct);
+
+	/// <summary>
+	/// The changes from one tree to another. With <paramref name="descend"/>, a directory it refuses is not read: the
+	/// change reports it as one entry whose leaves are the directory's tree (<see cref="EntryKind.Tree"/>), so a sparse
+	/// checkout never fetches what it does not load.
+	/// </summary>
+	public async Task<IReadOnlyList<TreeChange>> DiffAsync(ObjectId? oldTree, ObjectId? newTree, string prefix, Func<string, bool>? descend, CancellationToken ct = default)
 	{
 		// Breadth first: all the subtrees of one level that differ are fetched together, so a remote store answers a
 		// whole level in one round trip instead of one per tree.
@@ -191,7 +199,7 @@ public sealed class Trees(ObjectAccess objects)
 			var next = new List<(ObjectId? Old, ObjectId? New, string Prefix)>();
 			foreach (var (o, n, at) in level)
 			{
-				await DiffLevelAsync(o, n, at, changes, next, ct);
+				await DiffLevelAsync(o, n, at, changes, next, descend, ct);
 			}
 
 			level = next;
@@ -202,7 +210,7 @@ public sealed class Trees(ObjectAccess objects)
 	}
 
 	private async Task DiffLevelAsync(ObjectId? oldTree, ObjectId? newTree, string prefix, List<TreeChange> changes,
-		List<(ObjectId? Old, ObjectId? New, string Prefix)> next, CancellationToken ct)
+		List<(ObjectId? Old, ObjectId? New, string Prefix)> next, Func<string, bool>? descend, CancellationToken ct)
 	{
 		var oldEntries = oldTree is { } o ? (await objects.ReadTreeAsync(o, ct)).Entries : [];
 		var newEntries = newTree is { } n ? (await objects.ReadTreeAsync(n, ct)).Entries : [];
@@ -237,7 +245,14 @@ public sealed class Trees(ObjectAccess objects)
 					changes.Add(new TreeChange(path, oldEntry.Leaf, null));
 				}
 
-				next.Add((oldIsTree ? oldEntry!.Id : null, newIsTree ? newEntry!.Id : null, path));
+				if (descend is null || descend(path))
+				{
+					next.Add((oldIsTree ? oldEntry!.Id : null, newIsTree ? newEntry!.Id : null, path));
+				}
+				else
+				{
+					changes.Add(new TreeChange(path, oldIsTree ? oldEntry!.Leaf : null, newIsTree ? newEntry!.Leaf : null));
+				}
 				if (!newIsTree && newEntry is not null)
 				{
 					changes.Add(new TreeChange(path, null, newEntry.Leaf));

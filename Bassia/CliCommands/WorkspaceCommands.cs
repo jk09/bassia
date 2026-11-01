@@ -24,7 +24,8 @@ internal static class WorkspaceCommands
 			await monorepo.Workspaces.SnapshotAsync(await monorepo.Repo.ResolveWorkspaceAsync(on));
 		}
 
-		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "");
+		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "",
+			load: await monorepo.ResolveLoadAsync(LoadSwitch(invocation)));
 		var data = await WorkspaceAsync(monorepo.Repo, state);
 		var files = Materialization(local, data);
 		return Ok(invocation, (state.Record.Parent is null
@@ -39,7 +40,7 @@ internal static class WorkspaceCommands
 		await monorepo.Workspaces.SnapshotAsync(source);
 		var name = invocation.Require("name");
 		var path = invocation.Get("path") is { } given ? Path.GetFullPath(given) : monorepo.DefaultWorkspacePath(name);
-		var (state, local) = await monorepo.Workspaces.CloneAsync(source.Id, name, path);
+		var (state, local) = await monorepo.Workspaces.CloneAsync(source.Id, name, path, await monorepo.ResolveLoadAsync(LoadSwitch(invocation)));
 		var data = await WorkspaceAsync(monorepo.Repo, state);
 		return Ok(invocation, $"Cloned workspace '{source.Name}' as '{name}' in '{local.Root}': same base and work, a new change." + Materialization(local, data), data);
 	}
@@ -54,14 +55,46 @@ internal static class WorkspaceCommands
 			return Fail(invocation, $"'{path}' is not empty; give an empty folder with -path.");
 		}
 
-		var local = await monorepo.Workspaces.CheckOutAsync(state, path);
+		var local = await monorepo.Workspaces.CheckOutAsync(state, path, await monorepo.ResolveLoadAsync(LoadSwitch(invocation)));
 		var data = await WorkspaceAsync(monorepo.Repo, (await monorepo.Repo.FindWorkspaceAsync(state.Id))!);
 		return Ok(invocation, $"Checked out workspace '{state.Name}' into '{local.Root}'." + Materialization(local, data), data);
 	}
 
-	/// <summary>How a new folder's files were made: block-cloned from the clone cache (Dev Drive), or written.</summary>
+	/// <summary>The -load switch's rules, or null when it was not given (then the defaults apply).</summary>
+	private static IReadOnlyList<string>? LoadSwitch(Invocation invocation) => invocation.Has("load") ? invocation.List("load") : null;
+
+	/// <summary>
+	/// <c>bassia workspace load [&lt;workspace&gt;] -load &lt;rules&gt;</c>: changes what the workspace's folder holds and caches.
+	/// Without -load it reports the rules in force.
+	/// </summary>
+	public static async Task<int> LoadAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var state = await monorepo.WorkspaceAsync(invocation.Get("workspace"));
+		var current = monorepo.Workspaces.Local(state) ?? throw new MonorepoException($"Workspace '{state.Name}' has no folder on this machine; 'bassia workspace checkout {state.Name}' makes one.");
+		if (LoadSwitch(invocation) is null)
+		{
+			var shown = await WorkspaceAsync(monorepo.Repo, state);
+			shown["load"] = current.State.Rules.IsAll ? new List<string> { "all" } : current.State.Rules.Patterns.ToList();
+			shown["files_loaded"] = current.State.Entries.Count;
+			return Ok(invocation, $"Workspace '{state.Name}' loads {current.State.Rules} ({current.State.Entries.Count} file(s) in '{current.Root}').", shown);
+		}
+
+		var rules = await monorepo.ResolveLoadAsync(LoadSwitch(invocation));
+		var (after, local, result) = await monorepo.Workspaces.LoadAsync(state, rules);
+		var data = await WorkspaceAsync(monorepo.Repo, after);
+		data["load"] = rules.IsAll ? new List<string> { "all" } : rules.Patterns.ToList();
+		data["files_loaded"] = local.State.Entries.Count;
+		data["files_added"] = result.Loaded;
+		data["files_removed"] = result.Unloaded;
+		return Ok(invocation, $"Workspace '{state.Name}' now loads {rules}: {result.Loaded} file(s) added, {result.Unloaded} removed, {local.State.Entries.Count} in '{local.Root}'.", data);
+	}
+
+	/// <summary>How a new folder's files were made: block-cloned from the clone cache (Dev Drive), or written; and what it loads.</summary>
 	private static string Materialization(Core.Workspaces.LocalWorkspace local, Dictionary<string, object?> data)
 	{
+		data["load"] = local.State.Rules.IsAll ? new List<string> { "all" } : local.State.Rules.Patterns.ToList();
+		data["files_loaded"] = local.State.Entries.Count;
 		if (local.Provider is not Core.Workspaces.CheckoutProvider provider)
 		{
 			return "";
@@ -69,7 +102,8 @@ internal static class WorkspaceCommands
 
 		data["files_cloned"] = provider.Materialized;
 		data["files_written"] = provider.Written;
-		return provider.Materialized > 0 ? $" {provider.Materialized} file(s) cloned from the clone cache, {provider.Written} written." : "";
+		var loads = local.State.Rules.IsAll ? "" : $" It loads {local.State.Rules} ({local.State.Entries.Count} file(s)); 'bassia workspace load -load <rules>' changes that.";
+		return (provider.Materialized > 0 ? $" {provider.Materialized} file(s) cloned from the clone cache, {provider.Written} written." : "") + loads;
 	}
 
 	public static async Task<int> ListAsync(Invocation invocation)

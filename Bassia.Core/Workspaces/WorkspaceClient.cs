@@ -53,25 +53,29 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 	/// <summary>Creates a workspace (on mainline, or stacked on <paramref name="on"/>) and checks it out into <paramref name="directory"/>.</summary>
 	public async Task<(WorkspaceState State, LocalWorkspace Local)> CreateAsync(string name, string directory, string? on = null, string intent = "",
-		ReplayRecipe? recipe = null, ChangeId? changeId = null, string? replayOf = null, CancellationToken ct = default)
+		ReplayRecipe? recipe = null, ChangeId? changeId = null, string? replayOf = null, LoadRules? load = null, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		CheckDirectory(directory);
 		var state = await Service.CreateAsync(name, agent, on, intent, recipe, changeId, directory, Host, replayOf, ct);
-		var local = await CheckOutAsync(state, directory, ct);
+		var local = await CheckOutAsync(state, directory, load, ct);
 		return (state, local);
 	}
 
-	public async Task<(WorkspaceState State, LocalWorkspace Local)> CloneAsync(string source, string name, string directory, CancellationToken ct = default)
+	public async Task<(WorkspaceState State, LocalWorkspace Local)> CloneAsync(string source, string name, string directory, LoadRules? load = null,
+		CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		CheckDirectory(directory);
 		var state = await Service.CloneAsync(source, name, agent, directory, Host, ct);
-		return (state, await CheckOutAsync(state, directory, ct));
+		return (state, await CheckOutAsync(state, directory, load, ct));
 	}
 
-	/// <summary>Writes a workspace's working tree into <paramref name="directory"/> and makes it the workspace's local directory.</summary>
-	public async Task<LocalWorkspace> CheckOutAsync(WorkspaceState state, string directory, CancellationToken ct = default)
+	/// <summary>
+	/// Writes a workspace's working tree into <paramref name="directory"/> and makes it the workspace's local directory:
+	/// the paths <paramref name="load"/> selects (everything by default), with only their content fetched and cached.
+	/// </summary>
+	public async Task<LocalWorkspace> CheckOutAsync(WorkspaceState state, string directory, LoadRules? load = null, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		Directory.CreateDirectory(directory);
@@ -81,6 +85,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		}
 
 		var local = new LocalWorkspace(state.Id, directory, StateFile(state.Id), providers(directory, state.Id));
+		local.State.Rules = load ?? LoadRules.All;
 		var working = await repo.Objects.ReadCommitAsync(state.Record.Working, ct);
 		await local.Provider.UpdateAsync(local.State, working.Tree, ct);
 		local.Save();
@@ -144,6 +149,19 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		local.Save();
 		return new SnapshotResult(updated, scan.Changes, scan.Hashed, true);
+	}
+
+	/// <summary>
+	/// Changes what the workspace's folder loads: snapshots it first (so edits are kept on the workspace), then writes
+	/// what the new rules add and removes what they drop. Paths not loaded stay in the workspace's tree, unchanged.
+	/// </summary>
+	public async Task<(WorkspaceState State, LocalWorkspace Local, LoadResult Result)> LoadAsync(WorkspaceState state, LoadRules rules, CancellationToken ct = default)
+	{
+		state = (await SnapshotAsync(state, null, ct)).Workspace;
+		var local = Local(state) ?? throw new VersionException($"Workspace '{state.Name}' has no folder on this machine; check it out first.");
+		var result = await local.Provider.LoadAsync(local.State, rules, ct);
+		local.Save();
+		return (state, local, result);
 	}
 
 	/// <summary>Snapshots, then rebases onto the newest base and updates the directory.</summary>

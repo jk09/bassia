@@ -47,6 +47,11 @@ public static class LeaseEnforcement
 ///
 /// [textmerge]
 /// min_similarity = 0.5
+///
+/// [load]                                    # what a workspace loads (Workspaces.LoadRules); default: everything
+/// default = ["*", "docs/"]
+/// [load.profiles]                           # named rule sets: bassia workspace create -load @api
+/// api = ["*", "api/", "libs/shared/", "!api/testdata/"]
 /// </code>
 /// </summary>
 public sealed class RepoPolicy
@@ -68,6 +73,12 @@ public sealed class RepoPolicy
 	public IReadOnlyList<PathGlob> Ignore { get; init; } = DefaultIgnore.Select(pattern => new PathGlob(pattern)).ToList();
 
 	public double TextMergeMinSimilarity { get; init; } = 0.5;
+
+	/// <summary>The load rules a workspace gets when none are given; empty: everything.</summary>
+	public IReadOnlyList<string> LoadDefault { get; init; } = [];
+
+	/// <summary>Named load rule sets (<c>-load @name</c>).</summary>
+	public IReadOnlyDictionary<string, IReadOnlyList<string>> LoadProfiles { get; init; } = new Dictionary<string, IReadOnlyList<string>>();
 
 	public string PolicyFor(string path) =>
 		ConflictRules.FirstOrDefault(rule => rule.Glob.IsMatch(path)).Policy ?? DefaultConflictPolicy;
@@ -108,8 +119,20 @@ public sealed class RepoPolicy
 		var leases = table.TryGetValue("leases", out var l) ? l as TomlTable : null;
 		var ignore = table.TryGetValue("ignore", out var i) ? i as TomlTable : null;
 		var textmerge = table.TryGetValue("textmerge", out var t) ? t as TomlTable : null;
+		var load = table.TryGetValue("load", out var lo) ? lo as TomlTable : null;
+		var profiles = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+		if (load?.TryGetValue("profiles", out var pr) == true && pr is TomlTable profileTable)
+		{
+			foreach (var (name, _) in profileTable)
+			{
+				profiles[name] = Strings(profileTable, name).ToList();
+			}
+		}
+
 		return new RepoPolicy
 		{
+			LoadDefault = load is null ? [] : Strings(load, "default").ToList(),
+			LoadProfiles = profiles,
 			DefaultConflictPolicy = defaultPolicy,
 			ConflictRules = rules,
 			LeaseRequired = leases is null ? [] : Strings(leases, "required").Select(PathNames.Prefix).ToList(),
