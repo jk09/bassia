@@ -589,3 +589,26 @@ pwsh scripts/bassia-local-cloud.ps1 down      # stop; -Purge also deletes the da
   database for inspection.
 - `test` refuses to run while a service is down, since the cloud tests check nothing without them. The `Local cloud`
   CI jobs run `up`, `smoke`, `test -Filter cloud` and `down -Purge` in Docker on Linux and natively on Windows.
+
+#### A lasting server on the emulators, initialized from git repositories
+
+The same script runs a `bassia-server` on Azurite and PostgreSQL that keeps running, and imports git repositories
+into it through a clone (the `/bassia-cloud-server` skill drives it):
+
+```sh
+pwsh scripts/bassia-local-cloud.ps1 serve          # -Port 8080 -Database bassia -Container bassia [-Token <t>] [-Data <dir>]
+pwsh scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Limit 200
+pwsh scripts/bassia-local-cloud.ps1 server-status  # URL, mainline seq, data, database, container, clone; exit 1 when down
+pwsh scripts/bassia-local-cloud.ps1 server-stop    # serve or import starts it again, with its data
+pwsh scripts/bassia-local-cloud.ps1 server-reset   # deletes its data, database contents, blobs and the clone
+```
+
+- `serve` publishes this clone's `bassia-server` (Release) into `<state>/server-bin` (or runs `-Server <exe>`). It
+  creates the PostgreSQL database and starts the server detached on the Azurite container, so the server outlives
+  the script and its terminal. It is idempotent; the server's settings are kept in `<state>/server.json`.
+- `import` starts the server if needed, makes the clone (default `~/bassia-monorepo`, or `-Clone <dir>`) or reuses
+  it, and runs `bassia import` through it. It uses the installed `bassia`, or `-Bassia`, or a build of this clone.
+  `-Prefix` names the folders, `-History`/`-Limit` import first-parent history. Private repositories use the user's
+  git credentials.
+- `server-reset` sweeps the container's blobs with `bassia-server gc -grace-hours 0` against the emptied database
+  (nothing is referenced), and deletes the data folder and the clone. `down` also stops the server.

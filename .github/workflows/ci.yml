@@ -201,6 +201,28 @@ jobs:
         shell: pwsh
         run: ./scripts/bassia-local-cloud.ps1 test -Filter cloud
 
+      - name: Server and import
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          $repo = Join-Path $env:RUNNER_TEMP 'tools'
+          git init -q -b main $repo
+          foreach ($i in 1..3) {
+            Set-Content -Path (Join-Path $repo "f$i.txt") -Value "v$i"
+            git -C $repo add -A
+            git -C $repo -c user.name=ci -c user.email=ci@example.com commit -q -m "c$i"
+          }
+          ./scripts/bassia-local-cloud.ps1 serve
+          ./scripts/bassia-local-cloud.ps1 serve
+          ./scripts/bassia-local-cloud.ps1 import -Git $repo -History -NoBuild -Clone (Join-Path $env:RUNNER_TEMP 'monorepo')
+          ./scripts/bassia-local-cloud.ps1 server-status
+          ./scripts/bassia-local-cloud.ps1 server-stop
+          ./scripts/bassia-local-cloud.ps1 import -Git $repo -Prefix tools2 -NoBuild
+          ./scripts/bassia-local-cloud.ps1 server-reset
+          ./scripts/bassia-local-cloud.ps1 server-status
+          if ($LASTEXITCODE -ne 1) { throw 'server-status should report the stopped server (exit 1) after server-reset' }
+          $global:LASTEXITCODE = 0
+
       - name: Down
         if: always()
         shell: pwsh
