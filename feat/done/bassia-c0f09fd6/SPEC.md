@@ -71,7 +71,7 @@ folder. `RepoPolicy` reads `[load]`, and `Monorepo.ResolveLoadAsync` applies the
 - [x] Core, provider, policy, CLI, config.
 - [x] Tests: 38 load-rule unit and workspace tests, a CLI test, the full suite (196).
 - [x] Live two-client test with Claude Code agents on Azurite + PostgreSQL.
-- [ ] CI green on the PR.
+- [x] CI green on the PR (Test, Dev Drive, Local cloud docker and native, packages).
 
 ## Validation
 
