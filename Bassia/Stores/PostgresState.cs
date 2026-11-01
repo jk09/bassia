@@ -168,27 +168,67 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		return versions;
 	}
 
+	/// <summary>
+	/// The children of a directory as of a seq, by a skip scan rather than reading every version below it. A recursive
+	/// query hops along the (path, seq) key from one child to the next: past a file's other versions, and past a whole
+	/// subdirectory (to its name + '0', the byte after '/'). A file child is kept when its latest version at the seq is
+	/// live; a directory child when some descendant's is, found by an EXISTS that stops at the first. The cost follows
+	/// the number of children (plus the history of subtrees deleted since), not the size of the history below.
+	/// </summary>
 	public async IAsyncEnumerable<PathListing> ListAsync(string dir, long seq, [EnumeratorCancellation] CancellationToken ct = default)
 	{
 		var (low, high) = Range(dir);
-		var versions = new List<PathVersion>();
+		var directories = new List<PathListing>();
+		var files = new List<PathListing>();
 		await using (var connection = await source.OpenConnectionAsync(ct))
 		{
-			await using var command = Command(connection,
-				$"SELECT DISTINCT ON (path) {VersionColumns} FROM bassia_paths WHERE path >= @low AND path < @high AND seq <= @seq ORDER BY path, seq DESC", null,
-				("low", low), ("high", high), ("seq", seq));
+			await using var command = Command(connection, ListSql, null, ("low", low), ("high", high), ("seq", seq));
 			await using var reader = await command.ExecuteReaderAsync(ct);
 			while (await reader.ReadAsync(ct))
 			{
-				versions.Add(ReadVersion(reader));
+				var child = PathNames.Join(dir.Trim('/'), reader.GetString(0));
+				if (reader.GetBoolean(1))
+				{
+					directories.Add(new PathListing(child, true, null));
+				}
+				else
+				{
+					files.Add(new PathListing(child, false, new PathVersion(child, reader.GetInt64(2),
+						new Leaf((EntryKind)reader.GetInt32(3), ObjectId.Parse(reader.GetString(4)), reader.GetInt64(5), reader.GetBoolean(6)))));
+				}
 			}
 		}
 
-		foreach (var item in PathIndexListing.Children(dir, versions))
+		foreach (var item in directories.OrderBy(item => item.Path, StringComparer.Ordinal).Concat(files.OrderBy(item => item.Path, StringComparer.Ordinal)))
 		{
 			yield return item;
 		}
 	}
+
+	private const string ListSql = """
+		WITH RECURSIVE child(path, name, is_dir) AS (
+			SELECT f.path, split_part(substr(f.path, length(@low) + 1), '/', 1), strpos(substr(f.path, length(@low) + 1), '/') > 0
+			FROM (SELECT path FROM bassia_paths WHERE path >= @low COLLATE "C" AND path < @high COLLATE "C" ORDER BY path LIMIT 1) f
+			UNION ALL
+			SELECT n.path, split_part(substr(n.path, length(@low) + 1), '/', 1), strpos(substr(n.path, length(@low) + 1), '/') > 0
+			FROM child c CROSS JOIN LATERAL (
+				SELECT p.path FROM bassia_paths p
+				WHERE p.path > c.path AND p.path < @high COLLATE "C"
+					AND p.path >= (CASE WHEN c.is_dir THEN @low || c.name || '0' ELSE c.path END) COLLATE "C"
+				ORDER BY p.path LIMIT 1) n
+		)
+		SELECT c.name, c.is_dir, v.seq, v.kind, v.id, v.size, v.exec
+		FROM child c
+		LEFT JOIN LATERAL (
+			SELECT seq, kind, id, size, exec FROM bassia_paths
+			WHERE NOT c.is_dir AND path = c.path AND seq <= @seq ORDER BY seq DESC LIMIT 1) v ON true
+		WHERE (NOT c.is_dir AND v.kind IS NOT NULL)
+			OR (c.is_dir AND EXISTS (
+				SELECT 1 FROM bassia_paths d
+				WHERE d.path >= (@low || c.name || '/') COLLATE "C" AND d.path < (@low || c.name || '0') COLLATE "C"
+					AND d.seq <= @seq AND d.kind IS NOT NULL
+					AND NOT EXISTS (SELECT 1 FROM bassia_paths t WHERE t.path = d.path AND t.seq > d.seq AND t.seq <= @seq)))
+		""";
 
 	public async IAsyncEnumerable<PathVersion> ChangedSinceAsync(string prefix, long afterSeq, [EnumeratorCancellation] CancellationToken ct = default)
 	{

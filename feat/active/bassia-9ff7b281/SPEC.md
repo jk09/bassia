@@ -1,4 +1,4 @@
-# Path index at scale: batched lookups for landing, ChangedSince without full-history scans
+# Path index at scale: batched lookups for landing; ChangedSince and listings without full-history scans
 
 ## Outcome
 
@@ -14,6 +14,8 @@ under the prefix.
   endpoint already accepts many paths, but it too answers them one query at a time.
 - PostgreSQL's `ChangedSinceAsync` first takes the latest version of every path under the prefix across all seqs, and
   only then filters on `seq > after`. Its cost therefore grows with all history under the prefix.
+- PostgreSQL's `ListAsync(dir, seq)` (the server's `/paths/list`) reads the latest version of every descendant of the
+  directory, then keeps the direct children: listing the root reads the whole table.
 
 ## Acceptance criteria
 
@@ -26,9 +28,14 @@ under the prefix.
       landing test passes.
 - [x] PostgreSQL's `ChangedSinceAsync` filters on `seq > after` before taking each path's latest version, and returns
       the same result as before (the latest version of each path changed after the seq).
-- [x] Contract tests cover `GetManyAsync` and `ChangedSinceAsync` with history, on memory, SQLite and PostgreSQL.
-- [x] A benchmark on local PostgreSQL measures a 50,000-path lookup and a `ChangedSince` over deep history, before and
-      after the change.
+- [x] PostgreSQL's `ListAsync` finds children by a skip scan (a recursive query that hops along the `(path, seq)` key
+      past a file's versions and past whole subdirectories). A file is kept when its latest version at the seq is live,
+      a directory when some descendant's is (an early-exit `EXISTS`). Results are unchanged: deleted files and fully
+      deleted subtrees are left out, and a re-created subtree comes back.
+- [x] Contract tests cover `GetManyAsync`, `ChangedSinceAsync` and `ListAsync` with history, on memory, SQLite and
+      PostgreSQL.
+- [x] A benchmark on local PostgreSQL measures a 50,000-path lookup, a `ChangedSince` and listings over deep history,
+      before and after the change.
 
 ## Approach
 
@@ -52,7 +59,11 @@ Landing prefetches the versions of all touched paths before its loop.
       1-2 ms or more). 50,000 paths with 20 versions each (1,000,100 rows):
       - lookup of all 50,000 paths: 12,678 ms one by one (the old landing) vs 407 ms batched (31x faster);
       - `ChangedSince("src", after 20)`: 4,789 ms with the old query vs 1 ms (100 rows either way).
-- [x] CI green on the PR (Test with PostgreSQL and Azurite, Dev Drive, both Local cloud jobs, packages).
+      - listings at seq 21 (`src/m0` deleted): root 1,646 ms vs 28 ms; `src` 1,223 ms vs 31 ms (199 children); a
+        250-file directory 9 ms vs 4 ms.
+- [x] CI green on the PR for the batched lookup and ChangedSince (Test with PostgreSQL and Azurite, Dev Drive, both
+      Local cloud jobs, packages).
+- [ ] CI green with the listing change; 203 tests pass locally with PostgreSQL and Azurite.
 
 ## Validation
 

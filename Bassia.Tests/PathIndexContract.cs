@@ -45,6 +45,30 @@ internal static class PathIndexContract
 		Assert.Empty(await Changed(paths, "src", 5));
 	}
 
+	/// <summary>Listings at every seq of a history with deletions and a subtree deleted, then partly re-created.</summary>
+	public static async Task ListingAsync(IPathIndex paths)
+	{
+		var leaf = new Leaf(EntryKind.File, ObjectId.Of([5]), 5);
+		await paths.ApplyAsync(1, [new PathChange("README.md", leaf), new PathChange("src/a.cs", leaf), new PathChange("src/b.cs", leaf),
+			new PathChange("src/sub/c.cs", leaf), new PathChange("src/sub/deep/d.cs", leaf), new PathChange("src-x/e.cs", leaf), new PathChange("src.txt", leaf)]);
+		await paths.ApplyAsync(2, [new PathChange("src/a.cs", leaf with { Size = 6 }), new PathChange("src/b.cs", null)]);
+		await paths.ApplyAsync(3, [new PathChange("src/sub/c.cs", null), new PathChange("src/sub/deep/d.cs", null)]);
+		await paths.ApplyAsync(4, [new PathChange("src/sub/deep/z.cs", leaf)]);
+
+		Assert.Equal(["src/sub/", "src/a.cs:5", "src/b.cs:5"], await Listed(paths, "src", 1));
+		Assert.Equal(["src/sub/", "src/a.cs:6"], await Listed(paths, "src", 2));
+		Assert.Equal(["src/a.cs:6"], await Listed(paths, "src", 3));
+		Assert.Equal(["src/sub/", "src/a.cs:6"], await Listed(paths, "src", 4));
+		Assert.Equal(["src/sub/deep/"], await Listed(paths, "src/sub", 4));
+		Assert.Empty(await Listed(paths, "src/sub", 3));
+		Assert.Equal(["src/", "src-x/", "README.md:5", "src.txt:5"], await Listed(paths, "", 4));
+		Assert.Empty(await Listed(paths, "src", 0));
+		Assert.Empty(await Listed(paths, "nothing", 4));
+	}
+
+	private static async Task<List<string>> Listed(IPathIndex paths, string dir, long seq) =>
+		(await paths.ListAsync(dir, seq).ToListAsync()).Select(item => item.IsDirectory ? item.Path + "/" : $"{item.Path}:{item.Version!.Leaf!.Size}").ToList();
+
 	private static async Task<List<string>> Changed(IPathIndex paths, string prefix, long after) =>
 		(await paths.ChangedSinceAsync(prefix, after).ToListAsync()).Select(version => $"{version.Path}@{version.Seq}").Order(StringComparer.Ordinal).ToList();
 

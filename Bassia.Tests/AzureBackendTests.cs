@@ -75,6 +75,12 @@ public sealed class PostgresStateTests
 			await PathIndexContract.BatchedLookupAndChangedSinceAsync(state);
 		}
 
+		if (Backends.FreshPostgres() is { } listing)
+		{
+			await using var state = new PostgresState(listing);
+			await PathIndexContract.ListingAsync(state);
+		}
+
 		// More paths than one statement takes (PostgresState.LookupBatch), on a fresh schema.
 		if (Backends.FreshPostgres() is { } another)
 		{
