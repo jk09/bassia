@@ -77,3 +77,28 @@ table.split tr.fold td { background: var(--hunk); color: var(--muted); text-alig
 }
 h1:focus { outline: none; }
 pre, table.split td { tab-size: 4; }
+.toolbar .user { color: var(--muted); font-size: 12px; }
+.ok { background: var(--add); color: var(--add-text); border: 1px solid var(--add-text); padding: 10px; border-radius: 6px; margin: 8px 0; }
+.btn { font: inherit; font-size: 13px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; display: inline-block; }
+a.btn { color: var(--accent); }
+a.btn:hover { text-decoration: none; }
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--del-text); }
+.btn.small { padding: 1px 8px; font-size: 12px; }
+.confirm { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0 0 12px; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.outcome { padding: 8px 12px; border-radius: 6px; margin: 0 0 10px; background: var(--hunk); }
+.outcome.o-landed, .outcome.o-would-land { background: var(--add); color: var(--add-text); }
+.outcome.o-needs-replay, .outcome.o-conflict, .outcome.o-rejected { background: var(--del); color: var(--del-text); }
+.form { display: flex; flex-direction: column; gap: 10px; max-width: 560px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.form.compact { margin-top: 10px; flex-direction: row; align-items: end; padding: 8px; }
+.form label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+input, select, textarea { font: inherit; font-size: 13px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+textarea.editor, textarea.intent { width: 100%; font-family: var(--mono); font-size: 12.5px; tab-size: 4; }
+section.conflict { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; display: flex; flex-direction: column; gap: 8px; }
+section.conflict > div, section.conflict > button { align-self: flex-start; }
+.count { font-size: 12px; padding: 1px 7px; border-radius: 9px; background: var(--del); color: var(--del-text); }
+.st-needs-replay, .st-conflict, .st-rejected { background: var(--del); color: var(--del-text); }
+.st-landed, .st-would-land { background: var(--add); color: var(--add-text); }

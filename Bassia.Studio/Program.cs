@@ -4,6 +4,7 @@ namespace Bassia.Studio;
 /// <c>bassia-studio</c>: the web client of a <c>bassia-server</c>.
 /// <code>
 /// bassia-studio -server <url> [-token <t>] [-url http://0.0.0.0:8080] [-cache <folder>] [-label <text>]
+///               [-user <name>] [-role reader|contributor|admin]
 /// </code>
 /// </summary>
 internal static class Program
@@ -11,6 +12,7 @@ internal static class Program
 	private const string Usage = """
 		Usage:
 		  bassia-studio -server <bassia-server url> [-token <token>] [-url <listen url>] [-cache <folder>] [-label <text>]
+		                [-user <name>] [-role reader|contributor|admin]
 		Switches may also come from BASSIA_STUDIO_<NAME> environment variables (BASSIA_STUDIO_SERVER, BASSIA_STUDIO_TOKEN, ...).
 		""";
 

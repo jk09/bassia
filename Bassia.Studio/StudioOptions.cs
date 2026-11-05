@@ -21,6 +21,14 @@ public sealed class StudioOptions
 	/// <summary>The label shown in the title bar.</summary>
 	public string? Label { get; init; }
 
+	/// <summary>
+	/// Who acts, until sign-in is configured: the name recorded as owner and agent of what Studio changes, and its role.
+	/// </summary>
+	public string User { get; init; } = "studio";
+
+	/// <summary>The role of <see cref="User"/>: reader, contributor or admin (default: admin, a single local user).</summary>
+	public StudioRole Role { get; init; } = StudioRole.Admin;
+
 	public static StudioOptions Parse(IReadOnlyList<string> args)
 	{
 		string? Get(string name)
@@ -46,6 +54,10 @@ public sealed class StudioOptions
 			Url = Get("url") ?? defaults.Url,
 			Cache = Get("cache") ?? defaults.Cache,
 			Label = Get("label"),
+			User = Get("user") ?? defaults.User,
+			Role = Get("role") is { } role
+				? Enum.TryParse<StudioRole>(role, ignoreCase: true, out var parsed) ? parsed : throw new ArgumentException($"-role is reader, contributor or admin, not '{role}'.")
+				: defaults.Role,
 		};
 	}
 }

@@ -475,14 +475,27 @@ server. It talks to the server as a clone does: the version core over the remote
 immutable objects it reads. Switches can also come from `BASSIA_STUDIO_*` environment variables. Pages are rendered on
 the server and then become interactive over a SignalR circuit.
 
-Delivered in slices (feature record `bassia-681e8902`); the first slice is read-only:
+Delivered in slices (feature record `bassia-681e8902`):
 
 - **Overview**: mainline's seq, open workspaces, the latest landings.
 - **Depot browser**: mainline's tree at the latest or any seq, a file's content (download at `/raw?path=<p>[&seq=<n>]`)
   and its **history**: the landings that changed it, from the path index.
 - **Mainline log**: the landings by seq, paged; a landing's commit, change id, intent, recipe and its diff, **unified
   or side by side**.
-- **Workspaces**: open (or all) workspaces; a workspace's record, its changes against its base and its operation log.
+- **Workspaces**: open (or all) workspaces; **new workspace** on mainline, stacked on one, or cloned from one. A
+  workspace's page has the actions **Check** (dry-run landing), **Land**, **Sync**, **Undo**, **Describe**, **Close** and
+  **Abandon**, the landing outcome with conflicting paths and policies, its stored conflicts (keep the workspace's side,
+  take mainline's, or edit the merged text with markers), its changes and its operation log with **Restore**.
+- **Files** of a workspace: browse its working tree, edit text in the browser, add, rename, delete and download files.
+  Every save is a snapshot (an operation, so undo works); a save is refused, with the text kept, when the file changed
+  since it was opened.
+- **Conflicts**: every open workspace that cannot land now, why, and the hot paths.
+- **Leases**: live leases; acquire (exclusive or intent) for a workspace, release.
+
+Studio changes the monorepo through the same core operations as the command line, so the same edit gives the same
+tree. Until sign-in is configured it acts as one user with one role: `-user <name>` (owner and agent of its changes;
+default `studio`) and `-role reader|contributor|admin` (default `admin`). Readers only look; contributors change their
+own workspaces and leases; admins anyone's.
 
 An unreachable server or a missing path is shown as a message on the page.
 

@@ -9,6 +9,7 @@ using Bassia.Server;
 using Bassia.Stores;
 using Bassia.Studio;
 using Bassia.Studio.Components.Shared;
+using static Bassia.Tests.TestEnvironment;
 
 /// <summary>
 /// Bassia Studio against an in-process bassia-server: pages are prerendered on the server, so plain HTTP requests see
@@ -22,6 +23,24 @@ public sealed class StudioTests : IAsyncLifetime
 	private StudioApp studio = null!;
 	private HttpClient http = null!;
 	private string workspaceId = "";
+	private readonly List<MonorepoClient> clients = [];
+
+	/// <summary>Studio's actions for a user, over their own connection to the server.</summary>
+	private StudioActions As(string user, StudioRole role = StudioRole.Contributor)
+	{
+		var client = new MonorepoClient(new StudioOptions { Server = server.Address!, Token = Token, Cache = temp.Combine("cache-" + user) });
+		clients.Add(client);
+		return new StudioActions(client, new StudioUser(user, role));
+	}
+
+	private async Task<string?> MainlineTextAsync(string path)
+	{
+		var main = await server.Repo.GetMainAsync();
+		return await server.Repo.Trees.GetAsync(main.Tree, path) is { } leaf ? Encoding.UTF8.GetString(await server.Repo.Objects.ReadContentAsync(leaf)) : null;
+	}
+
+	private static async Task<Leaf?> LeafAsync(Repository repo, WorkspaceState state, string path) =>
+		await repo.Trees.GetAsync((await repo.Objects.ReadCommitAsync(state.Record.Working)).Tree, path);
 
 	public async Task InitializeAsync()
 	{
@@ -36,6 +55,11 @@ public sealed class StudioTests : IAsyncLifetime
 
 	public async Task DisposeAsync()
 	{
+		foreach (var client in clients)
+		{
+			client.Dispose();
+		}
+
 		http.Dispose();
 		await studio.DisposeAsync();
 		await server.DisposeAsync();
@@ -184,5 +208,231 @@ public sealed class StudioTests : IAsyncLifetime
 		var changed = Assert.Single(rows, row => row.Kind == SplitDiff.Replace);
 		Assert.Equal(("line 10", "line ten", 10, 10), (changed.OldText, changed.NewText, changed.OldNumber, changed.NewNumber));
 		Assert.Equal(2, rows.Count(row => row.Kind == SplitDiff.Fold));
+	}
+
+	// ----- slice (b): workspaces, editing, landing, conflicts, leases -----
+
+	[Fact]
+	public async Task Actions_CreateEditRenameDeleteAndLand()
+	{
+		var dana = As("dana");
+		var ws = await dana.CreateAsync("feature", "Add the farewell");
+		Assert.Equal("dana", ws.Record.Owner);
+		await dana.SaveTextAsync(ws.Id, "src/bye.txt", "bye\n", null);
+		await dana.SaveTextAsync(ws.Id, "notes/tmp.txt", "scratch\n", null);
+		var repo = server.Repo;
+		var tmp = (await LeafAsync(repo, (await repo.FindWorkspaceAsync(ws.Id))!, "notes/tmp.txt"))!;
+		await dana.RenameAsync(ws.Id, "src/bye.txt", "src/farewell.txt");
+		await dana.DeleteAsync(ws.Id, "notes/tmp.txt", tmp.Id);
+
+		Assert.Equal(LandOutcome.WouldLand, (await dana.CheckAsync(ws.Id)).Outcome);
+		var landed = await dana.LandAsync(ws.Id);
+		Assert.Equal(LandOutcome.Landed, landed.Outcome);
+		Assert.Equal("bye\n", await MainlineTextAsync("src/farewell.txt"));
+		Assert.Null(await MainlineTextAsync("src/bye.txt"));
+		Assert.Null(await MainlineTextAsync("notes/tmp.txt"));
+		var main = await repo.GetMainAsync();
+		Assert.Equal("Add the farewell", main.Commit.Intent);
+		Assert.Equal("dana", main.Commit.Author.Agent);
+
+		// Each edit was an operation of its own, so the log shows them and undo works.
+		var operations = new List<string>();
+		await foreach (var entry in repo.LogAsync(HeadName.Workspace(ws.Id)))
+		{
+			operations.Add(entry.Operation.Description);
+		}
+
+		Assert.Contains("add src/bye.txt", operations);
+		Assert.Contains("rename src/bye.txt -> src/farewell.txt", operations);
+		Assert.Contains("delete notes/tmp.txt", operations);
+	}
+
+	[Fact]
+	public async Task Actions_StaleEditIsRefusedAndLosesNothing()
+	{
+		var erin = As("erin");
+		var ws = await erin.CreateAsync("stale");
+		await erin.SaveTextAsync(ws.Id, "a.txt", "one\n", null);
+		var seen = (await LeafAsync(server.Repo, (await server.Repo.FindWorkspaceAsync(ws.Id))!, "a.txt"))!.Id;
+
+		// Someone else (another tab, or the CLI) saves first.
+		await erin.SaveTextAsync(ws.Id, "a.txt", "two\n", seen);
+		await Assert.ThrowsAsync<StaleEditException>(() => erin.SaveTextAsync(ws.Id, "a.txt", "three\n", seen));
+		await Assert.ThrowsAsync<StaleEditException>(() => erin.SaveTextAsync(ws.Id, "a.txt", "new\n", null));
+		var leaf = await LeafAsync(server.Repo, (await server.Repo.FindWorkspaceAsync(ws.Id))!, "a.txt");
+		Assert.Equal("two\n", Encoding.UTF8.GetString(await server.Repo.Objects.ReadContentAsync(leaf!)));
+	}
+
+	[Fact]
+	public async Task Actions_SyncStoresConflictsThatResolveToLand()
+	{
+		var fred = As("fred");
+		var mine = await fred.CreateAsync("mine", "Greet the sun");
+		await fred.SaveTextAsync(mine.Id, "src/hello.txt", "hello\nsun\n", (await LeafAsync(server.Repo, mine, "src/hello.txt"))!.Id);
+
+		var gina = As("gina");
+		var theirs = await gina.CreateAsync("theirs", "Greet the stars");
+		await gina.SaveTextAsync(theirs.Id, "src/hello.txt", "hello\nstars\n", (await LeafAsync(server.Repo, theirs, "src/hello.txt"))!.Id);
+		Assert.Equal(LandOutcome.Landed, (await gina.LandAsync(theirs.Id)).Outcome);
+
+		// The default policy is replay: landing refuses; a sync stores the path as a conflict.
+		var refused = await fred.LandAsync(mine.Id);
+		Assert.Equal(LandOutcome.NeedsReplay, refused.Outcome);
+		Assert.Equal("src/hello.txt", Assert.Single(refused.Conflicts).Path);
+		var sync = await fred.SyncAsync(mine.Id);
+		Assert.Equal(["src/hello.txt"], sync.Conflicts);
+		var conflict = Assert.Single(await fred.ConflictsAsync(mine.Id));
+		var markers = await fred.ConflictTextAsync(conflict);
+		var detail = await PageAsync($"/workspaces/{mine.Id}");
+		Assert.Contains("unresolved conflict", detail);
+		Assert.Contains("Edit merged", detail);
+		Assert.Contains("sun", markers);
+		Assert.Contains("stars", markers);
+		Assert.Equal(LandOutcome.Conflict, (await fred.CheckAsync(mine.Id)).Outcome);
+
+		await fred.ResolveAsync(mine.Id, "src/hello.txt", ConflictChoice.Merged, "hello\nsun\nstars\n");
+		Assert.Empty(await fred.ConflictsAsync(mine.Id));
+		Assert.Equal(LandOutcome.Landed, (await fred.LandAsync(mine.Id)).Outcome);
+		Assert.Equal("hello\nsun\nstars\n", await MainlineTextAsync("src/hello.txt"));
+	}
+
+	[Fact]
+	public async Task Actions_UndoRestoreAndAbandon()
+	{
+		var hal = As("hal");
+		var ws = await hal.CreateAsync("history");
+		await hal.SaveTextAsync(ws.Id, "x.txt", "1\n", null);
+		var afterFirst = (await server.Repo.FindWorkspaceAsync(ws.Id))!.Head;
+		await hal.SaveTextAsync(ws.Id, "y.txt", "2\n", null);
+		var undone = await hal.UndoAsync(ws.Id);
+		Assert.Null(await LeafAsync(server.Repo, undone, "y.txt"));
+		Assert.NotNull(await LeafAsync(server.Repo, undone, "x.txt"));
+		var redone = await hal.UndoAsync(ws.Id);
+		Assert.NotNull(await LeafAsync(server.Repo, redone, "y.txt"));
+		var restored = await hal.RestoreAsync(ws.Id, afterFirst);
+		Assert.Null(await LeafAsync(server.Repo, restored, "y.txt"));
+		Assert.Equal(WorkspaceStatus.Abandoned, (await hal.CloseAsync(ws.Id, abandon: true)).Record.Status);
+		await Assert.ThrowsAsync<VersionException>(() => hal.SaveTextAsync(ws.Id, "z.txt", "3\n", null));
+	}
+
+	[Fact]
+	public async Task Actions_StackAndClone()
+	{
+		var ivy = As("ivy");
+		var parent = await ivy.CreateAsync("parent");
+		await ivy.SaveTextAsync(parent.Id, "p.txt", "parent\n", null);
+		var child = await ivy.CreateAsync("child", on: "parent");
+		Assert.Equal(parent.Id, child.Record.Parent);
+		Assert.NotNull(await LeafAsync(server.Repo, child, "p.txt"));
+		Assert.Equal(LandOutcome.Rejected, (await ivy.CheckAsync(child.Id)).Outcome);
+
+		var clone = await ivy.CloneAsync("parent", "copy");
+		Assert.NotNull(await LeafAsync(server.Repo, clone, "p.txt"));
+		var parentCommit = await server.Repo.Objects.ReadCommitAsync((await server.Repo.FindWorkspaceAsync(parent.Id))!.Record.Working);
+		var cloneCommit = await server.Repo.Objects.ReadCommitAsync(clone.Record.Working);
+		Assert.Equal(parentCommit.Tree, cloneCommit.Tree);
+		Assert.NotEqual(parentCommit.ChangeId, cloneCommit.ChangeId);
+	}
+
+	[Fact]
+	public async Task Roles_ReadersReadContributorsOwnAdminsAll()
+	{
+		var reader = As("rita", StudioRole.Reader);
+		await Assert.ThrowsAsync<StudioForbiddenException>(() => reader.CreateAsync("nope"));
+		Assert.Equal(LandOutcome.WouldLand, (await reader.CheckAsync(workspaceId)).Outcome);
+
+		// open-work belongs to carol.
+		var other = As("sam");
+		await Assert.ThrowsAsync<StudioForbiddenException>(() => other.SaveTextAsync(workspaceId, "x.txt", "x\n", null));
+		await Assert.ThrowsAsync<StudioForbiddenException>(() => other.LandAsync(workspaceId));
+		var carol = As("carol");
+		var lease = await carol.AcquireLeaseAsync("docs", LeaseMode.Exclusive, workspaceId, TimeSpan.FromMinutes(5));
+		Assert.True(lease.Granted);
+		await Assert.ThrowsAsync<StudioForbiddenException>(() => other.ReleaseLeaseAsync(lease.Lease!.Id));
+
+		var admin = As("root", StudioRole.Admin);
+		await admin.ReleaseLeaseAsync(lease.Lease!.Id);
+		Assert.Empty(await server.Repo.Leases.ListAsync());
+		Assert.Equal(LandOutcome.Landed, (await admin.LandAsync(workspaceId)).Outcome);
+	}
+
+	[Fact]
+	public async Task Leases_ExclusiveLeaseBlocksOthersAndLandsWithItsHolder()
+	{
+		var uma = As("uma");
+		var ws = await uma.CreateAsync("locked");
+		var granted = await uma.AcquireLeaseAsync("assets", LeaseMode.Exclusive, ws.Id, TimeSpan.FromMinutes(5));
+		Assert.True(granted.Granted);
+		var vic = As("vic");
+		var other = await vic.CreateAsync("other");
+		var blocked = await vic.AcquireLeaseAsync("assets/logo.bin", LeaseMode.Exclusive, other.Id, TimeSpan.FromMinutes(5));
+		Assert.False(blocked.Granted);
+		Assert.Single(blocked.Blocking);
+
+		await uma.SaveFileAsync(ws.Id, "assets/logo.bin", [9, 9], (await LeafAsync(server.Repo, ws, "assets/logo.bin"))!.Id);
+		Assert.Equal(LandOutcome.Landed, (await uma.LandAsync(ws.Id)).Outcome);
+		var page = await PageAsync("/leases");
+		Assert.Contains("assets", page);
+		Assert.Contains("locked", page);
+	}
+
+	[Fact]
+	public async Task Parity_StudioAndCliMakeTheSameChange()
+	{
+		var clone = temp.Combine("clone");
+		await OkAsync(temp.Path, "clone", "-from", server.Address!, "-path", "clone", "-token", Token);
+		await OkAsync(clone, "workspace", "create", "cli");
+		Directory.CreateDirectory(Path.Combine(clone, "workspaces", "cli", "docs"));
+		await File.WriteAllTextAsync(Path.Combine(clone, "workspaces", "cli", "docs", "same.md"), "identical\n");
+		await File.WriteAllTextAsync(Path.Combine(clone, "workspaces", "cli", "src", "hello.txt"), "hello\nplanet\n");
+		await OkAsync(clone, "workspace", "snapshot", "-workspace", "cli");
+
+		var wes = As("wes");
+		var studio = await wes.CreateAsync("studio");
+		await wes.SaveTextAsync(studio.Id, "docs/same.md", "identical\n", null);
+		await wes.SaveTextAsync(studio.Id, "src/hello.txt", "hello\nplanet\n", (await LeafAsync(server.Repo, studio, "src/hello.txt"))!.Id);
+
+		var cliState = await server.Repo.ResolveWorkspaceAsync("cli");
+		var studioState = await server.Repo.ResolveWorkspaceAsync(studio.Id);
+		Assert.Equal((await server.Repo.Objects.ReadCommitAsync(cliState.Record.Working)).Tree, (await server.Repo.Objects.ReadCommitAsync(studioState.Record.Working)).Tree);
+
+		// Both see the same outcome when a third change rewrites a path they touched.
+		var xena = As("xena");
+		var third = await xena.CreateAsync("third");
+		await xena.SaveTextAsync(third.Id, "src/hello.txt", "hello\ncomet\n", (await LeafAsync(server.Repo, third, "src/hello.txt"))!.Id);
+		Assert.Equal(LandOutcome.Landed, (await xena.LandAsync(third.Id)).Outcome);
+		var cliCheck = await OkAsync(clone, "workspace", "check", "cli");
+		var studioCheck = await wes.CheckAsync(studio.Id);
+		Assert.Equal(LandOutcome.NeedsReplay, studioCheck.Outcome);
+		Assert.Equal(studioCheck.Outcome, cliCheck["outcome"]);
+	}
+
+	[Fact]
+	public async Task Pages_ForWorkspaceManagementRender()
+	{
+		var newPage = await PageAsync("/workspaces/new?on=open-work");
+		Assert.Contains("stacked on a workspace", newPage);
+		Assert.Contains("open-work", newPage);
+
+		var files = await PageAsync($"/workspaces/{workspaceId}/files?path=docs/greeter.md");
+		Assert.Contains("Says hello.", files);
+		Assert.Contains("Edit", files);
+
+		var detail = await PageAsync($"/workspaces/{workspaceId}");
+		Assert.Contains("Land", detail);
+		Assert.Contains("Sync", detail);
+		Assert.Contains("Restore", detail);
+
+		var fred = As("fred");
+		var mine = await fred.CreateAsync("blocked");
+		await fred.SaveTextAsync(mine.Id, "src/hello.txt", "x\n", (await LeafAsync(server.Repo, mine, "src/hello.txt"))!.Id);
+		var gina = As("gina");
+		var theirs = await gina.CreateAsync("first-in");
+		await gina.SaveTextAsync(theirs.Id, "src/hello.txt", "y\n", (await LeafAsync(server.Repo, theirs, "src/hello.txt"))!.Id);
+		await gina.LandAsync(theirs.Id);
+		var conflicts = await PageAsync("/conflicts");
+		Assert.Contains("blocked", conflicts);
+		Assert.Contains("needs-replay", conflicts);
+		Assert.Contains("src/hello.txt", conflicts);
 	}
 }

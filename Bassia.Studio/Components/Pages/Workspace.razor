@@ -1,31 +1,114 @@
 @page "/workspaces/{Id}"
-@inject MonorepoClient Client
+@inherits StudioPage
 
 <PageTitle>@(state?.Name ?? Id) · Bassia Studio</PageTitle>
 <h1>Workspace @(state?.Name ?? Id)</h1>
-<ErrorNotice Message="@error" />
+<Banner Notice="@Notice" Error="@Error" />
 @if (state is not null && diff is not null)
 {
 	var record = state.Record;
+	var mine = User.IsAdmin || record.Owner == User.Name;
+	var act = User.CanChange && mine && state.IsOpen && !Busy;
+	<div class="actions">
+		<button class="btn" disabled="@Busy" @onclick="CheckAsync" title="Would it land now? (dry run)">Check</button>
+		<ConfirmButton Label="Land" Class="primary" Question="Land on mainline?" Disabled="@(!act)" OnConfirm="LandAsync" />
+		<button class="btn" disabled="@(!act)" @onclick="SyncAsync" title="Rebase onto the newest base">Sync</button>
+		<button class="btn" disabled="@(!act)" @onclick="UndoAsync" title="Undo the last operation (undo again to redo)">Undo</button>
+		<a class="btn" href="/workspaces/@Format.Q(state.Id)/files">Files</a>
+		<a class="btn" href="/workspaces/new?on=@Format.Q(state.Name)">Stack on this</a>
+		<a class="btn" href="/workspaces/new?clone=@Format.Q(state.Name)">Clone</a>
+		<span class="spacer"></span>
+		<button class="btn" disabled="@(!act)" @onclick="() => CloseAsync(false)">Close</button>
+		<ConfirmButton Label="Abandon" Class="danger" Question="Abandon this workspace?" Disabled="@(!act)" OnConfirm="() => CloseAsync(true)" />
+	</div>
+	@if (!mine && User.CanChange)
+	{
+		<p class="muted">This workspace belongs to @record.Owner; only its owner or an admin may change it.</p>
+	}
+	@if (check is not null)
+	{
+		<div class="outcome o-@check.Outcome">
+			<strong>@check.Outcome</strong> @check.Message
+			@if (check.Seq is { } landed) { <a href="/log/@landed">seq @landed</a> }
+		</div>
+		@if (check.Conflicts.Count > 0)
+		{
+			<ConflictTable Conflicts="check.Conflicts" />
+		}
+	}
 	<table class="list facts">
 		<tr><td>status</td><td><span class="st st-@record.Status">@record.Status</span></td></tr>
+		<tr>
+			<td>intent</td>
+			<td>
+				@if (describing)
+				{
+					<textarea class="intent" @bind="intent" rows="3"></textarea>
+					<div><button class="btn primary" disabled="@Busy" @onclick="DescribeAsync">Save</button> <button class="btn" @onclick="() => describing = false">Cancel</button></div>
+				}
+				else
+				{
+					<pre class="brief">@(string.IsNullOrEmpty(working?.Intent) ? "(none)" : working!.Intent)</pre>
+					@if (act) { <button class="btn small" @onclick="StartDescribe">Describe</button> }
+				}
+			</td>
+		</tr>
 		<tr><td>owner</td><td>@record.Owner</td></tr>
 		<tr><td>base</td><td><a href="/log/@record.BaseSeq">mainline seq @record.BaseSeq</a></td></tr>
-		<tr><td>stacked on</td><td class="id">@(record.Parent ?? "mainline")</td></tr>
+		<tr><td>stacked on</td><td class="id">@(record.Parent is { } parent ? parent : "mainline")</td></tr>
 		<tr><td>id</td><td class="id">@state.Id</td></tr>
 		@if (record.Run is { } run)
 		{
 			<tr><td>run</td><td>@run.RunId · @run.Status · @run.Agent @run.Model<br /><span class="muted">@(run.Prompt ?? run.Command)</span></td></tr>
 		}
 	</table>
+
+	@if (conflicts.Count > 0)
+	{
+		<h2>Conflicts <span class="count">@conflicts.Count</span></h2>
+		<p class="muted">A sync could not merge these paths under their policy. Keep one side, or write the merged text; mainline refuses a workspace that still holds conflicts.</p>
+		@foreach (var conflict in conflicts)
+		{
+			<section class="conflict">
+				<h3 class="id">@conflict.Path</h3>
+				@if (merging == conflict.Path)
+				{
+					<textarea class="editor" @bind="mergedText" rows="16" spellcheck="false"></textarea>
+					<div>
+						<button class="btn primary" disabled="@(!act)" @onclick="() => ResolveAsync(conflict.Path, ConflictChoice.Merged)">Save merged</button>
+						<button class="btn" @onclick="() => merging = null">Cancel</button>
+					</div>
+				}
+				else
+				{
+					<button class="btn" disabled="@(!act)" @onclick="() => ResolveAsync(conflict.Path, ConflictChoice.Workspace)">Keep workspace's@(conflict.Workspace is null ? " (deleted)" : "")</button>
+					<button class="btn" disabled="@(!act)" @onclick="() => ResolveAsync(conflict.Path, ConflictChoice.Mainline)">Take mainline's@(conflict.Mainline is null ? " (deleted)" : "")</button>
+					<button class="btn" disabled="@(!act)" @onclick="() => StartMergeAsync(conflict)">Edit merged…</button>
+				}
+			</section>
+		}
+	}
+
 	<h2>Changes against the base</h2>
 	<DiffView Diff="diff" Split="Split" BaseLink="@($"/workspaces/{Format.Q(Id)}")" />
+
 	<h2>Operation log</h2>
 	<table class="list">
-		<tr><th>#</th><th>Time</th><th>Agent</th><th>Description</th></tr>
+		<tr><th>#</th><th>Time</th><th>Agent</th><th>Description</th><th></th></tr>
 		@foreach (var entry in operations)
 		{
-			<tr><td>@entry.Operation.Seq</td><td>@Format.Time(entry.Operation.Time)</td><td>@(entry.Operation.Agent ?? "")</td><td>@entry.Operation.Description</td></tr>
+			<tr>
+				<td>@entry.Operation.Seq</td>
+				<td>@Format.Time(entry.Operation.Time)</td>
+				<td>@(entry.Operation.Agent ?? "")</td>
+				<td>@entry.Operation.Description</td>
+				<td>
+					@if (entry.Id != state.Head && act)
+					{
+						<ConfirmButton Label="Restore" Class="small" Question="Restore to here?" OnConfirm="() => RestoreAsync(entry.Id)" />
+					}
+				</td>
+			</tr>
 		}
 	</table>
 }
@@ -38,26 +121,93 @@
 	private bool Split => View == "split";
 
 	private WorkspaceState? state;
+	private Commit? working;
 	private DiffSet? diff;
+	private LandResult? check;
 	private List<OperationEntry> operations = [];
-	private string? error;
+	private IReadOnlyList<StoredConflict> conflicts = [];
+	private bool describing;
+	private string intent = "";
+	private string? merging;
+	private string mergedText = "";
 
-	protected override async Task OnParametersSetAsync()
+	protected override async Task LoadAsync()
 	{
-		try
+		(state, diff) = await Client.WorkspaceAsync(Id);
+		working = await Client.Repo.Objects.ReadCommitAsync(state.Record.Working);
+		conflicts = await Actions.ConflictsAsync(state.Id);
+		operations = [];
+		await foreach (var entry in Client.Repo.LogAsync(HeadName.Workspace(state.Id), 50))
 		{
-			error = null;
-			(state, diff) = await Client.WorkspaceAsync(Id);
-			operations = [];
-			await foreach (var entry in Client.Repo.LogAsync(HeadName.Workspace(state.Id), 50))
-			{
-				operations.Add(entry);
-			}
-		}
-		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
-		{
-			error = message;
-			state = null;
+			operations.Add(entry);
 		}
 	}
+
+	private void StartDescribe()
+	{
+		intent = working?.Intent ?? "";
+		describing = true;
+	}
+
+	private Task DescribeAsync() => RunAsync(async () =>
+	{
+		await Actions.DescribeAsync(state!.Id, intent);
+		describing = false;
+		return "Intent saved: it becomes the landing's message.";
+	});
+
+	private Task CheckAsync() => RunAsync(async () =>
+	{
+		check = await Actions.CheckAsync(state!.Id);
+		return null;
+	}, reload: false);
+
+	private Task LandAsync() => RunAsync(async () =>
+	{
+		check = await Actions.LandAsync(state!.Id);
+		return null;
+	});
+
+	private Task SyncAsync() => RunAsync(async () =>
+	{
+		check = null;
+		var result = await Actions.SyncAsync(state!.Id);
+		return !result.Moved
+			? $"Already on the newest base (seq {result.ToSeq})."
+			: result.Conflicts.Count == 0
+				? $"Rebased from seq {result.FromSeq} onto seq {result.ToSeq}{(result.Merged.Count > 0 ? $"; merged {string.Join(", ", result.Merged)}" : "")}."
+				: $"Rebased onto seq {result.ToSeq} with {result.Conflicts.Count} conflict(s): resolve them below, then land.";
+	});
+
+	private Task UndoAsync() => RunAsync(async () =>
+	{
+		var description = state!.Operation.Description;
+		await Actions.UndoAsync(state.Id);
+		return $"Undid '{description}'. Undo again to redo.";
+	});
+
+	private Task RestoreAsync(ObjectId op) => RunAsync(async () =>
+	{
+		await Actions.RestoreAsync(state!.Id, op);
+		return $"Restored to operation {op.Short}.";
+	});
+
+	private Task CloseAsync(bool abandon) => RunAsync(async () =>
+	{
+		await Actions.CloseAsync(state!.Id, abandon);
+		return abandon ? "Abandoned: it will never land." : "Closed.";
+	});
+
+	private async Task StartMergeAsync(StoredConflict conflict)
+	{
+		mergedText = await Actions.ConflictTextAsync(conflict);
+		merging = conflict.Path;
+	}
+
+	private Task ResolveAsync(string path, ConflictChoice choice) => RunAsync(async () =>
+	{
+		await Actions.ResolveAsync(state!.Id, path, choice, choice == ConflictChoice.Merged ? mergedText : null);
+		merging = null;
+		return $"Resolved {path} ({choice.ToString().ToLowerInvariant()}).";
+	});
 }

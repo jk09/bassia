@@ -1,0 +1,98 @@
+@page "/leases"
+@inherits StudioPage
+
+<PageTitle>Leases · Bassia Studio</PageTitle>
+<h1>Leases</h1>
+<p class="muted">A lease reserves a path prefix for a workspace, like a Perforce lock: exclusive leases keep other workspaces from landing there; intent leases only announce work. Leases expire on their own.</p>
+<Banner Notice="@Notice" Error="@Error" />
+@if (leases.Count == 0)
+{
+	<p class="notice">No live lease.</p>
+}
+else
+{
+	<table class="list">
+		<tr><th>Prefix</th><th>Mode</th><th>Workspace</th><th>Owner</th><th>Token</th><th>Expires</th><th></th></tr>
+		@foreach (var lease in leases)
+		{
+			var workspace = names.GetValueOrDefault(lease.Owner);
+			var mine = User.IsAdmin || workspace?.Record.Owner == User.Name;
+			<tr>
+				<td class="id">@(lease.Prefix.Length == 0 ? "/" : lease.Prefix)</td>
+				<td>@lease.Mode.ToString().ToLowerInvariant()</td>
+				<td class="id"><a href="/workspaces/@Format.Q(lease.Owner)">@(workspace?.Name ?? lease.Owner)</a></td>
+				<td>@(workspace?.Record.Owner ?? "")</td>
+				<td>@lease.Token</td>
+				<td>@Format.Time(lease.Expires)</td>
+				<td>
+					@if (User.CanChange && mine)
+					{
+						<ConfirmButton Label="Release" Class="small" Question="Release it?" Disabled="@Busy" OnConfirm="() => ReleaseAsync(lease)" />
+					}
+				</td>
+			</tr>
+		}
+	</table>
+}
+@if (User.CanChange)
+{
+	<h2>Acquire</h2>
+	<div class="form">
+		<label>Prefix <input @bind="prefix" placeholder="src/payments" /></label>
+		<label>Mode
+			<select @bind="mode">
+				<option value="Exclusive">exclusive</option>
+				<option value="Intent">intent</option>
+			</select>
+		</label>
+		<label>For workspace
+			<select @bind="workspace">
+				<option value="">(choose)</option>
+				@foreach (var ws in Mine())
+				{
+					<option value="@ws.Id">@ws.Name</option>
+				}
+			</select>
+		</label>
+		<label>Time to live (minutes) <input type="number" min="1" @bind="minutes" /></label>
+		<div><button class="btn primary" disabled="@Busy" @onclick="AcquireAsync">Acquire</button></div>
+	</div>
+}
+
+@code {
+	private IReadOnlyList<Lease> leases = [];
+	private Dictionary<string, WorkspaceState> names = [];
+	private string prefix = "";
+	private LeaseMode mode = LeaseMode.Exclusive;
+	private string workspace = "";
+	private int minutes = 60;
+
+	private IEnumerable<WorkspaceState> Mine() =>
+		names.Values.Where(state => state.IsOpen && (User.IsAdmin || state.Record.Owner == User.Name)).OrderBy(state => state.Name);
+
+	protected override async Task LoadAsync()
+	{
+		var repo = await Client.OpenAsync();
+		leases = await repo.Leases.ListAsync();
+		names = (await repo.ListWorkspacesAsync(true)).ToDictionary(state => state.Id);
+	}
+
+	private Task AcquireAsync() => RunAsync(async () =>
+	{
+		if (workspace.Length == 0)
+		{
+			throw new VersionException("Choose the workspace the lease is for.");
+		}
+
+		var result = await Actions.AcquireLeaseAsync(prefix, mode, workspace, TimeSpan.FromMinutes(Math.Max(1, minutes)));
+		return result.Lease is { } lease
+			? $"Leased '{(lease.Prefix.Length == 0 ? "/" : lease.Prefix)}' ({lease.Mode.ToString().ToLowerInvariant()}) until {Format.Time(lease.Expires)}; fencing token {lease.Token}."
+			: throw new VersionException($"Not granted: held by {string.Join(", ", result.Blocking.Select(b => $"'{b.Prefix}' ({names.GetValueOrDefault(b.Owner)?.Name ?? b.Owner})"))}.");
+	});
+
+	private Task ReleaseAsync(Lease lease) => RunAsync(async () =>
+	{
+		await Actions.ReleaseLeaseAsync(lease.Id);
+		return $"Released '{lease.Prefix}'.";
+	});
+}

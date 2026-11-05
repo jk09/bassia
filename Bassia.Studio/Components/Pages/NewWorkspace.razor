@@ -1,0 +1,79 @@
+@page "/workspaces/new"
+@inherits StudioPage
+
+<PageTitle>New workspace · Bassia Studio</PageTitle>
+<h1>New workspace</h1>
+<p class="muted">A workspace is a unit of work over the whole monorepo: on mainline, stacked on another workspace (it lands after it), or a clone of one (same base and work, a new change).</p>
+<Banner Notice="@Notice" Error="@Error" />
+@if (!User.CanChange)
+{
+	<p class="notice">@User.Name is a reader and cannot create workspaces.</p>
+}
+else
+{
+	<div class="form">
+		<label>Name <input @bind="name" placeholder="fix-login" /></label>
+		<label>Start from
+			<select @bind="mode">
+				<option value="main">mainline (latest seq)</option>
+				<option value="on">stacked on a workspace</option>
+				<option value="clone">a clone of a workspace</option>
+			</select>
+		</label>
+		@if (mode != "main")
+		{
+			<label>Workspace
+				<select @bind="source">
+					<option value="">(choose)</option>
+					@foreach (var ws in open)
+					{
+						<option value="@ws.Name">@ws.Name (@ws.Record.Owner)</option>
+					}
+				</select>
+			</label>
+		}
+		@if (mode != "clone")
+		{
+			<label>Intent <textarea @bind="intent" rows="3" placeholder="What this change is for (the landing's message)"></textarea></label>
+		}
+		<div><button class="btn primary" disabled="@Busy" @onclick="CreateAsync">Create</button></div>
+	</div>
+}
+
+@code {
+	[SupplyParameterFromQuery(Name = "on")] public string? On { get; set; }
+
+	[SupplyParameterFromQuery(Name = "clone")] public string? Clone { get; set; }
+
+	private string name = "";
+	private string mode = "main";
+	private string source = "";
+	private string intent = "";
+	private IReadOnlyList<WorkspaceState> open = [];
+
+	protected override async Task LoadAsync()
+	{
+		var repo = await Client.OpenAsync();
+		open = await repo.ListWorkspacesAsync();
+		if (On is { Length: > 0 })
+		{
+			(mode, source) = ("on", On);
+		}
+		else if (Clone is { Length: > 0 })
+		{
+			(mode, source) = ("clone", Clone);
+		}
+	}
+
+	private Task CreateAsync() => RunAsync(async () =>
+	{
+		if (mode != "main" && source.Length == 0)
+		{
+			throw new VersionException("Choose the workspace to start from.");
+		}
+
+		var state = mode == "clone" ? await Actions.CloneAsync(source, name) : await Actions.CreateAsync(name, intent, mode == "on" ? source : null);
+		Navigation.NavigateTo($"/workspaces/{Uri.EscapeDataString(state.Id)}/files");
+		return null;
+	}, reload: false);
+}
