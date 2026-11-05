@@ -149,13 +149,19 @@ Defaults chosen (not asked; revisit if wrong):
       job, Blob Storage, PostgreSQL, Key Vault, ACR, managed identities, the Entra ID app registration with app roles)
       and `deploy/azure/deploy.sh|ps1` (foundation, `az acr build`, apps); CI job "Azure deployment" (fmt, validate,
       image builds, smoke). 5 new tests (sign-in redirect, signed-in person and role, claims mapping, options, watch).
+- [x] Studio on the Azure backend emulated locally (Azurite + PostgreSQL, `/bassia-local-cloud`):
+      `StudioAzuriteIntegrationTests` (in CI's cloud test filter) drives edits, landing, a conflict synced and
+      resolved, a lease, a cloud run as a job that lands, and a replay with the same change, and checks the pages, the
+      watch stream, the blobs in Azurite and the heads in PostgreSQL; the browser flows of slices (b) and (c) and the
+      live log passed against a server on the emulators.
 - [ ] First deployment to a real Azure subscription with `deploy/azure/deploy.sh` (needs an account): sign in, start a
       run as a job execution, land it.
 
 ## Validation
 
 - `dotnet test` (new Studio tests: in-process server + Studio, page and action tests, CLI/Studio parity).
-- `/bassia-local-cloud smoke` extended: Studio against Azurite + PostgreSQL, browse, edit, land, start a run.
+- `/bassia-local-cloud up`, then `test -Filter cloud` (includes `StudioAzuriteIntegrationTests`): Studio against
+  Azurite + PostgreSQL - edit, land, conflict, lease, a cloud run and a replay.
 - Playwright smoke of the main pages (screenshots for review).
 - `cd deploy/azure/terraform && terraform fmt -check && terraform init -backend=false && terraform validate`.
 - `docker build -f deploy/docker/<image>.Dockerfile .` for server, studio, worker, then `TAG=test deploy/docker/smoke.sh`.
