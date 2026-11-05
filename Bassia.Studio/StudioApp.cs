@@ -1,6 +1,7 @@
 namespace Bassia.Studio;
 
 using Bassia.Studio.Components;
+using Bassia.Studio.Runs;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 
@@ -32,6 +33,7 @@ public sealed class StudioApp(StudioOptions options) : IAsyncDisposable
 		builder.Services.AddSingleton<MonorepoClient>();
 		builder.Services.AddSingleton(new StudioUser(options.User, options.Role));
 		builder.Services.AddScoped<StudioActions>();
+		builder.Services.AddSingleton(services => new RunService(services.GetRequiredService<MonorepoClient>(), options, CreateRunHost(options)));
 		builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 		app = builder.Build();
 		app.UseExceptionHandler("/error", createScopeForErrors: true);
@@ -39,9 +41,34 @@ public sealed class StudioApp(StudioOptions options) : IAsyncDisposable
 		app.MapStaticAssets();
 		app.MapGet("/healthz", () => Results.Text("ok"));
 		app.MapGet("/raw", RawAsync);
+		app.MapPost("/runs/report/{id}", Report);
 		app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 		await app.StartAsync();
 		Address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault();
+		Runs.ReportBase = () => options.PublicUrl ?? Address ?? options.Url;
+	}
+
+	/// <summary>The runs Studio starts and follows.</summary>
+	public RunService Runs => app?.Services.GetRequiredService<RunService>() ?? throw new InvalidOperationException("Start Studio first.");
+
+	/// <summary>The run host the options name.</summary>
+	public static IRunHost? CreateRunHost(StudioOptions options) => options.RunHost.ToLowerInvariant() switch
+	{
+		"none" or "" => null,
+		"local" => new LocalProcessRunHost(options.BassiaCommand(), options.Runs),
+		"aca" => new ContainerAppsJobRunHost(new ContainerAppsJobOptions(
+			options.AcaJob ?? throw new ArgumentException("-run-host aca needs -aca-job <job resource id>."),
+			options.AcaImage ?? throw new ArgumentException("-run-host aca needs -aca-image <worker image>."),
+			SecretEnvironment: options.AcaSecretEnvironment())),
+		var other => throw new ArgumentException($"-run-host is none, local or aca, not '{other}'.")
+	};
+
+	/// <summary>A job's report of its run's output and status; answers whether the run should stop.</summary>
+	private static IResult Report(string id, RunReport report, HttpRequest request, RunService runs)
+	{
+		var header = request.Headers.Authorization.ToString();
+		var token = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..] : null;
+		return runs.Report(id, token, report, out var stop) ? Results.Json(new { stop }) : Results.Unauthorized();
 	}
 
 	/// <summary>Downloads a file's content at a mainline seq or in a workspace.</summary>

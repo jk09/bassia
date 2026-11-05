@@ -17,6 +17,11 @@
 		<a class="btn" href="/workspaces/@Format.Q(state.Id)/files">Files</a>
 		<a class="btn" href="/workspaces/new?on=@Format.Q(state.Name)">Stack on this</a>
 		<a class="btn" href="/workspaces/new?clone=@Format.Q(state.Name)">Clone</a>
+		<a class="btn" href="/runs/new?on=@Format.Q(state.Name)">Run an agent on this</a>
+		@if (record.Run is { } lastRun)
+		{
+			<a class="btn" href="/runs/@lastRun.RunId">Its run</a>
+		}
 		<span class="spacer"></span>
 		<button class="btn" disabled="@(!act)" @onclick="() => CloseAsync(false)">Close</button>
 		<ConfirmButton Label="Abandon" Class="danger" Question="Abandon this workspace?" Disabled="@(!act)" OnConfirm="() => CloseAsync(true)" />

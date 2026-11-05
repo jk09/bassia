@@ -11,6 +11,7 @@
 		<a class="tool" href="/depot">Depot</a>
 		<a class="tool" href="/log">Log</a>
 		<a class="tool" href="/workspaces">Workspaces</a>
+		<a class="tool" href="/runs">Runs</a>
 	</header>
 	<nav class="sidebar">
 		<div class="group">Version</div>
@@ -21,6 +22,9 @@
 		<NavLink href="/workspaces/new">New workspace</NavLink>
 		<NavLink href="/conflicts">Conflicts</NavLink>
 		<NavLink href="/leases">Leases</NavLink>
+		<div class="group">Agentic runs</div>
+		<NavLink href="/runs" Match="NavLinkMatch.All">Runs</NavLink>
+		<NavLink href="/runs/new">New run</NavLink>
 	</nav>
 	<main class="content">
 		@Body

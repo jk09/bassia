@@ -1,0 +1,48 @@
+@page "/runs"
+@inherits StudioPage
+@implements IDisposable
+@inject Bassia.Studio.Runs.RunService RunService
+
+<PageTitle>Agentic runs · Bassia Studio</PageTitle>
+<h1>Agentic runs</h1>
+<p class="muted">Each run works in a workspace of its own and records its task there as the replay recipe. Runs started here execute on @(RunService.HostName ?? "no run host") and stream their output; runs started with the CLI are listed from their workspaces.</p>
+<div class="diffbar"><span class="spacer"></span><a class="btn primary" href="/runs/new">New run</a></div>
+<Banner Notice="@Notice" Error="@Error" />
+@if (views.Count == 0 && Error is null)
+{
+	<p class="notice">No run yet.</p>
+}
+else
+{
+	<table class="list">
+		<tr><th>Run</th><th>Status</th><th>Workspace</th><th>By</th><th>Task</th><th>Started</th><th>Finished</th></tr>
+		@foreach (var view in views)
+		{
+			<tr>
+				<td class="id"><a href="/runs/@view.RunId">@view.RunId</a></td>
+				<td><span class="st st-@view.Status">@view.Status</span></td>
+				<td class="id">@if (view.WorkspaceId is { } ws) { <a href="/workspaces/@Format.Q(ws)">@(view.WorkspaceName ?? ws)</a> }</td>
+				<td>@view.Agent</td>
+				<td>@Format.FirstLine(view.Task ?? "", 70)</td>
+				<td>@Format.Time(view.Started)</td>
+				<td>@(view.Finished is { } finished ? Format.Time(finished) : "")</td>
+			</tr>
+		}
+	</table>
+}
+
+@code {
+	private IReadOnlyList<Bassia.Studio.Runs.RunView> views = [];
+
+	protected override async Task LoadAsync() => views = await RunService.ListAsync();
+
+	protected override void OnInitialized() => RunService.Changed += OnChanged;
+
+	private void OnChanged(Bassia.Studio.Runs.StudioRun run) => _ = InvokeAsync(async () =>
+	{
+		await LoadAsync();
+		StateHasChanged();
+	});
+
+	public void Dispose() => RunService.Changed -= OnChanged;
+}

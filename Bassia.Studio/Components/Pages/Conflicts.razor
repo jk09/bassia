@@ -19,7 +19,7 @@
 		{
 			<ConflictTable Conflicts="row.Check.Conflicts" />
 		}
-		<p class="muted">@Next(row.Check.Outcome)</p>
+		<p class="muted">@Next(row.Check.Outcome) @if (row.State.Record.Run is { } run) { <a href="/runs/@run.RunId">Open its run to replay it.</a> }</p>
 	</section>
 }
 @if (hot.Count > 0)

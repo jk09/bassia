@@ -229,7 +229,7 @@ internal static class AgentCommands
 
 		var name = $"{original.Name.Split("-replay")[0]}-replay{DateTimeOffset.UtcNow:HHmmss}";
 		var options = new AgentRunOptions(recipe.Prompt, recipe.Command, null, name, null, recipe.Model, invocation.Has("land"), false, invocation.List("lease"),
-			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), ReplayOf: original.Id, ChangeId: working.ChangeId,
+			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"), ReplayOf: original.Id, ChangeId: working.ChangeId,
 			// A replay loads what the original loaded here, unless told otherwise.
 			Load: invocation.Has("load") ? invocation.List("load") : monorepo.Workspaces.Local(original)?.State.Rules is { IsAll: false } previous ? previous.Patterns : null);
 		await monorepo.Workspaces.Service.SetStatusAsync(original.Id, WorkspaceStatus.Replaced, "replaced by a replay", monorepo.User);
@@ -245,5 +245,63 @@ internal static class AgentCommands
 		var message = $"Replayed '{original.Name}' as '{result.Workspace.Name}' on seq {result.Workspace.Record.BaseSeq} (same change {working.ChangeId.Short}): run {result.Run.Status}." +
 			(result.Land is { } landed ? $" Landing: {landed.Message}" : "");
 		return result.Run.Status == RunStatus.Succeeded && (result.Land is null || LandOutcome.IsSuccess(result.Land.Outcome)) ? Ok(invocation, message, data) : Fail(invocation, message, data);
+	}
+
+	public const string JobServerVariable = "BASSIA_JOB_SERVER";
+	public const string JobTokenVariable = "BASSIA_JOB_TOKEN";
+	public const string JobArgsVariable = "BASSIA_JOB_ARGS";
+	public const string JobDirVariable = "BASSIA_JOB_DIR";
+
+	/// <summary>
+	/// A run in a container (a cloud job started by Bassia Studio): clones the server named in the environment into a
+	/// fresh folder, then runs the <c>agent start</c> or <c>agent replay</c> command given as a JSON array. A failure
+	/// before the run starts is reported to the starter, so it never waits for a run that will not come.
+	/// </summary>
+	public static async Task<int> JobAsync(Invocation invocation)
+	{
+		var server = invocation.Get("from") ?? Environment.GetEnvironmentVariable(JobServerVariable);
+		var token = invocation.Get("token") ?? Environment.GetEnvironmentVariable(JobTokenVariable);
+		var json = Environment.GetEnvironmentVariable(JobArgsVariable);
+		if (server is null || json is null)
+		{
+			return Fail(invocation, $"A job needs {JobServerVariable} (or -from) and {JobArgsVariable} (a JSON array: agent start|replay and its switches).");
+		}
+
+		var args = System.Text.Json.JsonSerializer.Deserialize<string[]>(json) ?? [];
+		if (args.Length < 2 || args[0] != "agent" || args[1] is not ("start" or "replay"))
+		{
+			return Fail(invocation, $"{JobArgsVariable} must start with \"agent\", \"start\" or \"replay\".");
+		}
+
+		var runId = args.SkipWhile(arg => arg != "-run-id").Skip(1).FirstOrDefault() ?? AgentRunner.NewRunId();
+		var root = invocation.Get("path") ?? Environment.GetEnvironmentVariable(JobDirVariable) ?? Path.Combine(Path.GetTempPath(), "bassia-job-" + runId);
+		var clone = Path.Combine(root, "clone");
+		string? failure = null;
+		var exit = 1;
+		try
+		{
+			Directory.CreateDirectory(root);
+			using (await Monorepo.CloneAsync(server, clone, token))
+			{
+			}
+
+			exit = await ProgramCli.RunAsync(["-C", clone, .. args, .. args.Contains("-run-id") ? Array.Empty<string>() : ["-run-id", runId]]);
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			failure = ex.Message;
+		}
+
+		if (failure is not null || exit != 0)
+		{
+			// The run may have reported its own end; a second, final report only adds why the job failed.
+			await using var reporter = Agents.RunReporter.FromEnvironment(runId);
+			if (reporter is not null)
+			{
+				await reporter.FinishAsync(null, exit == 0 ? RunStatus.Failed : "job-failed", failure ?? $"The job's bassia command exited with {exit}.");
+			}
+		}
+
+		return failure is null ? exit : Fail(invocation, failure);
 	}
 }

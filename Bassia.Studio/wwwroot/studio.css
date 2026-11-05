@@ -102,3 +102,8 @@ section.conflict > div, section.conflict > button { align-self: flex-start; }
 .count { font-size: 12px; padding: 1px 7px; border-radius: 9px; background: var(--del); color: var(--del-text); }
 .st-needs-replay, .st-conflict, .st-rejected { background: var(--del); color: var(--del-text); }
 .st-landed, .st-would-land { background: var(--add); color: var(--add-text); }
+.form label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
+pre.output { max-height: 480px; overflow: auto; }
+.st-running, .st-starting { background: var(--hunk); color: var(--accent); }
+.st-succeeded { background: var(--add); color: var(--add-text); }
+.st-failed, .st-stopped, .st-launch-failed, .st-job-failed { background: var(--del); color: var(--del-text); }

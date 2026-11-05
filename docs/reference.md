@@ -146,7 +146,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-load <rules>]`, `workspace clone -from <w> -name <n> [-load <rules>]`, `workspace checkout <w> [-load <rules>]`, `workspace load [<w>] [-load <rules>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
-| Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]` |
+| Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]`, `agent job` (in a container: clone, then start or replay from `BASSIA_JOB_ARGS`) |
 | Git | `import -git <url\|path>,... [-prefix <folder>,...] [-history] [-limit <n>]`, `export -git <dir> [-branch <b>]` |
 | Dev Drive | `devdrive status [-path <dir>]` |
 | Maintenance | `gc [-dry-run] [-grace-hours <n>] [-retention-days <n>]`, `scrub [-sample <n>]` |
@@ -492,12 +492,33 @@ Delivered in slices (feature record `bassia-681e8902`):
 - **Conflicts**: every open workspace that cannot land now, why, and the hot paths.
 - **Leases**: live leases; acquire (exclusive or intent) for a workspace, release.
 
+- **Agentic runs**: every run (those started here and those recorded on workspaces by the CLI); **New run** with a
+  prompt or a command, in a new workspace (on mainline or stacked) or an existing one, with leases, load rules and
+  land-when-done; a run's page streams its **output live** and offers **Stop**, **Land**, **Replay on mainline** (the
+  recorded task again on the newest mainline, same change) and **Discard**.
+
 Studio changes the monorepo through the same core operations as the command line, so the same edit gives the same
 tree. Until sign-in is configured it acts as one user with one role: `-user <name>` (owner and agent of its changes;
 default `studio`) and `-role reader|contributor|admin` (default `admin`). Readers only look; contributors change their
 own workspaces and leases; admins anyone's.
 
 An unreachable server or a missing path is shown as a message on the page.
+
+### Runs from Studio
+
+`-run-host` decides where runs execute: `none` (default; runs are off), `local` (a process per run on Studio's machine:
+`-bassia "<command line that starts bassia>"`, `-runs <folder>`) or `aca` (an Azure Container Apps job execution per run:
+`-aca-job <job resource id>`, `-aca-image <worker image>`, `-aca-secrets NAME=secret,...`, default
+`BASSIA_JOB_TOKEN=server-token,ANTHROPIC_API_KEY=anthropic-api-key`; Studio signs in to Azure with its managed identity).
+`-public-url` is where jobs reach Studio and `-job-server` where they reach the server, when those differ from Studio's
+own addresses.
+
+Every job runs `bassia agent job`: it clones the server (`BASSIA_JOB_SERVER`, `BASSIA_JOB_TOKEN`) into a fresh folder and
+runs the `agent start` or `agent replay` command in `BASSIA_JOB_ARGS` (a JSON array) as `BASSIA_USER`, so the run's
+workspace, recipe, run record, leases and landing are the CLI's. With `BASSIA_REPORT_URL` and `BASSIA_REPORT_TOKEN` set,
+`bassia agent start` and `replay` post their output there every half second and their final status at the end; the
+answer can ask the run to stop, which then ends as `bassia agent stop` would. A job that does not stop within 30 seconds
+is killed.
 
 ## Configuration
 
