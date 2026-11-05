@@ -600,6 +600,18 @@ locally `/bassia-local-cloud` does (below), and
 without them those tests check nothing. `SyncEfficiencyTests` counts the requests a client sends for a checkout, a
 second checkout and a snapshot, on the disk backend and on Azure + PostgreSQL, and runs two clients end to end on the
 latter.
+`AzuriteIntegrationTests` (`Category=Azurite`) runs the whole Azure path in one scenario. It starts a server on Azurite
+in a fresh container (with PostgreSQL state when `BASSIA_TEST_POSTGRES` is set). One client imports
+`BASSIA_TEST_GIT_URL` (default `https://github.com/jk09/example.git`), and the test compares the imported files byte for
+byte with a git clone. Three clients then start eight agentic runs at once, each a separate `bassia agent start -land`
+process in a workspace of its own. The agents are a scripted stand-in that waits at a barrier until all have started,
+so the runs provably overlap. Six add their own files and land. Two append to the same README: one lands, the other is
+refused as `needs-replay` and lands after `agent replay` with its change id. The test then checks mainline's log, a
+fresh workspace, the blobs in the container and a scrub. Without Azurite it checks nothing, unless
+`BASSIA_TEST_REQUIRE_AZURITE` is set, as in CI, where it runs as its own step of the `Test` job.
+`jk09/example` is private, so CI imports it from GitHub only with the repository secret `BASSIA_EXAMPLE_REPO_TOKEN`
+(a token that can read it). Without the secret, `scripts/Use-ExampleRepository.ps1` imports a local stand-in with the
+same files and adds a warning to the run.
 `GitInteropTests` imports several repositories with interleaved history and exports mainline back, incrementally.
 `CloneCacheTests` covers the clone cache with a stand-in cloner on every platform (clones, fallbacks, the setting,
 pruning, status); `DevDriveTests` clone for real on the volume named by `BASSIA_TEST_DEVDRIVE_DIR` - the
