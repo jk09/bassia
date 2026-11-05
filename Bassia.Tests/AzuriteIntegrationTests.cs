@@ -198,7 +198,8 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 
 	/// <summary>
 	/// The agent stand-in: marks its run in the barrier folder, waits until <c>count</c> runs have (a replay finds them all
-	/// there already), then writes or appends its line.
+	/// there already), then writes or appends its line. The barrier waits up to 6 minutes (the CI step allows 12): on a slow Windows runner the
+	/// eight runs (each its own bassia process with a checkout) took over two minutes to all start.
 	/// </summary>
 	private string WriteAgentScript()
 	{
@@ -209,9 +210,9 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 				param([string] $Barrier, [int] $Count, [string] $File, [string] $Line, [string] $Mode)
 				$ErrorActionPreference = 'Stop'
 				New-Item -ItemType File -Force -Path (Join-Path $Barrier $env:BASSIA_RUN_ID) | Out-Null
-				$deadline = (Get-Date).AddMinutes(2)
+				$deadline = (Get-Date).AddMinutes(6)
 				while (@(Get-ChildItem -File $Barrier).Count -lt $Count) {
-					if ((Get-Date) -gt $deadline) { Write-Error 'barrier timed out' }
+					if ((Get-Date) -gt $deadline) { Write-Error "barrier timed out: $(@(Get-ChildItem -File $Barrier).Count) of $Count runs arrived in 6 minutes" }
 					Start-Sleep -Milliseconds 100
 				}
 				$text = $Line + "`n"
@@ -229,7 +230,7 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 			waited=0
 			while [ "$(ls "$1" | wc -l)" -lt "$2" ]; do
 				waited=$((waited + 1))
-				if [ "$waited" -gt 1200 ]; then echo 'barrier timed out' >&2; exit 2; fi
+				if [ "$waited" -gt 3600 ]; then echo "barrier timed out: $(ls "$1" | wc -l) of $2 runs arrived in 6 minutes" >&2; exit 2; fi
 				sleep 0.1
 			done
 			if [ "$5" = append ]; then printf '%s\n' "$4" >> "$3"; else printf '%s\n' "$4" > "$3"; fi
