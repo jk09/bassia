@@ -463,6 +463,29 @@ click one to copy it.
 - **Leases**, **Files** (mainline's tree at any seq, from tree metadata) and **Config** (the policy in `.bassia.toml`
   and the folder's settings).
 
+## Bassia Studio (web client)
+
+```sh
+bassia-studio -server http://127.0.0.1:8080 [-token <t>] [-url http://127.0.0.1:5280] [-cache <folder>] [-label <text>]
+```
+
+`bassia-studio` (project `Bassia.Studio`, ASP.NET Core Blazor Server) is the read-write web client of a `bassia-server`,
+in the role of a desktop version-control client such as TortoiseSVN or P4V, but deployed in the cloud next to the
+server. It talks to the server as a clone does: the version core over the remote stores, with a local cache of the
+immutable objects it reads. Switches can also come from `BASSIA_STUDIO_*` environment variables. Pages are rendered on
+the server and then become interactive over a SignalR circuit.
+
+Delivered in slices (feature record `bassia-681e8902`); the first slice is read-only:
+
+- **Overview**: mainline's seq, open workspaces, the latest landings.
+- **Depot browser**: mainline's tree at the latest or any seq, a file's content (download at `/raw?path=<p>[&seq=<n>]`)
+  and its **history**: the landings that changed it, from the path index.
+- **Mainline log**: the landings by seq, paged; a landing's commit, change id, intent, recipe and its diff, **unified
+  or side by side**.
+- **Workspaces**: open (or all) workspaces; a workspace's record, its changes against its base and its operation log.
+
+An unreachable server or a missing path is shown as a message on the page.
+
 ## Configuration
 
 Settings of a client live in `.bassia/config.toml` (`config list|get|set|unset`); an environment variable,

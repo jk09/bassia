@@ -1,0 +1,16 @@
+@if (Message is not null)
+{
+	<div class="error" role="alert">@Message</div>
+}
+
+@code {
+	[Parameter] public string? Message { get; set; }
+
+	/// <summary>The message for an expected failure (a version error or an unreachable server); others rethrow.</summary>
+	public static string? For(Exception ex) => ex switch
+	{
+		VersionException => ex.Message,
+		HttpRequestException http => $"The bassia-server is unreachable or refused the request: {http.Message}",
+		_ => null
+	};
+}

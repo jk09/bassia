@@ -1,0 +1,35 @@
+@page "/log"
+@inject MonorepoClient Client
+
+<PageTitle>Mainline log · Bassia Studio</PageTitle>
+<h1>Mainline log</h1>
+<p class="muted">One trunk, linear: every landing is the next seq and keeps its workspace's change id.</p>
+<ErrorNotice Message="@error" />
+<LogTable Entries="entries" />
+@if (entries.Count == PageSize && entries[^1].Seq > 0)
+{
+	<div class="pager"><a href="/log?from=@(entries[^1].Seq - 1)">Older →</a></div>
+}
+
+@code {
+	private const int PageSize = 50;
+
+	[SupplyParameterFromQuery(Name = "from")] public long? From { get; set; }
+
+	private IReadOnlyList<LogEntry> entries = [];
+	private string? error;
+
+	protected override async Task OnParametersSetAsync()
+	{
+		try
+		{
+			error = null;
+			entries = await Client.LogAsync(From, PageSize);
+		}
+		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+		{
+			error = message;
+			entries = [];
+		}
+	}
+}

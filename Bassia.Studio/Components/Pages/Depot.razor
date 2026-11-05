@@ -1,0 +1,143 @@
+@page "/depot"
+@inject MonorepoClient Client
+
+<PageTitle>@(Path.Length == 0 ? "Depot" : Path) · Bassia Studio</PageTitle>
+<h1>Depot</h1>
+<div class="crumbs id">
+	<span class="muted">@(Seq is { } at ? $"seq {at}" : $"latest (seq {mainSeq})")</span>
+	<a href="@Format.DepotLink("", Seq)">(root)</a>
+	@foreach (var (name, prefix) in Crumbs())
+	{
+		<span> / </span><a href="@Format.DepotLink(prefix, Seq)">@name</a>
+	}
+</div>
+<ErrorNotice Message="@error" />
+<div class="panes">
+	<section class="pane tree">
+		@if (folder is not null)
+		{
+			<table class="list">
+				<tr><th>Name</th><th>Kind</th><th>Size</th></tr>
+				@if (folderPath.Length > 0)
+				{
+					<tr><td class="id"><a href="@Format.DepotLink(PathNames.Parent(folderPath), Seq)">..</a></td><td></td><td></td></tr>
+				}
+				@foreach (var entry in folder.Entries)
+				{
+					var child = PathNames.Join(folderPath, entry.Name);
+					<tr class="@(child == Path ? "selected" : "")">
+						<td class="id"><a href="@Format.DepotLink(child, Seq)">@entry.Name@(entry.Kind == EntryKind.Tree ? "/" : "")</a></td>
+						<td>@Format.Kind(entry.Kind)</td>
+						<td>@(entry.Kind == EntryKind.Tree ? "" : Format.Size(entry.Size))</td>
+					</tr>
+				}
+			</table>
+		}
+	</section>
+	@if (file is not null)
+	{
+		<section class="pane detail">
+			<div class="tabs">
+				<a class="@(History ? "" : "on")" href="@Format.DepotLink(Path, Seq)">Content</a>
+				<a class="@(History ? "on" : "")" href="@(Format.DepotLink(Path, Seq) + "&tab=history")">History</a>
+				<a href="@RawLink">Download</a>
+				<span class="muted">@Format.Size(file.Size)@(file.Executable ? " · executable" : "")</span>
+			</div>
+			@if (History)
+			{
+				<table class="list">
+					<tr><th>Seq</th><th>Time</th><th>Author</th><th>Size</th><th>Intent</th></tr>
+					@foreach (var version in history)
+					{
+						<tr>
+							<td><a href="/log/@version.Seq">@version.Seq</a></td>
+							<td>@Format.Time(version.Landing.Commit.Time)</td>
+							<td>@version.Landing.Commit.Author</td>
+							<td>@(version.Leaf is { } leaf ? Format.Size(leaf.Size) : "deleted")</td>
+							<td>@Format.FirstLine(version.Landing.Commit.Intent, 70)</td>
+						</tr>
+					}
+				</table>
+			}
+			else if (text is not null)
+			{
+				<pre class="source">@text</pre>
+			}
+			else
+			{
+				<p class="notice">@Format.Size(file.Size) of binary content (or too large to show): download it instead.</p>
+			}
+		</section>
+	}
+</div>
+
+@code {
+	[SupplyParameterFromQuery(Name = "path")] public string? PathQuery { get; set; }
+
+	[SupplyParameterFromQuery(Name = "seq")] public long? Seq { get; set; }
+
+	[SupplyParameterFromQuery(Name = "tab")] public string? Tab { get; set; }
+
+	private string Path => PathNames.Normalize(PathQuery ?? "");
+
+	private bool History => Tab == "history";
+
+	private string RawLink => "/raw?path=" + Format.Q(Path) + (Seq is { } at ? "&seq=" + at : "");
+
+	private long mainSeq;
+	private string folderPath = "";
+	private Tree? folder;
+	private Leaf? file;
+	private string? text;
+	private IReadOnlyList<PathHistoryEntry> history = [];
+	private string? error;
+
+	private IEnumerable<(string Name, string Prefix)> Crumbs()
+	{
+		var prefix = "";
+		foreach (var part in PathNames.Split(Path))
+		{
+			prefix = PathNames.Join(prefix, part);
+			yield return (part, prefix);
+		}
+	}
+
+	protected override async Task OnParametersSetAsync()
+	{
+		error = null;
+		folder = null;
+		file = null;
+		text = null;
+		history = [];
+		try
+		{
+			var repo = await Client.OpenAsync();
+			mainSeq = (await repo.GetMainAsync()).Seq;
+			var tree = await Client.TreeAsync(Seq, null);
+			var leaf = await repo.Trees.GetAsync(tree, Path) ?? throw new VersionException($"'{Path}' does not exist at seq {Seq ?? mainSeq}.");
+			if (leaf.Kind == EntryKind.Tree)
+			{
+				folderPath = Path;
+				folder = await repo.Objects.ReadTreeAsync(leaf.Id);
+				return;
+			}
+
+			file = leaf;
+			folderPath = PathNames.Parent(Path);
+			var parent = await repo.Trees.GetAsync(tree, folderPath);
+			folder = parent is { Kind: EntryKind.Tree } ? await repo.Objects.ReadTreeAsync(parent.Id) : null;
+			if (History)
+			{
+				history = await Client.PathHistoryAsync(Path, Seq, 100);
+			}
+			else
+			{
+				text = await Client.TextAsync(leaf);
+			}
+		}
+		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+		{
+			error = message;
+		}
+	}
+}

@@ -1,0 +1,56 @@
+@page "/log/{Seq:long}"
+@inject MonorepoClient Client
+
+<PageTitle>Seq @Seq · Bassia Studio</PageTitle>
+<div class="pager">
+	@if (Seq > 0) { <a href="/log/@(Seq - 1)">← seq @(Seq - 1)</a> }
+	<a href="/log/@(Seq + 1)">seq @(Seq + 1) →</a>
+</div>
+<h1>Mainline seq @Seq</h1>
+<ErrorNotice Message="@error" />
+@if (entry is not null && diff is not null)
+{
+	var commit = entry.Commit;
+	<table class="list facts">
+		<tr><td>intent</td><td><pre class="brief">@commit.Intent</pre></td></tr>
+		<tr><td>author</td><td>@commit.Author</td></tr>
+		<tr><td>time</td><td>@Format.Time(commit.Time)</td></tr>
+		<tr><td>workspace</td><td class="id">@(entry.Operation.Workspace ?? "-")</td></tr>
+		<tr><td>change</td><td class="id">@commit.ChangeId.Hex</td></tr>
+		<tr><td>commit</td><td class="id">@entry.CommitId.Hex</td></tr>
+		@if (commit.Recipe is { } recipe)
+		{
+			<tr><td>recipe</td><td>@recipe.Agent @recipe.Model: @(recipe.Prompt ?? recipe.Command)</td></tr>
+		}
+	</table>
+	<p><a href="/depot?seq=@Seq">Browse the depot at seq @Seq</a></p>
+	<h2>Changes</h2>
+	<DiffView Diff="diff" Split="Split" BaseLink="@($"/log/{Seq}")" />
+}
+
+@code {
+	[Parameter] public long Seq { get; set; }
+
+	[SupplyParameterFromQuery(Name = "view")] public string? View { get; set; }
+
+	private bool Split => View == "split";
+
+	private LogEntry? entry;
+	private DiffSet? diff;
+	private string? error;
+
+	protected override async Task OnParametersSetAsync()
+	{
+		try
+		{
+			error = null;
+			(entry, diff) = await Client.LandingAsync(Seq);
+		}
+		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+		{
+			error = message;
+			entry = null;
+			diff = null;
+		}
+	}
+}

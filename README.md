@@ -179,6 +179,13 @@ files at any seq, and the policy. It is read-only: every page shows the commands
 
 ![Runs: live runs as cards, and every run over time](docs/images/runs.png)
 
+## A web client in the cloud
+
+Bassia Studio (`bassia-studio`) is the web counterpart of a desktop VCS client, deployed next to `bassia-server`:
+browse the depot at any seq with per-file history, read the mainline log with unified or side-by-side diffs, and
+inspect workspaces. Managing workspaces, landing and agentic runs from the browser, and the Azure deployment, follow
+(feature record `bassia-681e8902`).
+
 ## A CLI made for agents
 
 Every command answers in TOML (`-human` for Markdown), with exit codes 0, 1 and 2. `bassia help -all` teaches an agent
