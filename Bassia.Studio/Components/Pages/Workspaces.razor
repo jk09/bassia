@@ -1,0 +1,56 @@
+@page "/workspaces"
+@inject MonorepoClient Client
+
+<PageTitle>Workspaces · Bassia Studio</PageTitle>
+<h1>Workspaces</h1>
+<p class="muted">Each agentic run works in its own workspace over the monorepo; a workspace lands on mainline as one change.</p>
+<div class="diffbar">
+	<a class="@(All ? "" : "on")" href="/workspaces">Open</a>
+	<a class="@(All ? "on" : "")" href="/workspaces?all=true">All</a>
+</div>
+<ErrorNotice Message="@error" />
+@if (workspaces.Count == 0 && error is null)
+{
+	<p class="notice">No @(All ? "" : "open ")workspace.</p>
+}
+else
+{
+	<table class="list">
+		<tr><th>Name</th><th>Status</th><th>Owner</th><th>Base</th><th>Stacked on</th><th>Run</th><th>Created</th></tr>
+		@foreach (var state in workspaces)
+		{
+			var record = state.Record;
+			<tr>
+				<td class="id"><a href="/workspaces/@Format.Q(state.Id)">@state.Name</a></td>
+				<td><span class="st st-@record.Status">@record.Status</span></td>
+				<td>@record.Owner</td>
+				<td><a href="/log/@record.BaseSeq">seq @record.BaseSeq</a></td>
+				<td class="id">@(record.Parent ?? "mainline")</td>
+				<td>@(record.Run is { } run ? $"{run.Status} ({run.Agent})" : "")</td>
+				<td>@Format.Time(record.Created)</td>
+			</tr>
+		}
+	</table>
+}
+
+@code {
+	[SupplyParameterFromQuery(Name = "all")] public bool All { get; set; }
+
+	private IReadOnlyList<WorkspaceState> workspaces = [];
+	private string? error;
+
+	protected override async Task OnParametersSetAsync()
+	{
+		try
+		{
+			error = null;
+			var repo = await Client.OpenAsync();
+			workspaces = (await repo.ListWorkspacesAsync(All)).OrderByDescending(state => state.Record.Created).ToList();
+		}
+		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+		{
+			error = message;
+			workspaces = [];
+		}
+	}
+}

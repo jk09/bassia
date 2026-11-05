@@ -1,0 +1,63 @@
+@page "/workspaces/{Id}"
+@inject MonorepoClient Client
+
+<PageTitle>@(state?.Name ?? Id) · Bassia Studio</PageTitle>
+<h1>Workspace @(state?.Name ?? Id)</h1>
+<ErrorNotice Message="@error" />
+@if (state is not null && diff is not null)
+{
+	var record = state.Record;
+	<table class="list facts">
+		<tr><td>status</td><td><span class="st st-@record.Status">@record.Status</span></td></tr>
+		<tr><td>owner</td><td>@record.Owner</td></tr>
+		<tr><td>base</td><td><a href="/log/@record.BaseSeq">mainline seq @record.BaseSeq</a></td></tr>
+		<tr><td>stacked on</td><td class="id">@(record.Parent ?? "mainline")</td></tr>
+		<tr><td>id</td><td class="id">@state.Id</td></tr>
+		@if (record.Run is { } run)
+		{
+			<tr><td>run</td><td>@run.RunId · @run.Status · @run.Agent @run.Model<br /><span class="muted">@(run.Prompt ?? run.Command)</span></td></tr>
+		}
+	</table>
+	<h2>Changes against the base</h2>
+	<DiffView Diff="diff" Split="Split" BaseLink="@($"/workspaces/{Format.Q(Id)}")" />
+	<h2>Operation log</h2>
+	<table class="list">
+		<tr><th>#</th><th>Time</th><th>Agent</th><th>Description</th></tr>
+		@foreach (var entry in operations)
+		{
+			<tr><td>@entry.Operation.Seq</td><td>@Format.Time(entry.Operation.Time)</td><td>@(entry.Operation.Agent ?? "")</td><td>@entry.Operation.Description</td></tr>
+		}
+	</table>
+}
+
+@code {
+	[Parameter] public string Id { get; set; } = "";
+
+	[SupplyParameterFromQuery(Name = "view")] public string? View { get; set; }
+
+	private bool Split => View == "split";
+
+	private WorkspaceState? state;
+	private DiffSet? diff;
+	private List<OperationEntry> operations = [];
+	private string? error;
+
+	protected override async Task OnParametersSetAsync()
+	{
+		try
+		{
+			error = null;
+			(state, diff) = await Client.WorkspaceAsync(Id);
+			operations = [];
+			await foreach (var entry in Client.Repo.LogAsync(HeadName.Workspace(state.Id), 50))
+			{
+				operations.Add(entry);
+			}
+		}
+		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+		{
+			error = message;
+			state = null;
+		}
+	}
+}
