@@ -39,7 +39,7 @@ processes instead.
       finds none corrupt.
 - [x] Without `BASSIA_TEST_AZURE_BLOB` the test checks nothing, like the other cloud tests, unless
       `BASSIA_TEST_REQUIRE_AZURITE` is set: then it fails, so CI cannot pass it vacuously.
-- [ ] CI runs it in the `Test` job (which has Azurite), and it is part of the `local-cloud` script's `-Filter cloud`.
+- [x] CI runs it in the `Test` job (which has Azurite), and it is part of the `local-cloud` script's `-Filter cloud`.
       With the repository secret `BASSIA_EXAMPLE_REPO_TOKEN`, CI imports `jk09/example` from GitHub. Without the
       secret, CI imports a local stand-in with the same files and logs a warning saying so.
 
@@ -72,8 +72,10 @@ processes instead.
       `-Filter cloud`.
 - [x] Verified locally on Linux: Azurite with SQLite state and with PostgreSQL state (3 passing runs in a row), the
       local stand-in, the `BASSIA_TEST_REQUIRE_AZURITE` guard, and the full suite (204 passed).
-- [ ] Verified in CI, including the Windows `local-cloud` job, where the agent stand-in runs under PowerShell. That
-      path has not run yet; the branch has not been pushed.
+- [x] Verified in CI on PR #62: `Test` (its `Azurite integration test` step) and both `local-cloud` jobs, including
+      Windows with the agent stand-in under PowerShell. The first Windows run found a test bug: the reference clone
+      converted line endings (`core.autocrlf`). It was fixed by cloning with `core.autocrlf=false`. Without the
+      `BASSIA_EXAMPLE_REPO_TOKEN` secret, CI imports the stand-in and warns.
 
 ## Validation
 
