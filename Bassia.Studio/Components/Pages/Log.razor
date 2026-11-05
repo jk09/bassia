@@ -1,10 +1,10 @@
 @page "/log"
-@inject MonorepoClient Client
+@inherits StudioPage
 
 <PageTitle>Mainline log · Bassia Studio</PageTitle>
 <h1>Mainline log</h1>
 <p class="muted">One trunk, linear: every landing is the next seq and keeps its workspace's change id.</p>
-<ErrorNotice Message="@error" />
+<ErrorNotice Message="@Error" />
 <LogTable Entries="entries" />
 @if (entries.Count == PageSize && entries[^1].Seq > 0)
 {
@@ -17,19 +17,17 @@
 	[SupplyParameterFromQuery(Name = "from")] public long? From { get; set; }
 
 	private IReadOnlyList<LogEntry> entries = [];
-	private string? error;
+	private long? loaded = -1;
 
-	protected override async Task OnParametersSetAsync()
+	// The newest page follows mainline as it moves; an older page stays as it is (landings never change).
+	protected override bool LiveUpdates => true;
+
+	protected override async Task LoadAsync()
 	{
-		try
+		if (From is null || From != loaded)
 		{
-			error = null;
 			entries = await Client.LogAsync(From, PageSize);
-		}
-		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
-		{
-			error = message;
-			entries = [];
+			loaded = From;
 		}
 	}
 }

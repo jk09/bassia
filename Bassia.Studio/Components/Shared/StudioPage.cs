@@ -6,8 +6,56 @@ using Microsoft.AspNetCore.Components;
 /// A page that acts: runs an action, shows its outcome (or the expected failure) as a banner, and reloads what it shows.
 /// Unexpected failures still propagate (to the error page and the log).
 /// </summary>
-public abstract class StudioPage : ComponentBase
+public abstract class StudioPage : ComponentBase, IDisposable
 {
+	[Inject] protected MonorepoWatch Watch { get; set; } = default!;
+
+	private int refreshing;
+
+	/// <summary>Whether the page reloads by itself when the monorepo changes (landings, workspaces, the periodic tick).</summary>
+	protected virtual bool LiveUpdates => false;
+
+	/// <summary>Whether a live reload should wait (the user is in the middle of an edit on the page).</summary>
+	protected virtual bool Editing => false;
+
+	protected override void OnInitialized()
+	{
+		if (LiveUpdates)
+		{
+			Watch.Changed += OnMonorepoChanged;
+		}
+	}
+
+	private void OnMonorepoChanged(Bassia.Stores.Api.WatchEvent change)
+	{
+		// One reload at a time, at most once a second; none while the user edits or an action runs.
+		if (Editing || Busy || Interlocked.Exchange(ref refreshing, 1) == 1)
+		{
+			return;
+		}
+
+		_ = InvokeAsync(async () =>
+		{
+			try
+			{
+				await LoadAsync();
+				StateHasChanged();
+			}
+			catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+			{
+				Error = message;
+				StateHasChanged();
+			}
+			finally
+			{
+				await Task.Delay(1000);
+				Interlocked.Exchange(ref refreshing, 0);
+			}
+		});
+	}
+
+	public virtual void Dispose() => Watch.Changed -= OnMonorepoChanged;
+
 	[Inject] protected MonorepoClient Client { get; set; } = default!;
 
 	[Inject] protected StudioActions Actions { get; set; } = default!;

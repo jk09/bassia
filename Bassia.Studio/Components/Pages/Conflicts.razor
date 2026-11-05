@@ -41,6 +41,8 @@
 	private List<Row> rows = [];
 	private List<(string Path, int Count)> hot = [];
 
+	protected override bool LiveUpdates => true;
+
 	protected override async Task LoadAsync()
 	{
 		var repo = await Client.OpenAsync();

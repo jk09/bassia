@@ -1,5 +1,5 @@
 @page "/workspaces"
-@inject MonorepoClient Client
+@inherits StudioPage
 
 <PageTitle>Workspaces · Bassia Studio</PageTitle>
 <h1>Workspaces</h1>
@@ -10,8 +10,8 @@
 	<span class="spacer"></span>
 	<a href="/workspaces/new">New workspace</a>
 </div>
-<ErrorNotice Message="@error" />
-@if (workspaces.Count == 0 && error is null)
+<ErrorNotice Message="@Error" />
+@if (workspaces.Count == 0 && Error is null)
 {
 	<p class="notice">No @(All ? "" : "open ")workspace.</p>
 }
@@ -39,20 +39,12 @@ else
 	[SupplyParameterFromQuery(Name = "all")] public bool All { get; set; }
 
 	private IReadOnlyList<WorkspaceState> workspaces = [];
-	private string? error;
 
-	protected override async Task OnParametersSetAsync()
+	protected override bool LiveUpdates => true;
+
+	protected override async Task LoadAsync()
 	{
-		try
-		{
-			error = null;
-			var repo = await Client.OpenAsync();
-			workspaces = (await repo.ListWorkspacesAsync(All)).OrderByDescending(state => state.Record.Created).ToList();
-		}
-		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
-		{
-			error = message;
-			workspaces = [];
-		}
+		var repo = await Client.OpenAsync();
+		workspaces = (await repo.ListWorkspacesAsync(All)).OrderByDescending(state => state.Record.Created).ToList();
 	}
 }

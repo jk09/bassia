@@ -52,14 +52,15 @@ Agentic runs
       with the run.
 
 Platform
-- [ ] Sign-in with Microsoft Entra ID (OpenID Connect); locally a development sign-in or the server token.
+- [x] Sign-in with Microsoft Entra ID (OpenID Connect); locally a development sign-in or the server token.
 - [x] Actions are recorded with the signed-in user as the author.
 - [x] Live updates (runs, landings, leases) are pushed to open pages without reload.
-- [ ] Deploys to Azure from versioned infrastructure code with one command; a documented local setup runs it on
-      Azurite + PostgreSQL next to `bassia-server`.
+- [x] Deploys to Azure from versioned infrastructure code with one command; a documented local setup runs it on
+      Azurite + PostgreSQL next to `bassia-server`. *Verified without an Azure account: `terraform validate`
+      (azurerm 4.81 and 5.12), the images built and smoke-tested in Docker; see Progress for the first real deployment.*
 - [x] Failure behavior: a server that is unreachable, a stale view (workspace head moved) and a rejected land are
       shown as clear messages, never as a lost edit.
-- [ ] Tests run without a network or a cloud account (in-process server, local stores).
+- [x] Tests run without a network or a cloud account (in-process server, local stores).
 
 ## Approach
 
@@ -103,6 +104,17 @@ Slice (c):
 - On Container Apps an execution's template replaces the job's containers, so Studio adds the secret references
   (`-aca-secrets`, default server token and agent API key) itself; their values stay in the job (Key Vault).
 
+Slice (d):
+- Studio keeps one replica: Blazor Server circuits, live run output and the sign-in key ring are in memory. Scaling
+  out needs a shared Data Protection key ring, sticky sessions and shared run state.
+- Studio talks to the server with the server's shared token and enforces people's roles itself; the server knows
+  only the token (as for CLI clients).
+- PostgreSQL uses a password from Key Vault (`bassia-323f4b4f` did not do Entra ID for PostgreSQL) and accepts Azure
+  services; private networking is documented as the production step, not done in the reference deployment.
+- Images are built in the registry by ACR Tasks from the deploy script, so deploying needs no local Docker; the
+  apps are applied in a second pass once the images exist (`deploy_apps`).
+- The azurerm provider range is `>= 4.20, < 6.0`: the configuration validates on 4.81 and 5.12.
+
 Defaults chosen (not asked; revisit if wrong):
 - Both apps run on Azure Container Apps (same environment as the run jobs), so Terraform manages one platform.
 - Authorization by Entra ID app roles: `Reader` (browse), `Contributor` (workspaces, runs, land), `Admin` (others'
@@ -129,11 +141,22 @@ Defaults chosen (not asked; revisit if wrong):
       (live output, stop, land, replay on mainline, discard), with links from workspaces and conflicts. 9 run tests with
       real job processes (land, live output, stop, replay with the same change, failure, report auth, permissions,
       arguments, the Azure execution template); driven in Chromium. A real Azure job execution waits for slice (d).
-- [ ] Slice (d): Terraform for Azure (Container Apps, Blob Storage, PostgreSQL, Key Vault, Entra ID), sign-in and roles.
+- [x] Slice (d): Studio sign-in with Entra ID (OpenID Connect code flow + PKCE into a cookie session; `/signin`,
+      `/signout`; app roles Reader/Contributor/Admin, none = reader; job reports and health stay anonymous); the
+      server's change stream followed by Studio (`MonorepoWatch`) so overview, log, workspaces, a workspace, conflicts
+      and leases refresh live (runs already did); images `deploy/docker/{server,studio,worker}.Dockerfile` and
+      `smoke.sh`; Terraform in `deploy/azure/terraform` (Container Apps environment, server and Studio apps, the run
+      job, Blob Storage, PostgreSQL, Key Vault, ACR, managed identities, the Entra ID app registration with app roles)
+      and `deploy/azure/deploy.sh|ps1` (foundation, `az acr build`, apps); CI job "Azure deployment" (fmt, validate,
+      image builds, smoke). 5 new tests (sign-in redirect, signed-in person and role, claims mapping, options, watch).
+- [ ] First deployment to a real Azure subscription with `deploy/azure/deploy.sh` (needs an account): sign in, start a
+      run as a job execution, land it.
 
 ## Validation
 
 - `dotnet test` (new Studio tests: in-process server + Studio, page and action tests, CLI/Studio parity).
 - `/bassia-local-cloud smoke` extended: Studio against Azurite + PostgreSQL, browse, edit, land, start a run.
 - Playwright smoke of the main pages (screenshots for review).
-- Deployment validated with the IaC tool's what-if/plan; an actual Azure deployment only with an account.
+- `cd deploy/azure/terraform && terraform fmt -check && terraform init -backend=false && terraform validate`.
+- `docker build -f deploy/docker/<image>.Dockerfile .` for server, studio, worker, then `TAG=test deploy/docker/smoke.sh`.
+- An actual Azure deployment only with an account: `deploy/azure/deploy.sh`.

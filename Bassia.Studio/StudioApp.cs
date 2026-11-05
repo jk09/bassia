@@ -2,6 +2,12 @@ namespace Bassia.Studio;
 
 using Bassia.Studio.Components;
 using Bassia.Studio.Runs;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 
@@ -31,22 +37,113 @@ public sealed class StudioApp(StudioOptions options) : IAsyncDisposable
 		builder.WebHost.UseStaticWebAssets();
 		builder.Services.AddSingleton(options);
 		builder.Services.AddSingleton<MonorepoClient>();
-		builder.Services.AddSingleton(new StudioUser(options.User, options.Role));
+		builder.Services.AddSingleton<MonorepoWatch>();
+		builder.Services.AddHostedService(services => services.GetRequiredService<MonorepoWatch>());
+		if (options.UsesEntra)
+		{
+			AddEntraSignIn(builder.Services, options);
+			// Each circuit (and each prerendered request) acts as the person signed in.
+			builder.Services.AddScoped(services => StudioClaims.From(
+				services.GetRequiredService<AuthenticationStateProvider>().GetAuthenticationStateAsync().GetAwaiter().GetResult().User));
+		}
+		else
+		{
+			builder.Services.AddSingleton(new StudioUser(options.User, options.Role));
+		}
+
+		builder.Services.Configure<ForwardedHeadersOptions>(forwarded =>
+		{
+			// Behind Azure Container Apps' ingress: the scheme and host the browser used (sign-in redirects depend on them).
+			forwarded.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
+			forwarded.KnownIPNetworks.Clear();
+			forwarded.KnownProxies.Clear();
+		});
 		builder.Services.AddScoped<StudioActions>();
 		builder.Services.AddSingleton(services => new RunService(services.GetRequiredService<MonorepoClient>(), options, CreateRunHost(options)));
 		builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 		app = builder.Build();
+		app.UseForwardedHeaders();
 		app.UseExceptionHandler("/error", createScopeForErrors: true);
+		if (options.UsesEntra)
+		{
+			app.UseAuthentication();
+			app.UseAuthorization();
+		}
+
 		app.UseAntiforgery();
 		app.MapStaticAssets();
 		app.MapGet("/healthz", () => Results.Text("ok"));
-		app.MapGet("/raw", RawAsync);
-		app.MapPost("/runs/report/{id}", Report);
-		app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+		// Jobs report with their run's own token, not as a person.
+		app.MapPost("/runs/report/{id}", Report).AllowAnonymous();
+		var raw = app.MapGet("/raw", RawAsync);
+		var pages = app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+		if (options.UsesEntra)
+		{
+			raw.RequireAuthorization();
+			pages.RequireAuthorization();
+			MapSignIn(app);
+		}
 		await app.StartAsync();
 		Address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault();
 		Runs.ReportBase = () => options.PublicUrl ?? Address ?? options.Url;
 	}
+
+	/// <summary>
+	/// Sign-in with Microsoft Entra ID: OpenID Connect (authorization code flow) into a cookie session. A request without
+	/// a session goes to <c>/signin</c>, which starts the Entra ID sign-in; roles come from the app registration's app roles.
+	/// </summary>
+	private static void AddEntraSignIn(IServiceCollection services, StudioOptions options)
+	{
+		var tenant = options.EntraTenant ?? throw new ArgumentException("-auth entra needs -entra-tenant <tenant id>.");
+		var clientId = options.EntraClientId ?? throw new ArgumentException("-auth entra needs -entra-client-id <app id>.");
+		services.AddAuthentication(auth =>
+			{
+				auth.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+				auth.DefaultChallengeScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+			})
+			.AddCookie(cookie =>
+			{
+				cookie.LoginPath = "/signin";
+				cookie.Cookie.Name = "bassia_studio";
+				cookie.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+				cookie.Cookie.SameSite = SameSiteMode.Lax;
+				cookie.ExpireTimeSpan = TimeSpan.FromHours(8);
+				cookie.SlidingExpiration = true;
+			})
+			.AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, oidc =>
+			{
+				oidc.Authority = options.EntraInstance.TrimEnd('/') + "/" + tenant + "/v2.0";
+				oidc.ClientId = clientId;
+				oidc.ClientSecret = options.EntraClientSecret;
+				oidc.ResponseType = OpenIdConnectResponseType.Code;
+				oidc.UsePkce = true;
+				oidc.SaveTokens = false;
+				oidc.Scope.Clear();
+				oidc.Scope.Add("openid");
+				oidc.Scope.Add("profile");
+				oidc.Scope.Add("email");
+				oidc.MapInboundClaims = false;
+				oidc.TokenValidationParameters.NameClaimType = "preferred_username";
+				oidc.TokenValidationParameters.RoleClaimType = "roles";
+			});
+		services.AddAuthorization();
+		services.AddCascadingAuthenticationState();
+	}
+
+	private static void MapSignIn(WebApplication app)
+	{
+		app.MapGet("/signin", (string? returnUrl) => Results.Challenge(
+			new AuthenticationProperties { RedirectUri = returnUrl is { Length: > 0 } && returnUrl.StartsWith('/') && !returnUrl.StartsWith("//") ? returnUrl : "/" },
+			[OpenIdConnectDefaults.AuthenticationScheme])).AllowAnonymous();
+		app.MapGet("/signout", () => Results.SignOut(new AuthenticationProperties { RedirectUri = "/" },
+			[CookieAuthenticationDefaults.AuthenticationScheme, OpenIdConnectDefaults.AuthenticationScheme])).RequireAuthorization();
+	}
+
+	/// <summary>Studio's services (tests mint sign-in cookies with them).</summary>
+	internal IServiceProvider Services => app?.Services ?? throw new InvalidOperationException("Start Studio first.");
+
+	/// <summary>The server's change stream as Studio follows it.</summary>
+	public MonorepoWatch Watch => app?.Services.GetRequiredService<MonorepoWatch>() ?? throw new InvalidOperationException("Start Studio first.");
 
 	/// <summary>The runs Studio starts and follows.</summary>
 	public RunService Runs => app?.Services.GetRequiredService<RunService>() ?? throw new InvalidOperationException("Start Studio first.");
@@ -59,6 +156,8 @@ public sealed class StudioApp(StudioOptions options) : IAsyncDisposable
 		"aca" => new ContainerAppsJobRunHost(new ContainerAppsJobOptions(
 			options.AcaJob ?? throw new ArgumentException("-run-host aca needs -aca-job <job resource id>."),
 			options.AcaImage ?? throw new ArgumentException("-run-host aca needs -aca-image <worker image>."),
+			Cpu: options.AcaCpu,
+			Memory: options.AcaMemory,
 			SecretEnvironment: options.AcaSecretEnvironment())),
 		var other => throw new ArgumentException($"-run-host is none, local or aca, not '{other}'.")
 	};

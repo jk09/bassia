@@ -1,6 +1,7 @@
 @inherits LayoutComponentBase
 @inject MonorepoClient Client
 @inject StudioUser User
+@inject StudioOptions Options
 
 <div class="studio">
 	<header class="toolbar">
@@ -8,6 +9,10 @@
 		<span class="server" title="bassia-server">@Client.Label</span>
 		<span class="spacer"></span>
 		<span class="user" title="role: @User.Role.ToString().ToLowerInvariant()">@User.Name · @User.Role.ToString().ToLowerInvariant()</span>
+		@if (Options.UsesEntra)
+		{
+			<a class="user" href="/signout" data-enhance-nav="false">Sign out</a>
+		}
 		<a class="tool" href="/depot">Depot</a>
 		<a class="tool" href="/log">Log</a>
 		<a class="tool" href="/workspaces">Workspaces</a>
