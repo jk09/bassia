@@ -36,25 +36,25 @@ Version management
       describe, close/abandon.
 - [x] **Edit in the browser**: edit, add, rename and delete files in a workspace (each save an implicit snapshot).
 - [x] **Land**: land a workspace, showing the outcome (landed seq, replay requested, conflict with paths and policy).
-- [ ] **Conflicts**: list workspaces kept from landing and the paths in conflict; resolve per the path's policy
-      (replay, take mine/theirs, edit a merged result). *Done except replay, which needs cloud runs (slice c).*
+- [x] **Conflicts**: list workspaces kept from landing and the paths in conflict; resolve per the path's policy
+      (replay, take mine/theirs, edit a merged result).
 - [x] **Leases** (like Perforce locks): list, acquire, release; an expired or foreign lease is shown and cannot be
       released by someone else unless they are an administrator.
 - [x] Every action that changes the monorepo goes through the same core operations as the `bassia` CLI, so results
       are identical (verified by tests that do the same change from both).
 
 Agentic runs
-- [ ] **Start a run**: prompt (or command), base (mainline or a workspace to stack on), model, load rules, leases,
+- [x] **Start a run**: prompt (or command), base (mainline or a workspace to stack on), model, load rules, leases,
       land-when-done; the run gets its own workspace.
-- [ ] **Watch runs**: list with status, live output streamed to the browser, changed paths, the resulting diff.
-- [ ] **Control runs**: stop, replay on the current mainline (same ChangeId), land, discard.
-- [ ] Runs execute in the cloud (see Decisions), not in the browser or on the user's machine; their logs are kept
+- [x] **Watch runs**: list with status, live output streamed to the browser, changed paths, the resulting diff.
+- [x] **Control runs**: stop, replay on the current mainline (same ChangeId), land, discard.
+- [x] Runs execute in the cloud (see Decisions), not in the browser or on the user's machine; their logs are kept
       with the run.
 
 Platform
 - [ ] Sign-in with Microsoft Entra ID (OpenID Connect); locally a development sign-in or the server token.
 - [x] Actions are recorded with the signed-in user as the author.
-- [ ] Live updates (runs, landings, leases) are pushed to open pages without reload.
+- [x] Live updates (runs, landings, leases) are pushed to open pages without reload.
 - [ ] Deploys to Azure from versioned infrastructure code with one command; a documented local setup runs it on
       Azurite + PostgreSQL next to `bassia-server`.
 - [x] Failure behavior: a server that is unreachable, a stale view (workspace head moved) and a rejected land are
@@ -93,6 +93,16 @@ Slice (b):
   resulting trees are identical (parity test). Each save is checked against the version the user opened.
 - Sync in Studio uses the repository policy without a semantic driver; mainline landing still uses the server's.
 
+Slice (c):
+- A run is the CLI's run: the job runs `bassia agent start|replay` in a fresh clone, so the workspace, recipe, run
+  record, leases and landing are exactly the CLI's. Studio adds only launching, live output and stop.
+- Live output goes from the job to Studio (`POST /runs/report/<id>` with a per-run token), not through the
+  monorepo: an operation per output line would flood the workspace's log. The final log is still recorded on the
+  run's workspace as before. Studio keeps live output in memory (one Studio replica; see slice d).
+- Stop is cooperative (the answer to a report asks the run to stop, and it snapshots), with a kill after 30 s.
+- On Container Apps an execution's template replaces the job's containers, so Studio adds the secret references
+  (`-aca-secrets`, default server token and agent API key) itself; their values stay in the job (Key Vault).
+
 Defaults chosen (not asked; revisit if wrong):
 - Both apps run on Azure Container Apps (same environment as the run jobs), so Terraform manages one platform.
 - Authorization by Entra ID app roles: `Reader` (browse), `Contributor` (workspaces, runs, land), `Admin` (others'
@@ -112,7 +122,13 @@ Defaults chosen (not asked; revisit if wrong):
       reader/contributor/admin roles (`-user`, `-role` until sign-in). Pages: new workspace, workspace toolbar and
       conflicts, workspace files and editor, conflicts overview, leases. 9 new tests (actions, stale edits, conflict
       resolution, undo/restore, stack/clone, roles, leases, CLI parity, pages); full flow driven in Chromium.
-- [ ] Slice (c): cloud runs (run host interface; Container Apps jobs; local process host), live output, stop/replay/land.
+- [x] Slice (c): `bassia agent job` (clone the server, then `agent start|replay` from `BASSIA_JOB_ARGS`) and a run
+      reporter in the CLI (`BASSIA_REPORT_URL`/`TOKEN`: output posted in batches, final status, stop on request);
+      Studio's `RunService` over an `IRunHost` - `LocalProcessRunHost` and `ContainerAppsJobRunHost` (one job execution
+      per run, the job's secrets as secret references); token-checked report endpoint; pages Runs, New run, Run
+      (live output, stop, land, replay on mainline, discard), with links from workspaces and conflicts. 9 run tests with
+      real job processes (land, live output, stop, replay with the same change, failure, report auth, permissions,
+      arguments, the Azure execution template); driven in Chromium. A real Azure job execution waits for slice (d).
 - [ ] Slice (d): Terraform for Azure (Container Apps, Blob Storage, PostgreSQL, Key Vault, Entra ID), sign-in and roles.
 
 ## Validation

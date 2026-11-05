@@ -18,4 +18,8 @@
     <ProjectReference Include="..\Bassia\Bassia.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Azure.ResourceManager.AppContainers" Version="1.6.0" />
+  </ItemGroup>
+
 </Project>

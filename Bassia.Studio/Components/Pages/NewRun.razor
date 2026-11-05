@@ -1,0 +1,113 @@
+@page "/runs/new"
+@inherits StudioPage
+@inject Bassia.Studio.Runs.RunService RunService
+
+<PageTitle>New run · Bassia Studio</PageTitle>
+<h1>New agentic run</h1>
+<p class="muted">The agent works in a new workspace (or one you choose) on @(RunService.HostName ?? "no run host"). The task is recorded as the workspace's replay recipe, so a conflicting landing can be replayed on the new mainline instead of merged.</p>
+<Banner Notice="@Notice" Error="@Error" />
+@if (!RunService.Enabled)
+{
+	<p class="notice">Runs are not configured: start Studio with -run-host local or -run-host aca.</p>
+}
+else if (!User.CanChange)
+{
+	<p class="notice">@User.Name is a reader and cannot start runs.</p>
+}
+else
+{
+	<div class="form">
+		<label>Task
+			<select @bind="kind">
+				<option value="prompt">a prompt for the agent</option>
+				<option value="command">a command (scripts, codemods, tests)</option>
+			</select>
+		</label>
+		@if (kind == "prompt")
+		{
+			<label>Prompt <textarea @bind="prompt" rows="5" placeholder="Paginate the list endpoint and update its tests"></textarea></label>
+			<label>Model <input @bind="model" placeholder="(agent.model)" /></label>
+		}
+		else
+		{
+			<label>Command <input @bind="command" placeholder="./scripts/format.sh" /></label>
+		}
+		<label>Work in
+			<select @bind="where">
+				<option value="new">a new workspace on mainline</option>
+				<option value="on">a new workspace stacked on…</option>
+				<option value="in">an existing workspace…</option>
+			</select>
+		</label>
+		@if (where != "new")
+		{
+			<label>Workspace
+				<select @bind="workspace">
+					<option value="">(choose)</option>
+					@foreach (var ws in open)
+					{
+						<option value="@ws.Name">@ws.Name (@ws.Record.Owner)</option>
+					}
+				</select>
+			</label>
+		}
+		@if (where != "in")
+		{
+			<label>Workspace name <input @bind="name" placeholder="(from the task)" /></label>
+		}
+		<label>Lease these prefixes while it runs <input @bind="leases" placeholder="src/payments, docs" /></label>
+		<label>Load only <input @bind="load" placeholder="(everything) e.g. api/, *.md" /></label>
+		<label class="check"><input type="checkbox" @bind="land" /> Land when the agent succeeds</label>
+		<div><button class="btn primary" disabled="@Busy" @onclick="StartAsync">Start the run</button></div>
+	</div>
+}
+
+@code {
+	[SupplyParameterFromQuery(Name = "on")] public string? On { get; set; }
+
+	private string kind = "prompt";
+	private string prompt = "";
+	private string command = "";
+	private string model = "";
+	private string where = "new";
+	private string workspace = "";
+	private string name = "";
+	private string leases = "";
+	private string load = "";
+	private bool land;
+	private IReadOnlyList<WorkspaceState> open = [];
+
+	protected override async Task LoadAsync()
+	{
+		open = await (await Client.OpenAsync()).ListWorkspacesAsync();
+		if (On is { Length: > 0 })
+		{
+			(where, workspace) = ("on", On);
+		}
+	}
+
+	private static IReadOnlyList<string> List(string text) =>
+		text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+	private Task StartAsync() => RunAsync(async () =>
+	{
+		if (where != "new" && workspace.Length == 0)
+		{
+			throw new VersionException("Choose the workspace.");
+		}
+
+		var spec = new Bassia.Studio.Runs.RunSpec(
+			Prompt: kind == "prompt" ? prompt : null,
+			Command: kind == "command" ? command : null,
+			On: where == "on" ? workspace : null,
+			Workspace: where == "in" ? workspace : null,
+			Name: where == "in" ? null : name,
+			Model: kind == "prompt" ? model : null,
+			Land: land,
+			Leases: List(leases),
+			Load: List(load));
+		var run = await RunService.StartAsync(spec, User);
+		Navigation.NavigateTo("/runs/" + run.RunId);
+		return null;
+	}, reload: false);
+}

@@ -183,8 +183,9 @@ files at any seq, and the policy. It is read-only: every page shows the commands
 
 Bassia Studio (`bassia-studio`) is the web counterpart of a desktop VCS client, deployed next to `bassia-server`:
 browse the depot at any seq with per-file history, read the mainline log with unified or side-by-side diffs, create
-and stack workspaces, edit files in the browser, land, resolve conflicts and hold leases. Agentic runs from the browser
-and the Azure deployment follow (feature record `bassia-681e8902`).
+and stack workspaces, edit files in the browser, land, resolve conflicts and hold leases, and start agentic runs that
+execute as cloud jobs (Azure Container Apps) with their output streamed live - stop, land or replay them from the page.
+The Azure deployment follows (feature record `bassia-681e8902`).
 
 ## A CLI made for agents
 

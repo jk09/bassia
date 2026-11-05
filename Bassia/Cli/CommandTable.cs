@@ -199,8 +199,16 @@ internal static class CommandTable
 		new("agent", "replay", "Rebase by replay: run a workspace's recorded task again on mainline's head, in a new workspace with the same ChangeId.",
 			[new("id", "run|workspace", "The run or workspace to replay.", Required: true), new("land", null, "Land the replay when the agent succeeds."),
 				new("lease", "prefix,...", "Lease these prefixes for the replay."), new("lease-wait", "seconds", "Wait this long for the leases."),
-				new("load", "rule,...", "What the replay loads (default: what the original loaded here): paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything.")],
+				new("load", "rule,...", "What the replay loads (default: what the original loaded here): paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything."),
+				new("run-id", "id", "", Hidden: true)],
 			["bassia agent replay fix-login -land"], AgentCommands.ReplayAsync, Positional: "id"),
+		new("agent", "job", "Run an agentic job in a container: clone the server, then start or replay a run (what Bassia Studio's cloud runs execute).",
+			[new("from", "url", "The server (default BASSIA_JOB_SERVER)."), new("token", "token", "The server's token (default BASSIA_JOB_TOKEN)."),
+				new("path", "folder", "Where to clone (default BASSIA_JOB_DIR, else a temporary folder).")],
+			["BASSIA_JOB_SERVER=https://bassia.example BASSIA_JOB_ARGS='[\"agent\",\"start\",\"-prompt\",\"fix the build\",\"-land\"]' bassia agent job"],
+			AgentCommands.JobAsync,
+			Details: "The command comes from BASSIA_JOB_ARGS, a JSON array beginning with agent start or agent replay. With BASSIA_REPORT_URL and " +
+				"BASSIA_REPORT_TOKEN set, the run posts its output there as it happens and stops when the answer asks it to."),
 
 		// ----- interop and maintenance -----
 		new("import", null, "Import git repositories, each into its own top-level folder: as a baseline commit each, or with first-parent history.",

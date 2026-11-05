@@ -111,6 +111,8 @@ internal sealed class AgentRunner(Monorepo monorepo)
 		using var renew = new CancellationTokenSource();
 		var renewing = RenewLeasesAsync(leases, renew.Token);
 		var watching = WatchStopFileAsync(runId, stop, renew.Token);
+		await using var reporter = RunReporter.FromEnvironment(runId);
+		reporter?.Start(workspace.Id, stop);
 		var lastLine = "";
 		int? exit;
 		await using (var writer = new StreamWriter(log, append: true, Encoding.UTF8) { AutoFlush = true })
@@ -132,6 +134,7 @@ internal sealed class AgentRunner(Monorepo monorepo)
 					}
 				}
 
+				reporter?.Line(text);
 				output?.Invoke(text);
 			}, stop.Token);
 		}
@@ -162,6 +165,11 @@ internal sealed class AgentRunner(Monorepo monorepo)
 		}
 
 		File.Delete(StopFile(runId));
+		if (reporter is not null)
+		{
+			await reporter.FinishAsync(workspace.Id, status, land?.Message);
+		}
+
 		return new AgentRunResult(runId, recorded, run, snapshot.Changes, land, log);
 	}
 

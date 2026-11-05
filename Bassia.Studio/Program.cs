@@ -5,6 +5,8 @@ namespace Bassia.Studio;
 /// <code>
 /// bassia-studio -server <url> [-token <t>] [-url http://0.0.0.0:8080] [-cache <folder>] [-label <text>]
 ///               [-user <name>] [-role reader|contributor|admin]
+///               [-run-host none|local|aca] [-bassia <command>] [-runs <folder>] [-public-url <url>] [-job-server <url>]
+///               [-aca-job <resource id>] [-aca-image <image>] [-aca-secrets NAME=secret,...]
 /// </code>
 /// </summary>
 internal static class Program
@@ -13,6 +15,8 @@ internal static class Program
 		Usage:
 		  bassia-studio -server <bassia-server url> [-token <token>] [-url <listen url>] [-cache <folder>] [-label <text>]
 		                [-user <name>] [-role reader|contributor|admin]
+		                [-run-host none|local|aca] [-bassia <command>] [-runs <folder>] [-public-url <url>] [-job-server <url>]
+		                [-aca-job <resource id>] [-aca-image <image>] [-aca-secrets NAME=secret,...]
 		Switches may also come from BASSIA_STUDIO_<NAME> environment variables (BASSIA_STUDIO_SERVER, BASSIA_STUDIO_TOKEN, ...).
 		""";
 
