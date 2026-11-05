@@ -483,7 +483,7 @@ function Invoke-Test {
 	$env:BASSIA_TEST_POSTGRES = $connections.Postgres
 	$env:BASSIA_TEST_AZURE_BLOB = $connections.AzureBlob
 	$arguments = @('test', (Join-Path $script:RepoRoot 'Bassia.slnx'))
-	$expression = if ($Filter -eq 'cloud') { 'FullyQualifiedName~PostgresStateTests|FullyQualifiedName~ObjectStoreContractTests|FullyQualifiedName~SyncEfficiencyTests' } else { $Filter }
+	$expression = if ($Filter -eq 'cloud') { 'FullyQualifiedName~PostgresStateTests|FullyQualifiedName~ObjectStoreContractTests|FullyQualifiedName~SyncEfficiencyTests|FullyQualifiedName~AzuriteIntegrationTests' } else { $Filter }
 	if ($expression) { $arguments += @('--filter', $expression) }
 	Write-Host "> dotnet $($arguments -join ' ')   (with BASSIA_TEST_POSTGRES and BASSIA_TEST_AZURE_BLOB)" -ForegroundColor DarkGray
 	& dotnet @arguments
