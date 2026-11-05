@@ -50,11 +50,34 @@ public sealed record StudioOptions
 	/// <summary>The worker image the job executions run (its entrypoint runs bassia agent job).</summary>
 	public string? AcaImage { get; init; }
 
+	/// <summary>vCPUs of a job execution (as the job defines them).</summary>
+	public double AcaCpu { get; init; } = 2;
+
+	/// <summary>Memory of a job execution (as the job defines it).</summary>
+	public string AcaMemory { get; init; } = "4Gi";
+
 	/// <summary>
 	/// Environment variables of a job execution that come from the job's secrets, as NAME=secret pairs separated by
 	/// commas (default: BASSIA_JOB_TOKEN=server-token,ANTHROPIC_API_KEY=anthropic-api-key).
 	/// </summary>
 	public string AcaSecrets { get; init; } = "BASSIA_JOB_TOKEN=server-token,ANTHROPIC_API_KEY=anthropic-api-key";
+
+	/// <summary>How people sign in: none (one configured user, <see cref="User"/> and <see cref="Role"/>) or entra (Microsoft Entra ID).</summary>
+	public string Auth { get; init; } = "none";
+
+	/// <summary>The Entra ID tenant (id or domain), with -auth entra.</summary>
+	public string? EntraTenant { get; init; }
+
+	/// <summary>The Entra ID app registration's client id, with -auth entra.</summary>
+	public string? EntraClientId { get; init; }
+
+	/// <summary>The app registration's client secret (better from BASSIA_STUDIO_ENTRA_CLIENT_SECRET than the command line).</summary>
+	public string? EntraClientSecret { get; init; }
+
+	/// <summary>The Entra ID instance (sovereign clouds differ).</summary>
+	public string EntraInstance { get; init; } = "https://login.microsoftonline.com/";
+
+	public bool UsesEntra => Auth.Equals("entra", StringComparison.OrdinalIgnoreCase);
 
 	/// <summary>The command line of <see cref="Bassia"/>, split on spaces (quotes keep spaces in a part).</summary>
 	public IReadOnlyList<string> BassiaCommand() => SplitCommand(Bassia);
@@ -132,6 +155,13 @@ public sealed record StudioOptions
 			AcaJob = Get("aca-job"),
 			AcaImage = Get("aca-image"),
 			AcaSecrets = Get("aca-secrets") ?? defaults.AcaSecrets,
+			AcaCpu = Get("aca-cpu") is { } cpu ? double.Parse(cpu, System.Globalization.CultureInfo.InvariantCulture) : defaults.AcaCpu,
+			AcaMemory = Get("aca-memory") ?? defaults.AcaMemory,
+			Auth = Get("auth") ?? defaults.Auth,
+			EntraTenant = Get("entra-tenant"),
+			EntraClientId = Get("entra-client-id"),
+			EntraClientSecret = Get("entra-client-secret"),
+			EntraInstance = Get("entra-instance") ?? defaults.EntraInstance,
 		};
 	}
 }

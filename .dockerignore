@@ -1,0 +1,5 @@
+**/bin/
+**/obj/
+dist/
+.git/
+deploy/azure/**/.terraform/

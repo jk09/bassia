@@ -1,9 +1,9 @@
 @page "/"
-@inject MonorepoClient Client
+@inherits StudioPage
 
 <PageTitle>Bassia Studio</PageTitle>
 <h1>Overview</h1>
-<ErrorNotice Message="@error" />
+<ErrorNotice Message="@Error" />
 @if (main is not null)
 {
 	<div class="cards">
@@ -20,20 +20,14 @@
 	private MainState? main;
 	private int open;
 	private IReadOnlyList<LogEntry> recent = [];
-	private string? error;
 
-	protected override async Task OnInitializedAsync()
+	protected override bool LiveUpdates => true;
+
+	protected override async Task LoadAsync()
 	{
-		try
-		{
-			var repo = await Client.OpenAsync();
-			main = await repo.GetMainAsync();
-			open = (await repo.ListWorkspacesAsync()).Count;
-			recent = await Client.LogAsync(null, 10);
-		}
-		catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
-		{
-			error = message;
-		}
+		var repo = await Client.OpenAsync();
+		main = await repo.GetMainAsync();
+		open = (await repo.ListWorkspacesAsync()).Count;
+		recent = await Client.LogAsync(null, 10);
 	}
 }

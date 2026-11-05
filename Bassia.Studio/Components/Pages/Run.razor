@@ -1,6 +1,5 @@
 @page "/runs/{RunId}"
 @inherits StudioPage
-@implements IDisposable
 @inject Bassia.Studio.Runs.RunService RunService
 
 <PageTitle>@RunId · Bassia Studio</PageTitle>
@@ -65,9 +64,17 @@
 	private DateTimeOffset? finished;
 	private string output = "";
 
-	protected override void OnInitialized() => RunService.Changed += OnChanged;
+	protected override void OnInitialized()
+	{
+		base.OnInitialized();
+		RunService.Changed += OnChanged;
+	}
 
-	public void Dispose() => RunService.Changed -= OnChanged;
+	public override void Dispose()
+	{
+		base.Dispose();
+		RunService.Changed -= OnChanged;
+	}
 
 	private void OnChanged(Bassia.Studio.Runs.StudioRun run)
 	{

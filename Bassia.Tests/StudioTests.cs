@@ -435,4 +435,30 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("needs-replay", conflicts);
 		Assert.Contains("src/hello.txt", conflicts);
 	}
+
+	[Fact]
+	public async Task Watch_TellsStudioAboutLandingsAsTheyHappen()
+	{
+		var seen = new TaskCompletionSource<Bassia.Stores.Api.WatchEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
+		studio.Watch.Changed += change =>
+		{
+			if (change.Kind == "landed")
+			{
+				seen.TrySetResult(change);
+			}
+		};
+		var deadline = DateTime.UtcNow.AddSeconds(30);
+		while (!studio.Watch.Connected && DateTime.UtcNow < deadline)
+		{
+			await Task.Delay(50);
+		}
+
+		Assert.True(studio.Watch.Connected, "Studio follows the server's change stream");
+		var zoe = As("zoe");
+		var ws = await zoe.CreateAsync("watched");
+		await zoe.SaveTextAsync(ws.Id, "w.txt", "w\n", null);
+		var landed = await zoe.LandAsync(ws.Id);
+		var change = await seen.Task.WaitAsync(TimeSpan.FromSeconds(30));
+		Assert.Equal(landed.Seq, change.Seq);
+	}
 }

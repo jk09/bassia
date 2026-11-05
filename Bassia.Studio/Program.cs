@@ -7,6 +7,7 @@ namespace Bassia.Studio;
 ///               [-user <name>] [-role reader|contributor|admin]
 ///               [-run-host none|local|aca] [-bassia <command>] [-runs <folder>] [-public-url <url>] [-job-server <url>]
 ///               [-aca-job <resource id>] [-aca-image <image>] [-aca-secrets NAME=secret,...]
+///               [-auth none|entra -entra-tenant <t> -entra-client-id <id> -entra-client-secret <s>]
 /// </code>
 /// </summary>
 internal static class Program
@@ -17,6 +18,7 @@ internal static class Program
 		                [-user <name>] [-role reader|contributor|admin]
 		                [-run-host none|local|aca] [-bassia <command>] [-runs <folder>] [-public-url <url>] [-job-server <url>]
 		                [-aca-job <resource id>] [-aca-image <image>] [-aca-secrets NAME=secret,...]
+		                [-auth none|entra -entra-tenant <t> -entra-client-id <id> -entra-client-secret <s>]
 		Switches may also come from BASSIA_STUDIO_<NAME> environment variables (BASSIA_STUDIO_SERVER, BASSIA_STUDIO_TOKEN, ...).
 		""";
 

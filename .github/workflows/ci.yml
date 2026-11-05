@@ -324,6 +324,33 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  azure:
+    name: Azure deployment (Terraform, images)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Validate the Terraform
+        working-directory: deploy/azure/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Build the images
+        run: |
+          for image in server studio worker; do
+            docker build -f "deploy/docker/$image.Dockerfile" -t "bassia-$image:test" .
+          done
+
+      - name: Smoke-test the images
+        run: TAG=test deploy/docker/smoke.sh
+
   release:
     name: Release
     if: github.ref_type == 'tag'

@@ -504,6 +504,26 @@ own workspaces and leases; admins anyone's.
 
 An unreachable server or a missing path is shown as a message on the page.
 
+Pages that show the monorepo's state (overview, log, workspaces, a workspace, conflicts, leases) refresh by
+themselves: Studio follows the server's change stream (landings and workspace changes), and refreshes every 15 seconds
+for what the stream does not carry (leases).
+
+### Sign-in
+
+`-auth none` (default) acts as one configured person (`-user`, `-role`). `-auth entra` signs people in with Microsoft
+Entra ID (OpenID Connect, authorization code flow with PKCE, into a cookie session): `-entra-tenant <tenant id>`,
+`-entra-client-id <app id>` and `-entra-client-secret` (better from `BASSIA_STUDIO_ENTRA_CLIENT_SECRET`); the app
+registration's redirect URI is `<studio url>/signin-oidc`. A person is named by their `preferred_username` and gets the
+strongest of the app roles `Reader`, `Contributor` and `Admin` they hold; signed in without one, they are a reader.
+`/healthz` and the job reports (`/runs/report/<id>`, with each run's own token) need no sign-in.
+
+### Deployment in Azure
+
+`deploy/azure` is the reference deployment: bassia-server and Studio as Azure Container Apps, agentic runs as a
+Container Apps job, Blob Storage, Azure Database for PostgreSQL, Key Vault, Container Registry, managed identities and
+Studio's Entra ID app registration, in Terraform, deployed with `deploy/azure/deploy.sh` (see `deploy/azure/README.md`).
+The images are `deploy/docker/{server,studio,worker}.Dockerfile`; `deploy/docker/smoke.sh` runs all three on one machine.
+
 ### Runs from Studio
 
 `-run-host` decides where runs execute: `none` (default; runs are off), `local` (a process per run on Studio's machine:

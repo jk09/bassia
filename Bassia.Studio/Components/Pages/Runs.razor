@@ -1,6 +1,5 @@
 @page "/runs"
 @inherits StudioPage
-@implements IDisposable
 @inject Bassia.Studio.Runs.RunService RunService
 
 <PageTitle>Agentic runs · Bassia Studio</PageTitle>
@@ -36,7 +35,11 @@ else
 
 	protected override async Task LoadAsync() => views = await RunService.ListAsync();
 
-	protected override void OnInitialized() => RunService.Changed += OnChanged;
+	protected override void OnInitialized()
+	{
+		base.OnInitialized();
+		RunService.Changed += OnChanged;
+	}
 
 	private void OnChanged(Bassia.Studio.Runs.StudioRun run) => _ = InvokeAsync(async () =>
 	{
@@ -44,5 +47,9 @@ else
 		StateHasChanged();
 	});
 
-	public void Dispose() => RunService.Changed -= OnChanged;
+	public override void Dispose()
+	{
+		base.Dispose();
+		RunService.Changed -= OnChanged;
+	}
 }

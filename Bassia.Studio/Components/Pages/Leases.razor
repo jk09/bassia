@@ -70,6 +70,8 @@ else
 	private IEnumerable<WorkspaceState> Mine() =>
 		names.Values.Where(state => state.IsOpen && (User.IsAdmin || state.Record.Owner == User.Name)).OrderBy(state => state.Name);
 
+	protected override bool LiveUpdates => true;
+
 	protected override async Task LoadAsync()
 	{
 		var repo = await Client.OpenAsync();

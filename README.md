@@ -185,7 +185,8 @@ Bassia Studio (`bassia-studio`) is the web counterpart of a desktop VCS client, 
 browse the depot at any seq with per-file history, read the mainline log with unified or side-by-side diffs, create
 and stack workspaces, edit files in the browser, land, resolve conflicts and hold leases, and start agentic runs that
 execute as cloud jobs (Azure Container Apps) with their output streamed live - stop, land or replay them from the page.
-The Azure deployment follows (feature record `bassia-681e8902`).
+People sign in with Microsoft Entra ID; pages follow the monorepo live. `deploy/azure` deploys the server, Studio and the
+run job to Azure with Terraform in one command (feature record `bassia-681e8902`).
 
 ## A CLI made for agents
 

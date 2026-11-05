@@ -136,6 +136,10 @@
 	private string? merging;
 	private string mergedText = "";
 
+	protected override bool LiveUpdates => true;
+
+	protected override bool Editing => describing || merging is not null;
+
 	protected override async Task LoadAsync()
 	{
 		(state, diff) = await Client.WorkspaceAsync(Id);

@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+name            = "bassia"
+location        = "westeurope"
+
+# Object ids of Entra ID users or groups (az ad signed-in-user show --query id -o tsv).
+studio_admins       = []
+studio_contributors = []
+
+# The coding agent's key; or leave it out and set the anthropic-api-key secret in Key Vault afterwards.
+# anthropic_api_key = "sk-ant-..."
