@@ -90,7 +90,8 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 		// ----- the git repository, imported through one client -----
 
 		var source = temp.Combine("source");
-		await GitAsync(temp.Path, "clone", "--quiet", "--depth", "1", GitUrl, source);
+		// The bytes git stores, which is what an import takes: no line-ending conversion on checkout (core.autocrlf on Windows).
+		await GitAsync(temp.Path, "-c", "core.autocrlf=false", "clone", "--quiet", "--depth", "1", "--config", "core.autocrlf=false", GitUrl, source);
 		var expected = Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories)
 			.Where(file => !Path.GetRelativePath(source, file).Split(Path.DirectorySeparatorChar).Contains(".git"))
 			.ToDictionary(file => Path.GetRelativePath(source, file).Replace('\\', '/'), File.ReadAllBytes, StringComparer.Ordinal);
