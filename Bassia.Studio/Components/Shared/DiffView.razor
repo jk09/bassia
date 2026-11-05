@@ -18,7 +18,7 @@ else
 		@foreach (var record in Diff.Records)
 		{
 			<tr>
-				<td><span class="st st-@record.Status">@record.Status</span></td>
+				<td><span class="st st-@Status(record)">@Status(record)</span></td>
 				<td class="id"><a href="#f-@Anchor(record.Path)">@(record.OldPath is { } from ? $"{from} → {record.Path}" : record.Path)</a></td>
 				<td>@(record.SizeDelta >= 0 ? "+" : "−")@Format.Size(Math.Abs(record.SizeDelta))</td>
 			</tr>
@@ -27,7 +27,7 @@ else
 	@foreach (var file in files)
 	{
 		<section class="file" id="f-@Anchor(file.Record.Path)">
-			<h3 class="id"><span class="st st-@file.Record.Status">@file.Record.Status</span> @file.Record.Path
+			<h3 class="id"><span class="st st-@Status(file.Record)">@Status(file.Record)</span> @file.Record.Path
 				<span class="muted">+@file.Added −@file.Deleted</span></h3>
 			@if (file.Summary is { } summary)
 			{
@@ -85,6 +85,12 @@ else
 		var reviews = new List<FileReview>();
 		foreach (var record in Diff.Records.Take(MaxFiles))
 		{
+			if (record.New?.Kind == EntryKind.Conflict)
+			{
+				reviews.Add(new FileReview(record, 0, 0, null, null, "unresolved conflict: keep a side or write the merged text"));
+				continue;
+			}
+
 			var patch = await Client.Repo.Diffs.PatchAsync(record);
 			IReadOnlyList<SplitRow>? rows = null;
 			if (Split && patch.Hunks is not null && !patch.Binary)
@@ -100,6 +106,8 @@ else
 
 		files = reviews;
 	}
+
+	private static string Status(DiffRecord record) => record.New?.Kind == EntryKind.Conflict ? "conflict" : record.Status;
 
 	private string ModeLink(bool split) => BaseLink + (BaseLink.Contains('?') ? "&" : "?") + "view=" + (split ? "split" : "unified");
 

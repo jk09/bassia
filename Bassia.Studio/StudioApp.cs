@@ -30,6 +30,8 @@ public sealed class StudioApp(StudioOptions options) : IAsyncDisposable
 		builder.WebHost.UseStaticWebAssets();
 		builder.Services.AddSingleton(options);
 		builder.Services.AddSingleton<MonorepoClient>();
+		builder.Services.AddSingleton(new StudioUser(options.User, options.Role));
+		builder.Services.AddScoped<StudioActions>();
 		builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 		app = builder.Build();
 		app.UseExceptionHandler("/error", createScopeForErrors: true);

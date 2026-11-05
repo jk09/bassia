@@ -1,0 +1,35 @@
+@* A button that asks once before a hard-to-undo action (land, abandon, delete, release). *@
+@if (asking)
+{
+	<span class="confirm">
+		@Question
+		<button class="btn danger" disabled="@Disabled" @onclick="ConfirmAsync">Yes</button>
+		<button class="btn" @onclick="() => asking = false">No</button>
+	</span>
+}
+else
+{
+	<button class="btn @Class" disabled="@Disabled" title="@Title" @onclick="() => asking = true">@Label</button>
+}
+
+@code {
+	[Parameter, EditorRequired] public string Label { get; set; } = "";
+
+	[Parameter] public string Question { get; set; } = "Sure?";
+
+	[Parameter] public string? Class { get; set; }
+
+	[Parameter] public string? Title { get; set; }
+
+	[Parameter] public bool Disabled { get; set; }
+
+	[Parameter] public EventCallback OnConfirm { get; set; }
+
+	private bool asking;
+
+	private async Task ConfirmAsync()
+	{
+		asking = false;
+		await OnConfirm.InvokeAsync();
+	}
+}

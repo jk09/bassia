@@ -31,16 +31,16 @@ Version management
       highlighting, binary as metadata and download); per-path history (the landings that touched it).
 - [x] **Mainline log** (like SVN "Show log" / P4V "Submitted"): paged landings by seq with author, agent, intent,
       changed paths; a landing's diff (unified and side-by-side).
-- [ ] **Workspaces** (like P4V "Pending changelists"): list and filter; create on mainline, stacked on or cloned from
+- [x] **Workspaces** (like P4V "Pending changelists"): list and filter; create on mainline, stacked on or cloned from
       another; view a workspace's changes against its base, its operation log, undo/restore to an operation, sync,
       describe, close/abandon.
-- [ ] **Edit in the browser**: edit, add, rename and delete files in a workspace (each save an implicit snapshot).
-- [ ] **Land**: land a workspace, showing the outcome (landed seq, replay requested, conflict with paths and policy).
+- [x] **Edit in the browser**: edit, add, rename and delete files in a workspace (each save an implicit snapshot).
+- [x] **Land**: land a workspace, showing the outcome (landed seq, replay requested, conflict with paths and policy).
 - [ ] **Conflicts**: list workspaces kept from landing and the paths in conflict; resolve per the path's policy
-      (replay, take mine/theirs, edit a merged result).
-- [ ] **Leases** (like Perforce locks): list, acquire, release; an expired or foreign lease is shown and cannot be
+      (replay, take mine/theirs, edit a merged result). *Done except replay, which needs cloud runs (slice c).*
+- [x] **Leases** (like Perforce locks): list, acquire, release; an expired or foreign lease is shown and cannot be
       released by someone else unless they are an administrator.
-- [ ] Every action that changes the monorepo goes through the same core operations as the `bassia` CLI, so results
+- [x] Every action that changes the monorepo goes through the same core operations as the `bassia` CLI, so results
       are identical (verified by tests that do the same change from both).
 
 Agentic runs
@@ -53,11 +53,11 @@ Agentic runs
 
 Platform
 - [ ] Sign-in with Microsoft Entra ID (OpenID Connect); locally a development sign-in or the server token.
-- [ ] Actions are recorded with the signed-in user as the author.
+- [x] Actions are recorded with the signed-in user as the author.
 - [ ] Live updates (runs, landings, leases) are pushed to open pages without reload.
 - [ ] Deploys to Azure from versioned infrastructure code with one command; a documented local setup runs it on
       Azurite + PostgreSQL next to `bassia-server`.
-- [ ] Failure behavior: a server that is unreachable, a stale view (workspace head moved) and a rejected land are
+- [x] Failure behavior: a server that is unreachable, a stale view (workspace head moved) and a rejected land are
       shown as clear messages, never as a lost edit.
 - [ ] Tests run without a network or a cloud account (in-process server, local stores).
 
@@ -86,6 +86,13 @@ User decisions (2026-11-05):
 - **Scope: all four slices**, one record, one PR per slice: (a) browse/log/diffs, (b) workspaces/edit/land/
   conflicts/leases, (c) cloud runs, (d) Azure deployment + Entra ID.
 
+Slice (b):
+- Until sign-in (slice d), Studio acts as one configured user (`-user`, default `studio`) with one role (`-role`,
+  default `admin`, as a single local user). Contributors change only their own workspaces and leases.
+- Studio has no workspace folder: edits write the working commit directly (the CLI snapshots a folder); the
+  resulting trees are identical (parity test). Each save is checked against the version the user opened.
+- Sync in Studio uses the repository policy without a semantic driver; mainline landing still uses the server's.
+
 Defaults chosen (not asked; revisit if wrong):
 - Both apps run on Azure Container Apps (same environment as the run jobs), so Terraform manages one platform.
 - Authorization by Entra ID app roles: `Reader` (browse), `Contributor` (workspaces, runs, land), `Admin` (others'
@@ -98,7 +105,13 @@ Defaults chosen (not asked; revisit if wrong):
       content, download and per-path history, mainline log, landing diffs (unified and side by side), read-only
       workspace list and detail; unreachable server and missing paths as messages. `StudioTests` (8) green;
       checked in Chromium against a CLI-seeded `bassia-server` (interactive circuit, no console errors).
-- [ ] Slice (b): workspaces create/stack/clone, browser editing, land, conflicts, leases; CLI/Studio parity tests.
+- [x] Slice (b): `StudioActions` over `WorkspaceService`, the landing service and the lease store - create (on
+      mainline, stacked, cloned), describe, edit/add/rename/delete files (each a snapshot; refused without loss when
+      the path changed since it was opened), check and land (with the owner's leases), sync, undo, restore, close and
+      abandon; stored conflicts resolved by keeping a side or saving merged text; leases acquired and released;
+      reader/contributor/admin roles (`-user`, `-role` until sign-in). Pages: new workspace, workspace toolbar and
+      conflicts, workspace files and editor, conflicts overview, leases. 9 new tests (actions, stale edits, conflict
+      resolution, undo/restore, stack/clone, roles, leases, CLI parity, pages); full flow driven in Chromium.
 - [ ] Slice (c): cloud runs (run host interface; Container Apps jobs; local process host), live output, stop/replay/land.
 - [ ] Slice (d): Terraform for Azure (Container Apps, Blob Storage, PostgreSQL, Key Vault, Entra ID), sign-in and roles.
 

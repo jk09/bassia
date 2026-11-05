@@ -9,7 +9,7 @@
 	/// <summary>The message for an expected failure (a version error or an unreachable server); others rethrow.</summary>
 	public static string? For(Exception ex) => ex switch
 	{
-		VersionException => ex.Message,
+		VersionException or StudioForbiddenException => ex.Message,
 		HttpRequestException http => $"The bassia-server is unreachable or refused the request: {http.Message}",
 		_ => null
 	};

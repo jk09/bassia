@@ -1,0 +1,11 @@
+<table class="list">
+	<tr><th>Path</th><th>Case</th><th>Policy</th><th>Detail</th></tr>
+	@foreach (var conflict in Conflicts)
+	{
+		<tr><td class="id">@conflict.Path</td><td>@conflict.Case</td><td><span class="pill">@conflict.Policy</span></td><td>@conflict.Detail</td></tr>
+	}
+</table>
+
+@code {
+	[Parameter, EditorRequired] public IReadOnlyList<PathConflict> Conflicts { get; set; } = [];
+}

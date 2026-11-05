@@ -1,0 +1,224 @@
+@page "/workspaces/{Id}/files"
+@inherits StudioPage
+
+<PageTitle>Files of @(state?.Name ?? Id) · Bassia Studio</PageTitle>
+<h1>Files of <a href="/workspaces/@Format.Q(Id)">@(state?.Name ?? Id)</a></h1>
+<div class="crumbs id">
+	<span class="muted">working tree</span>
+	<a href="@Link("")">(root)</a>
+	@foreach (var (part, prefix) in Crumbs())
+	{
+		<span> / </span><a href="@Link(prefix)">@part</a>
+	}
+</div>
+<Banner Notice="@Notice" Error="@Error" />
+@if (state is not null)
+{
+	var act = User.CanChange && (User.IsAdmin || state.Record.Owner == User.Name) && state.IsOpen && !Busy;
+	<div class="panes">
+		<section class="pane tree">
+			@if (folder is not null)
+			{
+				<table class="list">
+					<tr><th>Name</th><th>Kind</th><th>Size</th></tr>
+					@if (folderPath.Length > 0)
+					{
+						<tr><td class="id"><a href="@Link(PathNames.Parent(folderPath))">..</a></td><td></td><td></td></tr>
+					}
+					@foreach (var entry in folder.Entries)
+					{
+						var child = PathNames.Join(folderPath, entry.Name);
+						<tr class="@(child == FilePath ? "selected" : "")">
+							<td class="id"><a href="@Link(child)">@entry.Name@(entry.Kind == EntryKind.Tree ? "/" : "")</a></td>
+							<td>@Format.Kind(entry.Kind)</td>
+							<td>@(entry.Kind == EntryKind.Tree ? "" : Format.Size(entry.Size))</td>
+						</tr>
+					}
+				</table>
+			}
+			@if (act)
+			{
+				<div class="form compact">
+					<label>New file <input @bind="newName" placeholder="@(PathNames.Join(folderPath, "name.txt"))" /></label>
+					<button class="btn" @onclick="StartNew">Create…</button>
+				</div>
+			}
+		</section>
+		@if (editing)
+		{
+			<section class="pane detail">
+				<div class="tabs"><strong class="id">@editPath</strong> <span class="muted">@(seen is null ? "new file" : "editing")</span></div>
+				<textarea class="editor" @bind="text" rows="24" spellcheck="false"></textarea>
+				<div>
+					<button class="btn primary" disabled="@(!act)" @onclick="SaveAsync">Save</button>
+					<button class="btn" @onclick="() => editing = false">Cancel</button>
+				</div>
+			</section>
+		}
+		else if (file is not null)
+		{
+			<section class="pane detail">
+				<div class="tabs">
+					<strong class="id">@FilePath</strong>
+					<span class="muted">@Format.Size(file.Size)</span>
+					<span class="spacer"></span>
+					@if (act && file.Kind == EntryKind.Conflict)
+					{
+						<a class="btn" href="/workspaces/@Format.Q(Id)">Resolve the conflict</a>
+					}
+					else if (act && content is not null)
+					{
+						<button class="btn" @onclick="StartEdit">Edit</button>
+					}
+					<a class="btn" href="/raw?path=@Format.Q(FilePath)&workspace=@Format.Q(Id)">Download</a>
+					@if (act)
+					{
+						@if (renaming)
+						{
+							<input @bind="renameTo" />
+							<button class="btn" @onclick="RenameAsync">Move</button>
+							<button class="btn" @onclick="() => renaming = false">Cancel</button>
+						}
+						else
+						{
+							<button class="btn" @onclick="StartRename">Rename</button>
+						}
+						<ConfirmButton Label="Delete" Class="danger" Question="Delete this file?" OnConfirm="DeleteAsync" />
+					}
+				</div>
+				@if (file.Kind == EntryKind.Conflict)
+				{
+					<p class="notice">This path holds an unresolved conflict.</p>
+				}
+				else if (content is not null)
+				{
+					<pre class="source">@content</pre>
+				}
+				else
+				{
+					<p class="notice">Binary content (or too large to edit here): download it instead.</p>
+				}
+			</section>
+		}
+	</div>
+}
+
+@code {
+	[Parameter] public string Id { get; set; } = "";
+
+	[SupplyParameterFromQuery(Name = "path")] public string? PathQuery { get; set; }
+
+	private string FilePath => PathNames.Normalize(PathQuery ?? "");
+
+	private WorkspaceState? state;
+	private string folderPath = "";
+	private Tree? folder;
+	private Leaf? file;
+	private string? content;
+	private bool editing;
+	private string editPath = "";
+	private ObjectId? seen;
+	private string text = "";
+	private string newName = "";
+	private bool renaming;
+	private string renameTo = "";
+
+	private string Link(string path) => $"/workspaces/{Format.Q(Id)}/files" + (path.Length == 0 ? "" : "?path=" + Format.Q(path));
+
+	private IEnumerable<(string Part, string Prefix)> Crumbs()
+	{
+		var prefix = "";
+		foreach (var part in PathNames.Split(FilePath))
+		{
+			prefix = PathNames.Join(prefix, part);
+			yield return (part, prefix);
+		}
+	}
+
+	protected override async Task LoadAsync()
+	{
+		folder = null;
+		file = null;
+		content = null;
+		renaming = false;
+		var repo = await Client.OpenAsync();
+		state = await repo.ResolveWorkspaceAsync(Id);
+		var tree = (await repo.Objects.ReadCommitAsync(state.Record.Working)).Tree;
+		var leaf = await repo.Trees.GetAsync(tree, FilePath);
+		if (leaf is null)
+		{
+			// Gone (deleted or renamed): show its folder.
+			folderPath = PathNames.Parent(FilePath);
+			leaf = await repo.Trees.GetAsync(tree, folderPath);
+			if (leaf is not { Kind: EntryKind.Tree })
+			{
+				folderPath = "";
+				leaf = await repo.Trees.GetAsync(tree, "");
+			}
+
+			folder = leaf is { Kind: EntryKind.Tree } ? await repo.Objects.ReadTreeAsync(leaf.Id) : Tree.Empty;
+			return;
+		}
+
+		if (leaf.Kind == EntryKind.Tree)
+		{
+			folderPath = FilePath;
+			folder = await repo.Objects.ReadTreeAsync(leaf.Id);
+			return;
+		}
+
+		file = leaf;
+		folderPath = PathNames.Parent(FilePath);
+		var parent = await repo.Trees.GetAsync(tree, folderPath);
+		folder = parent is { Kind: EntryKind.Tree } ? await repo.Objects.ReadTreeAsync(parent.Id) : null;
+		content = leaf.Kind == EntryKind.Conflict ? null : await Client.TextAsync(leaf);
+	}
+
+	private void StartEdit()
+	{
+		(editPath, seen, text, editing) = (FilePath, file!.Id, content ?? "", true);
+	}
+
+	private void StartNew()
+	{
+		var path = newName.Contains('/') ? newName : PathNames.Join(folderPath, newName);
+		(editPath, seen, text, editing) = (path, null, "", true);
+		Error = path.Length == 0 ? "Name the new file first." : null;
+		editing = path.Length > 0;
+	}
+
+	private void StartRename()
+	{
+		(renameTo, renaming) = (FilePath, true);
+	}
+
+	private Task SaveAsync() => RunAsync(async () =>
+	{
+		// On a stale view the editor stays open with the user's text.
+		await Actions.SaveTextAsync(state!.Id, editPath, text, seen);
+		editing = false;
+		newName = "";
+		var saved = PathNames.Normalize(editPath);
+		if (saved != FilePath)
+		{
+			Navigation.NavigateTo(Link(saved));
+		}
+
+		return $"Saved {saved} (a new snapshot of the workspace).";
+	});
+
+	private Task DeleteAsync() => RunAsync(async () =>
+	{
+		await Actions.DeleteAsync(state!.Id, FilePath, file!.Id);
+		Navigation.NavigateTo(Link(folderPath));
+		return $"Deleted {FilePath}.";
+	}, reload: false);
+
+	private Task RenameAsync() => RunAsync(async () =>
+	{
+		var to = PathNames.Normalize(renameTo);
+		await Actions.RenameAsync(state!.Id, FilePath, to);
+		Navigation.NavigateTo(Link(to));
+		return $"Moved {FilePath} to {to}.";
+	}, reload: false);
+}

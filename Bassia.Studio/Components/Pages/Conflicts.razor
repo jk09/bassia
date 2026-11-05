@@ -1,0 +1,68 @@
+@page "/conflicts"
+@inherits StudioPage
+
+<PageTitle>Conflicts · Bassia Studio</PageTitle>
+<h1>Conflicts</h1>
+<p class="muted">When two changes rewrote the same path, the policy in .bassia.toml decides: replay (re-run the task on the new mainline - agentic runs), merge text, merge semantically, or stop as a conflict. Open a workspace to sync it and resolve what is left.</p>
+<Banner Notice="@Notice" Error="@Error" />
+@if (rows.Count == 0 && Error is null)
+{
+	<p class="notice">Every open workspace can land (or has nothing to land).</p>
+}
+@foreach (var row in rows)
+{
+	<section class="conflict">
+		<h3><a href="/workspaces/@Format.Q(row.State.Id)">@row.State.Name</a> <span class="muted">@row.State.Record.Owner</span>
+			<span class="st st-@row.Check.Outcome">@row.Check.Outcome</span></h3>
+		<div class="attn">@row.Check.Message</div>
+		@if (row.Check.Conflicts.Count > 0)
+		{
+			<ConflictTable Conflicts="row.Check.Conflicts" />
+		}
+		<p class="muted">@Next(row.Check.Outcome)</p>
+	</section>
+}
+@if (hot.Count > 0)
+{
+	<h2>Hot paths</h2>
+	<p class="muted">Paths that keep colliding are candidates for an exclusive <a href="/leases">lease</a>.</p>
+	<table class="list">
+		<tr><th>Path</th><th>Blocked workspaces</th></tr>
+		@foreach (var (path, count) in hot)
+		{
+			<tr><td class="id">@path</td><td>@count</td></tr>
+		}
+	</table>
+}
+
+@code {
+	private sealed record Row(WorkspaceState State, LandResult Check);
+
+	private List<Row> rows = [];
+	private List<(string Path, int Count)> hot = [];
+
+	protected override async Task LoadAsync()
+	{
+		var repo = await Client.OpenAsync();
+		var found = new List<Row>();
+		foreach (var state in await repo.ListWorkspacesAsync())
+		{
+			var check = await Actions.CheckAsync(state.Id);
+			if (check.Outcome is LandOutcome.NeedsReplay or LandOutcome.Conflict or LandOutcome.Rejected)
+			{
+				found.Add(new Row(state, check));
+			}
+		}
+
+		rows = found;
+		hot = found.SelectMany(row => row.Check.Conflicts.Select(conflict => conflict.Path)).GroupBy(path => path)
+			.Select(group => (group.Key, group.Count())).OrderByDescending(item => item.Item2).Take(20).ToList();
+	}
+
+	private static string Next(string outcome) => outcome switch
+	{
+		LandOutcome.NeedsReplay => "Replay the task on the new mainline (agentic runs), or sync the workspace and resolve the paths by hand.",
+		LandOutcome.Conflict => "The workspace stores conflicts: open it and keep a side or write the merged text, then land.",
+		_ => "Open the workspace for the reason; stacked workspaces land after the one they are stacked on."
+	};
+}

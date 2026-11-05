@@ -7,6 +7,8 @@
 <div class="diffbar">
 	<a class="@(All ? "" : "on")" href="/workspaces">Open</a>
 	<a class="@(All ? "on" : "")" href="/workspaces?all=true">All</a>
+	<span class="spacer"></span>
+	<a href="/workspaces/new">New workspace</a>
 </div>
 <ErrorNotice Message="@error" />
 @if (workspaces.Count == 0 && error is null)
