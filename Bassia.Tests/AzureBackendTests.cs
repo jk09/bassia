@@ -265,7 +265,7 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 	{
 		var options = new ServerOptions
 		{
-			Data = temp.Combine("server-" + backend), Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384), Postgres = Backends.RequiredPostgres()
+			Data = temp.Combine("server-" + backend), Url = "http://127.0.0.1:0", NoAuth = true, Chunks = new ChunkParameters(1024, 4096, 16384), Postgres = Backends.RequiredPostgres()
 		};
 		if (backend == "disk")
 		{
@@ -383,7 +383,7 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 			return;
 		}
 
-		await using var server = new ServerApp(options with { Token = "secret" });
+		await using var server = new ServerApp(options with { Token = "secret", NoAuth = false });
 		await server.StartAsync();
 		await OkAsync(temp.Path, "clone", "-from", server.Address!, "-path", "a", "-token", "secret");
 		await OkAsync(temp.Path, "clone", "-from", server.Address!, "-path", "b", "-token", "secret");

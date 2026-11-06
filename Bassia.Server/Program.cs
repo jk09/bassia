@@ -6,8 +6,8 @@ using Bassia.Stores;
 /// <summary>
 /// <c>bassia-server</c>: runs the server, or a maintenance job over its data.
 /// <code>
-/// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t>]
-///               -postgres <connection string> [-storage disk|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
+/// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t> | -no-auth]
+///             -postgres <connection string> [-storage disk|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
 /// bassia-server gc -data <folder> -postgres <connection string> [-grace-hours 24] [-retention-days 14] [-dry-run]
 /// bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]
 /// </code>
@@ -17,12 +17,13 @@ internal static class Program
 {
 	private const string Usage = """
 		Usage:
-		  bassia-server -data <folder> -postgres <connection string> [-url <url>] [-public-url <url>] [-token <token>]
+		  bassia-server -data <folder> -postgres <connection string> [-url <url>] [-public-url <url>] [-token <token> | -no-auth]
 		                [-storage disk | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
 		                [-semantic-driver <command>|off] [-validate <command>]        run the server
 		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs and trees
 		The state (heads, path index, leases) lives in PostgreSQL; -data holds the signing key and the local-disk blobs.
+		The API and the dashboard need a token: -token, or without it one generated into <data>/token. -no-auth serves everyone.
 		Switches may also come from BASSIA_SERVER_<NAME> environment variables (BASSIA_SERVER_DATA, BASSIA_SERVER_TOKEN, ...).
 		""";
 
@@ -45,6 +46,15 @@ internal static class Program
 				case "serve":
 					await server.StartAsync();
 					Console.Error.WriteLine($"bassia-server: serving '{options.Data}' ({options.Storage} blobs) at {server.Address}.");
+					if (options.NoAuth)
+					{
+						Console.Error.WriteLine("bassia-server: WARNING: -no-auth: anyone who can reach this port can read and change the monorepo.");
+					}
+					else if (options.Token is null)
+					{
+						Console.Error.WriteLine($"bassia-server: no -token given; the token is in '{server.TokenFile}'. Sign in at {server.Address}, or: bassia clone -from {server.Address} -token <token>");
+					}
+
 					await server.WaitForShutdownAsync();
 					return 0;
 				case "gc":

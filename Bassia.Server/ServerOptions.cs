@@ -17,8 +17,11 @@ internal sealed record ServerOptions
 	/// <summary>The URL clients reach the server at, for signed blob URLs; default: the listening URL.</summary>
 	public string? PublicUrl { get; init; }
 
-	/// <summary>A shared bearer token for the API and the dashboard; none: open (authentication is out of scope).</summary>
+	/// <summary>The shared bearer token for the API and the dashboard; none: one the server generates and keeps in the data folder.</summary>
 	public string? Token { get; init; }
+
+	/// <summary>Serve everyone, with no token at all. Only ever on request: a server is closed by default.</summary>
+	public bool NoAuth { get; init; }
 
 	/// <summary><c>disk</c> (the local-disk stand-in for cloud blobs), <c>s3</c> or <c>azure</c>.</summary>
 	public string Storage { get; init; } = "disk";
@@ -79,8 +82,15 @@ internal sealed record ServerOptions
 				"Pass -postgres <connection string>.");
 		}
 
+		var noAuth = Get("no-auth") is { } open && !open.Equals("false", StringComparison.OrdinalIgnoreCase);
+		if (noAuth && Get("token") is not null)
+		{
+			throw new ArgumentException("-no-auth and -token contradict each other: pass one of them.");
+		}
+
 		return new ServerOptions
 		{
+			NoAuth = noAuth,
 			Data = Path.GetFullPath(Get("data") ?? throw new ArgumentException("-data <folder> is required (or BASSIA_SERVER_DATA).")),
 			Url = Get("url") ?? "http://127.0.0.1:8080",
 			PublicUrl = Get("public-url"),

@@ -53,7 +53,8 @@ Each step has a Claude Code skill that does the same.
 
 3. **Start the server and import repositories**: `/bassia-cloud-server <urls> history`. The server runs at
    http://127.0.0.1:8080 (also its dashboard) and keeps running after the terminal closes. The import goes through a
-   first client.
+   first client. The server needs a token: it generates one, which
+   `pwsh scripts/bassia-local-cloud.ps1 server-token` prints, for the dashboard's sign-in page and for clients.
 
    ```powershell
    pwsh scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Clone D:\clients\setup
@@ -62,8 +63,9 @@ Each step has a Claude Code skill that does the same.
 4. **Connect more clients**, one per machine, agent pool or task area:
 
    ```powershell
-   bassia clone -from http://127.0.0.1:8080 -path D:\clients\a
-   bassia clone -from http://127.0.0.1:8080 -path D:\clients\b
+   $token = pwsh scripts/bassia-local-cloud.ps1 server-token
+   bassia clone -from http://127.0.0.1:8080 -path D:\clients\a -token $token
+   bassia clone -from http://127.0.0.1:8080 -path D:\clients\b -token $token
    ```
 
    On Windows, put the clients on a [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive/), as here. A
@@ -159,7 +161,7 @@ side, instead of as a wall of hunks.
 ## Client-server, testable on a laptop
 
 ```sh
-bassia-server -data /srv/bassia -postgres "<connection string>" -url http://0.0.0.0:8080 -token <token>          # blobs on local disk
+bassia-server -data /srv/bassia -postgres "<connection string>" -url http://0.0.0.0:8080 -token <token>          # blobs on local disk; without -token it generates one in <data>/token
 bassia-server -data /srv/bassia -postgres "<connection string>" -storage s3 -bucket acme-bassia -token <token>   # blobs on S3
 bassia-server -data /srv/bassia -postgres "<connection string>" -storage azure -azure-url https://acme.blob.core.windows.net/bassia
 bassia clone -from http://bassia.example.com:8080 -path ~/acme -token <token>         # a client
