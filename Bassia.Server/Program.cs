@@ -64,7 +64,7 @@ internal static class Program
 				{
 					var sample = Switch(rest, "sample") is { } text ? int.Parse(text) : (int?)null;
 					var report = await new GarbageCollector(server.Repo, server.Maintenance).ScrubAsync(sample);
-					Console.Out.WriteLine($"checked {report.Checked} blobs: {report.Corrupt.Count} corrupt, {report.Unreadable.Count} unreadable");
+					Console.Out.WriteLine($"checked {report.Checked} blobs and {report.TreesChecked} trees: {report.Corrupt.Count} corrupt, {report.Unreadable.Count} unreadable");
 					foreach (var id in report.Corrupt)
 					{
 						Console.Out.WriteLine($"corrupt {id}");

@@ -13,14 +13,17 @@ param([int] $Port = 54329)
 $ErrorActionPreference = 'Stop'
 $exe = { param($name) if ($IsWindows) { "$name.exe" } else { $name } }
 
+# A folder is a server install only with initdb, pg_ctl and postgres together (Homebrew's libpq has the first two, no server).
+function Test-Bin([string] $dir) { (@('initdb', 'pg_ctl', 'postgres') | Where-Object { -not (Test-Path (Join-Path $dir (& $exe $_))) }).Count -eq 0 }
+
 function Find-Bin {
 	$onPath = Get-Command (& $exe 'pg_ctl') -ErrorAction SilentlyContinue
-	if ($onPath) { return Split-Path $onPath.Source }
+	if ($onPath -and (Test-Bin (Split-Path $onPath.Source))) { return Split-Path $onPath.Source }
 	$roots = if ($IsWindows) { @('C:\Program Files\PostgreSQL') } elseif ($IsMacOS) { @('/opt/homebrew/opt', '/usr/local/opt') } else { @('/usr/lib/postgresql') }
 	foreach ($root in $roots) {
 		if (-not (Test-Path $root)) { continue }
 		$candidate = Get-ChildItem $root -Directory | Sort-Object Name -Descending |
-			ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path (Join-Path $_ (& $exe 'pg_ctl')) } | Select-Object -First 1
+			ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Bin $_ } | Select-Object -First 1
 		if ($candidate) { return $candidate }
 	}
 	return $null

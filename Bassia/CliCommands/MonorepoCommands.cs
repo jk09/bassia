@@ -325,11 +325,12 @@ internal static class MonorepoCommands
 		var data = new Dictionary<string, object?>
 		{
 			["checked"] = report.Checked,
+			["trees_checked"] = report.TreesChecked,
 			["corrupt"] = report.Corrupt.Select(id => id.Hex).ToList(),
 			["unreadable"] = report.Unreadable.Select(id => id.Hex).ToList()
 		};
 		return ok
-			? Ok(invocation, $"Checked {report.Checked} blob(s): every one matches its id.", data)
-			: Fail(invocation, $"Checked {report.Checked} blob(s): {report.Corrupt.Count} corrupt, {report.Unreadable.Count} unreadable.", data);
+			? Ok(invocation, $"Checked {report.Checked} blob(s) and {report.TreesChecked} tree(s): every one matches its id.", data)
+			: Fail(invocation, $"Checked {report.Checked} blob(s) and {report.TreesChecked} tree(s): {report.Corrupt.Count} corrupt, {report.Unreadable.Count} unreadable.", data);
 	}
 }

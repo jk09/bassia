@@ -7,7 +7,8 @@ using Bassia.Core.Storage;
 public sealed record GcReport(int Roots, int Live, int Blobs, int Swept, long SweptBytes, int Young, int PrunedWorkspaces, bool DryRun, int TreesSwept = 0, int Trees = 0);
 
 /// <summary>What a scrub checked and what was wrong.</summary>
-public sealed record ScrubReport(int Checked, IReadOnlyList<ObjectId> Corrupt, IReadOnlyList<ObjectId> Unreadable);
+/// <remarks><see cref="Checked"/> counts blobs; <see cref="TreesChecked"/> the trees checked in the tree store.</remarks>
+public sealed record ScrubReport(int Checked, IReadOnlyList<ObjectId> Corrupt, IReadOnlyList<ObjectId> Unreadable, int TreesChecked = 0);
 
 /// <summary>What moving trees into a tree store did.</summary>
 public sealed record TreeMigrationReport(int Trees, int BlobsDeleted);
@@ -335,7 +336,7 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 			}
 		}
 
-		return new ScrubReport(chosen.Count + chosenTrees.Count, corrupt, unreadable);
+		return new ScrubReport(chosen.Count, corrupt, unreadable, chosenTrees.Count);
 	}
 
 	/// <summary>
