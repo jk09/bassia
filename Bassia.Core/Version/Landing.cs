@@ -130,17 +130,21 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 		}
 
 		var warnings = new List<string>();
-		var leaseProblems = await CheckLeasesAsync(record, request, touched, warnings, ct);
-		if (leaseProblems.Count > 0)
-		{
-			return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", leaseProblems, touched.Count);
-		}
-
 		for (var attempt = 1; attempt <= MaxAttempts; attempt++)
 		{
 			main = await repo.GetMainAsync(ct);
 			await repo.EnsureIndexedAsync(main, ct);
 			var policy = await RepoPolicy.LoadAsync(repo.Trees, main.Tree, ct);
+
+			// Leases are checked on every attempt, against the policy of the mainline this attempt lands on: a lost
+			// race may have outlived a presented lease or landed a new [leases] required prefix.
+			warnings.Clear();
+			var leaseProblems = await CheckLeasesAsync(record, request, touched, policy, warnings, ct);
+			if (leaseProblems.Count > 0)
+			{
+				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", leaseProblems, touched.Count, attempt);
+			}
+
 			var resolver = new ConflictResolver(repo.Objects, policy, validator is null ? null : semantic);
 			var conflicts = new List<PathConflict>();
 			var merged = new List<string>();
@@ -238,6 +242,13 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 					null, null, main.Seq, main.CommitId, [], touched.Count, merged, warnings, attempt);
 			}
 
+			// Merging and validation take time: the presented leases must still hold right before main moves.
+			var lapsed = await LapsedLeasesAsync(request, ct);
+			if (lapsed.Count > 0)
+			{
+				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", lapsed, touched.Count, attempt);
+			}
+
 			var commit = working with
 			{
 				Tree = tree,
@@ -269,27 +280,14 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 		return Fail(LandOutcome.Rejected, $"Mainline kept moving; gave up after {MaxAttempts} attempts.", null, touched.Count, MaxAttempts);
 	}
 
+	/// <summary>
+	/// The lease problems of a landing under <paramref name="policy"/>, the policy of the mainline it is about to land on:
+	/// presented leases that lapsed, and touched paths under a required prefix that no presented exclusive lease covers.
+	/// </summary>
 	private async Task<List<PathConflict>> CheckLeasesAsync(WorkspaceRecord record, LandRequest request, IReadOnlyList<TreeChange> touched,
-		List<string> warnings, CancellationToken ct)
+		RepoPolicy policy, List<string> warnings, CancellationToken ct)
 	{
-		var problems = new List<PathConflict>();
-		var presented = new List<Lease>();
-		foreach (var token in request.Leases ?? [])
-		{
-			var lease = await repo.Leases.GetAsync(token.LeaseId, ct);
-			if (lease is null || lease.Token != token.Token)
-			{
-				problems.Add(new PathConflict(lease?.Prefix ?? token.LeaseId, "lease", LeaseEnforcement.LeaseRequired,
-					$"lease {token.LeaseId} with token {token.Token} expired or was granted to someone else"));
-			}
-			else
-			{
-				presented.Add(lease);
-			}
-		}
-
-		var main = await repo.GetMainAsync(ct);
-		var policy = await RepoPolicy.LoadAsync(repo.Trees, main.Tree, ct);
+		var (presented, problems) = await PresentedLeasesAsync(request, ct);
 		var held = await repo.Leases.ListAsync(null, ct);
 		foreach (var change in touched)
 		{
@@ -308,6 +306,31 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 
 		return problems;
 	}
+
+	/// <summary>The presented leases that are still live with their fencing tokens, and a problem for each that is not.</summary>
+	private async Task<(List<Lease> Live, List<PathConflict> Lapsed)> PresentedLeasesAsync(LandRequest request, CancellationToken ct)
+	{
+		var live = new List<Lease>();
+		var lapsed = new List<PathConflict>();
+		foreach (var token in request.Leases ?? [])
+		{
+			var lease = await repo.Leases.GetAsync(token.LeaseId, ct);
+			if (lease is null || lease.Token != token.Token)
+			{
+				lapsed.Add(new PathConflict(lease?.Prefix ?? token.LeaseId, "lease", LeaseEnforcement.LeaseRequired,
+					$"lease {token.LeaseId} with token {token.Token} expired or was granted to someone else"));
+			}
+			else
+			{
+				live.Add(lease);
+			}
+		}
+
+		return (live, lapsed);
+	}
+
+	private async Task<List<PathConflict>> LapsedLeasesAsync(LandRequest request, CancellationToken ct) =>
+		request.Leases is { Count: > 0 } ? (await PresentedLeasesAsync(request, ct)).Lapsed : [];
 
 	private async Task RecordAsync(LandRequest request, LandResult result, CancellationToken ct)
 	{
