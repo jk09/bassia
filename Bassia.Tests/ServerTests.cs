@@ -19,7 +19,6 @@ public sealed class ServerStateOptionTests : IDisposable
 	public void Dispose() => temp.Dispose();
 
 	[Theory]
-	[InlineData("sqlite")]
 	[InlineData("memory")]
 	public void AStateOtherThanPostgres_IsRefused(string state)
 	{
@@ -39,17 +38,6 @@ public sealed class ServerStateOptionTests : IDisposable
 	{
 		var error = Assert.Throws<ArgumentException>(() => new ServerApp(new ServerOptions { Data = temp.Combine("server") }));
 		Assert.Contains("-postgres", error.Message);
-	}
-
-	[Fact]
-	public void ADataFolderWithAnSqliteStateDb_DoesNotStart_AndKeepsTheFile()
-	{
-		var data = temp.Combine("server");
-		Directory.CreateDirectory(data);
-		File.WriteAllText(Path.Combine(data, "state.db"), "an earlier server's state");
-		var error = Assert.Throws<ArgumentException>(() => new ServerApp(new ServerOptions { Data = data, Postgres = "Host=unused" }));
-		Assert.Contains("state.db", error.Message);
-		Assert.Equal("an earlier server's state", File.ReadAllText(Path.Combine(data, "state.db")));
 	}
 }
 

@@ -32,9 +32,6 @@ internal sealed class ServerApp : IAsyncDisposable
 	private static readonly Counter<long> BytesServed = Meter.CreateCounter<long>("bassia.bytes.served", description: "Object bytes served by the server itself");
 	private static readonly Counter<long> Redirects = Meter.CreateCounter<long>("bassia.reads.redirected", description: "Reads sent to blob storage on a signed URL");
 
-	/// <summary>Where a bassia-server on SQLite kept its state, in the data folder.</summary>
-	private const string LegacyStateFile = "state.db";
-
 	private readonly ServerOptions options;
 	private readonly byte[] signingKey;
 	private readonly List<Channel<Api.WatchEvent>> watchers = [];
@@ -45,12 +42,6 @@ internal sealed class ServerApp : IAsyncDisposable
 	{
 		this.options = options;
 		Directory.CreateDirectory(options.Data);
-		if (File.Exists(Path.Combine(options.Data, LegacyStateFile)))
-		{
-			throw new ArgumentException($"'{Path.Combine(options.Data, LegacyStateFile)}' holds the state of an earlier bassia-server on SQLite, " +
-				"which the server no longer reads and does not migrate to PostgreSQL. Move it out of the data folder to start on PostgreSQL.");
-		}
-
 		signingKey = LoadKey(Path.Combine(options.Data, "blob.key"));
 		State = new PostgresState(options.Postgres
 			?? throw new ArgumentException("-postgres <connection string> is required (or BASSIA_SERVER_POSTGRES): bassia-server keeps its state in PostgreSQL."));
@@ -82,26 +73,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			Disk = disk;
 		}
 
-		if (options.TreeStore.Equals("postgres", StringComparison.OrdinalIgnoreCase))
-		{
-			var trees = new PostgresTreeStore(options.Postgres);
-			Trees = trees;
-			if (!trees.IsReadyAsync().GetAwaiter().GetResult())
-			{
-				if (State.GetHeadAsync(HeadName.Main).AsTask().GetAwaiter().GetResult() is not null)
-				{
-					throw new ArgumentException("This server's trees are still stored as blobs. Run 'bassia-server rebuild-trees' once to move them into PostgreSQL " +
-						"(or start with -tree-store blob to keep using blobs).");
-				}
-
-				trees.MarkReadyAsync().GetAwaiter().GetResult();
-			}
-		}
-		else if (!options.TreeStore.Equals("blob", StringComparison.OrdinalIgnoreCase))
-		{
-			throw new ArgumentException($"-tree-store '{options.TreeStore}' is not supported: use postgres or blob.");
-		}
-
+		Trees = new PostgresTreeStore(options.Postgres);
 		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees);
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
@@ -116,8 +88,8 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	public IServerState State { get; }
 
-	/// <summary>The relational tree store (null when trees are blobs).</summary>
-	public PostgresTreeStore? Trees { get; }
+	/// <summary>The relational tree store: trees live in PostgreSQL, not in blob storage.</summary>
+	public PostgresTreeStore Trees { get; }
 
 	public AzureBlobObjectStore? Azure { get; }
 
@@ -757,10 +729,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		await Reconciling.DisposeAsync();
-		if (Trees is not null)
-		{
-			await Trees.DisposeAsync();
-		}
+		await Trees.DisposeAsync();
 
 		if (State is IAsyncDisposable state)
 		{

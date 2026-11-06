@@ -22,7 +22,6 @@ internal static class Program
 		                [-semantic-driver <command>|off] [-validate <command>]        run the server
 		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs and trees
-		  bassia-server rebuild-trees -data <folder> -postgres <connection string> -tree-store blob [-delete-blobs]           move an earlier server's trees from blobs into PostgreSQL
 		The state (heads, path index, leases) lives in PostgreSQL; -data holds the signing key and the local-disk blobs.
 		Switches may also come from BASSIA_SERVER_<NAME> environment variables (BASSIA_SERVER_DATA, BASSIA_SERVER_TOKEN, ...).
 		""";
@@ -71,22 +70,6 @@ internal static class Program
 					}
 
 					return report.Corrupt.Count == 0 && report.Unreadable.Count == 0 ? 0 : 1;
-				}
-
-				case "rebuild-trees":
-				{
-					// The explicit step of moving an existing server's trees from blobs into PostgreSQL. The server runs here with
-					// trees as blobs (-tree-store blob), and the relational store is filled from every tree the heads reach.
-					if (!options.TreeStore.Equals("blob", StringComparison.OrdinalIgnoreCase))
-					{
-						throw new ArgumentException("rebuild-trees reads the old trees from blobs: pass -tree-store blob.");
-					}
-
-					await using var destination = new PostgresTreeStore(options.Postgres!);
-					var report = await new GarbageCollector(server.Repo, server.Maintenance).MigrateTreesAsync(destination, rest.Contains("-delete-blobs"));
-					await destination.MarkReadyAsync();
-					Console.Out.WriteLine($"moved {report.Trees} trees into PostgreSQL; {report.BlobsDeleted} tree blobs deleted. Start the server without -tree-store blob.");
-					return 0;
 				}
 
 				default:

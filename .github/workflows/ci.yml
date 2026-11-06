@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main, main-client-server]
+    branches: [main]
     tags: ['v*']
   pull_request:
   workflow_dispatch:

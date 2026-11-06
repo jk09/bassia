@@ -2,9 +2,10 @@
 
 `Bassia` is my own version control implementation suited for 1. agentic development, 2. scalable monorepo support, 3. `git` compatibility (as an import and export format).
 
-This branch (`main-client-server`) is the client-server rewrite following the design document
+`main` is the client-server Bassia, following the design document
 [Design: Cloud-Backed Version Control for Agentic Development](https://claude.ai/artifact/V2nkDzNs8XAsx1E9PpgwM7). The
-git-component Bassia (components, meta-repo, component graph) lives on `main`; it is deprecated and removed here.
+earlier git-component Bassia (components, meta-repo, component graph) is deprecated and gone; git is only an import and
+export format. State lives in cloud blob storage and PostgreSQL (trees included); SQLite is not used.
 
 ## Architecture
 
@@ -46,7 +47,7 @@ Do **not** create a specification for minor tasks that can be resolved quickly a
 
 Finish each spec-based agentic run with a pull request instead of pushing to `main`:
 
-1. Commit on a feature branch (see **Commits**), push it, and open a pull request against `main` (on this branch line: against `main-client-server`) whose title is the commit subject and whose body links the specification.
+1. Commit on a feature branch (see **Commits**), push it, and open a pull request against `main` whose title is the commit subject and whose body links the specification.
 2. Enable auto-merge on the pull request (merge commit), so it merges into `main` as soon as all of its checks pass. If auto-merge cannot be enabled, watch the pull request and merge it yourself once every check has passed.
 3. Do not notify the user about a pull request that is progressing or merges cleanly. Notify the user only when:
     - a check fails, naming the failing check and its cause, or

@@ -26,16 +26,13 @@ internal static partial class LocalPostgres
 	}
 
 	/// <summary>
-	/// The connection string for this monorepo's schema (created if missing). <paramref name="legacyState"/> is the SQLite
-	/// file an earlier version kept state in; a monorepo that has one and no schema cannot be opened.
+	/// The connection string for this monorepo's schema (created if missing).
 	/// </summary>
-	public static string Connect(MonorepoConfig config, TomlTable settings, string? legacyState = null)
+	public static string Connect(MonorepoConfig config, TomlTable settings)
 	{
 		if (!settings.TryGetValue("postgres_schema", out var value) || value is not string schema)
 		{
-			throw new MonorepoException(legacyState is not null && File.Exists(legacyState)
-				? $"This monorepo keeps its state in SQLite ('{legacyState}'), which Bassia no longer reads and does not migrate to PostgreSQL. Create a new one with 'bassia init'."
-				: "This monorepo folder has no PostgreSQL schema (postgres_schema in .bassia/repo.toml).");
+			throw new MonorepoException("This monorepo folder has no PostgreSQL schema (postgres_schema in .bassia/repo.toml). Create a new one with 'bassia init'.");
 		}
 
 		if (!SchemaName().IsMatch(schema))

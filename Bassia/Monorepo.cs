@@ -66,7 +66,7 @@ internal sealed class Monorepo : IDisposable
 			var disk = new DiskObjectStore(Path.Combine(BassiaDir, "objects"));
 			Objects = disk;
 			Maintenance = disk;
-			var connection = LocalPostgres.Connect(Config, settings, Path.Combine(BassiaDir, "state.db"));
+			var connection = LocalPostgres.Connect(Config, settings);
 			State = new PostgresState(connection);
 			var trees = new PostgresTreeStore(connection);
 			postgres.Add(State);
