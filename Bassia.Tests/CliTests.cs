@@ -252,6 +252,20 @@ public sealed class CliTests : IDisposable
 	}
 
 	[Fact]
+	public void RunWords_AreQuotedBackIntoOneShellLine_KeepingShellSyntax()
+	{
+		Assert.Equal("echo hi > a.txt", Bassia.Cli.Invocation.JoinRest(["echo hi > a.txt"]));
+		if (OperatingSystem.IsWindows())
+		{
+			Assert.Equal("echo \"a b\" && dir", Bassia.Cli.Invocation.JoinRest(["echo", "a b", "&&", "dir"]));
+			return;
+		}
+
+		Assert.Equal("npm test && echo $HOME > *.log", Bassia.Cli.Invocation.JoinRest(["npm", "test", "&&", "echo", "$HOME", ">", "*.log"]));
+		Assert.Equal("printf '%s\\n' 'it'\\''s \"$USER\"' '' '`x`'", Bassia.Cli.Invocation.JoinRest(["printf", "%s\\n", "it's \"$USER\"", "", "`x`"]));
+	}
+
+	[Fact]
 	public async Task Status_Help_AndReplacedCommands()
 	{
 		var outside = await OkAsync(temp.Path, "status");

@@ -103,9 +103,25 @@ internal sealed class Invocation
 		return string.IsNullOrEmpty(name) || char.IsDigit(name[0]) ? null : name;
 	}
 
-	/// <summary>One quoted string, or the command's own words re-joined into one shell line.</summary>
-	private static string JoinRest(IReadOnlyList<string> words) =>
-		words.Count == 1 ? words[0] : string.Join(' ', words.Select(word => word.Any(char.IsWhiteSpace) ? $"\"{word}\"" : word));
+	/// <summary>
+	/// One quoted string, or the command's own words re-joined into one shell line. A word the user's shell had to
+	/// quote (whitespace, quotes, backslashes, backticks) is quoted again so it reaches <c>sh</c> as exactly that word;
+	/// other words (<c>&amp;&amp;</c>, <c>|</c>, <c>&gt;</c>, globs, <c>$VAR</c>) stay shell syntax.
+	/// </summary>
+	internal static string JoinRest(IReadOnlyList<string> words) =>
+		words.Count == 1 ? words[0] : string.Join(' ', words.Select(QuoteWord));
+
+	private static string QuoteWord(string word)
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return word.Any(char.IsWhiteSpace) ? $"\"{word}\"" : word;
+		}
+
+		return word.Length == 0 || word.Any(c => char.IsWhiteSpace(c) || c is '\'' or '"' or '\\' or '`')
+			? $"'{word.Replace("'", "'\\''", StringComparison.Ordinal)}'"
+			: word;
+	}
 
 	private static string Article(string noun) => "aeiou".Contains(char.ToLowerInvariant(noun[0])) ? "an" : "a";
 
