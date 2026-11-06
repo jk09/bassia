@@ -51,15 +51,24 @@ public class TreeAlgebraTests
 	}
 
 	[Theory]
-	[InlineData(1)]
-	[InlineData(2)]
-	[InlineData(3)]
-	[InlineData(4)]
-	[InlineData(5)]
-	public async Task DiffThenApply_ReproducesTheNewTree_AndIdsAreDeterministic(int seed)
+	[InlineData(1, "memory")]
+	[InlineData(2, "memory")]
+	[InlineData(3, "memory")]
+	[InlineData(4, "memory")]
+	[InlineData(5, "memory")]
+	[InlineData(1, "postgres")]
+	[InlineData(2, "postgres")]
+	[InlineData(3, "postgres")]
+	[InlineData(4, "postgres")]
+	[InlineData(5, "postgres")]
+	public async Task DiffThenApply_ReproducesTheNewTree_AndIdsAreDeterministic(int seed, string backend)
 	{
 		var random = new Random(seed);
-		var repo = new TestRepo();
+		if (TestRepo.For(backend) is not { } repo)
+		{
+			return;
+		}
+
 		for (var round = 0; round < 20; round++)
 		{
 			var files = RandomFiles(random, random.Next(0, 12));
@@ -92,13 +101,20 @@ public class TreeAlgebraTests
 	}
 
 	[Theory]
-	[InlineData(11)]
-	[InlineData(12)]
-	[InlineData(13)]
-	public async Task Merge_IdentitiesHold(int seed)
+	[InlineData(11, "memory")]
+	[InlineData(12, "memory")]
+	[InlineData(13, "memory")]
+	[InlineData(11, "postgres")]
+	[InlineData(12, "postgres")]
+	[InlineData(13, "postgres")]
+	public async Task Merge_IdentitiesHold(int seed, string backend)
 	{
 		var random = new Random(seed);
-		var repo = new TestRepo();
+		if (TestRepo.For(backend) is not { } repo)
+		{
+			return;
+		}
+
 		static Task<MergeResolution> None(string path, Leaf? b, Leaf? o, Leaf? t) => Task.FromResult(MergeResolution.Unresolved);
 		for (var round = 0; round < 15; round++)
 		{
@@ -127,25 +143,38 @@ public class TreeAlgebraTests
 		}
 	}
 
-	[Fact]
-	public async Task Diff_PrunesEqualSubtrees()
+	[Theory]
+	[MemberData(nameof(TestRepo.Backends), MemberType = typeof(TestRepo))]
+	public async Task Diff_PrunesEqualSubtrees(string backend)
 	{
-		var counting = new CountingObjectStore(new MemoryObjectStore());
-		var repo = new TestRepo(counting);
+		if (TestRepo.For(backend) is not { } source)
+		{
+			return;
+		}
+
+		var counting = new CountingTreeStore(source.TreeStore);
+		var repo = new TestRepo(null, counting);
 		var files = Enumerable.Range(0, 200).ToDictionary(index => $"dir{index % 20}/sub/file{index}.txt", index => $"{index}\n");
 		var oldTree = await repo.TreeAsync(files);
 		var newTree = await repo.TreeAsync(new Dictionary<string, string> { ["dir3/sub/file3.txt"] = "changed\n" }, oldTree);
-		var fresh = new Repository(counting, new MemoryViewStore(), new MemoryPathIndex(), new MemoryLeaseStore(), TestRepo.SmallChunks);
-		var before = counting.Reads;
+
+		// A fresh reader: nothing cached. Pruned, the diff reads the changed path on both sides (3 trees each), not all 82 trees.
+		var fresh = new Repository(repo.Objects, new MemoryViewStore(), new MemoryPathIndex(), new MemoryLeaseStore(), TestRepo.SmallChunks, counting);
+		var before = counting.TreesRead;
 		var diff = await fresh.Trees.DiffAsync(oldTree, newTree);
 		Assert.Single(diff);
-		Assert.InRange(counting.Reads - before, 1, 8);
+		Assert.InRange(counting.TreesRead - before, 1, 8);
 	}
 
-	[Fact]
-	public async Task Edit_RefusesAFileUnderAFile_AndReplacesAFileByADirectory()
+	[Theory]
+	[MemberData(nameof(TestRepo.Backends), MemberType = typeof(TestRepo))]
+	public async Task Edit_RefusesAFileUnderAFile_AndReplacesAFileByADirectory(string backend)
 	{
-		var repo = new TestRepo();
+		if (TestRepo.For(backend) is not { } repo)
+		{
+			return;
+		}
+
 		var tree = await repo.TreeAsync(new Dictionary<string, string> { ["a"] = "file\n" });
 		var leaf = await repo.FileAsync("x");
 		await Assert.ThrowsAsync<PathClashException>(() => repo.Repo.Trees.EditAsync(tree, [new PathChange("a/b", leaf)]));

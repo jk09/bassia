@@ -38,8 +38,8 @@ object.
       read per differing level; a test shows zero blob reads for lookup, walk and diff on a relational store.
 - [x] Garbage collection marks trees with one recursive query over all roots and sweeps unreachable tree rows.
 - [x] Tree stores run the same contract tests (memory, blobs, PostgreSQL); the checkout test asserts a client uses at most
-      3 `/trees/` requests for a 22-tree checkout. (A random-edit property test over the relational store was not added:
-      the tree algebra tests still run on the blob-backed store, and the relational one is covered by the contract tests.)
+      3 `/trees/` requests for a 22-tree checkout. The tree algebra property tests (diff/apply, merge identities, pruning,
+      edit clashes) run over both the in-memory and the PostgreSQL tree store with identical assertions.
 - [x] `docs/reference.md` describes the tree store ("Trees").
 - [x] Local monorepos and clones use a local PostgreSQL (schema per folder); SQLite and `SqliteState` are removed.
 
@@ -106,7 +106,7 @@ trees, each with all siblings re-listed); two sources of truth to keep consisten
 - [x] Open questions answered.
 - [x] Implementation: tree store, PostgreSQL store, server `/trees/*`, GC/scrub/migration, local monorepos and clones on PostgreSQL.
 - [x] Tests: full suite against a local PostgreSQL 16.
-- [ ] CI: the Windows/macOS package and Dev Drive jobs still need a PostgreSQL for `bassia init` (only the Linux test job has one).
+- [ ] CI: `scripts/Start-CiPostgres.ps1` starts a PostgreSQL in the Dev Drive and package jobs (and `bassia-local-cloud.ps1` exports `BASSIA_POSTGRES` for clones); written but not yet run on the hosted runners - confirm on the first CI run, then move this record to `feat/done/`.
 
 ## Validation
 

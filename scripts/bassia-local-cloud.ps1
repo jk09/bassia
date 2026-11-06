@@ -565,6 +565,8 @@ function Invoke-Smoke {
 	$state = Assert-Up
 	if (-not (Find-Command git)) { throw 'smoke needs git on PATH (bassia import and export run it).' }
 	$connections = Get-Connections $state
+	# Clones keep the trees their work touches in a schema of a local PostgreSQL: the emulator's.
+	if (-not $env:BASSIA_POSTGRES) { $env:BASSIA_POSTGRES = $connections.Postgres }
 	$exeSuffix = $script:OnWindows ? '.exe' : ''
 
 	if (-not $Bassia -or -not $Server) {
@@ -714,6 +716,8 @@ function Test-ServerRunning($srv) {
 
 function Invoke-Serve {
 	$state = Assert-Up
+	# Clones keep the trees their work touches in a schema of a local PostgreSQL: the emulator's.
+	if (-not $env:BASSIA_POSTGRES) { $env:BASSIA_POSTGRES = (Get-Connections $state).Postgres }
 	$srv = Read-Server
 	if ($srv -and (Test-ServerRunning $srv)) {
 		Write-Host "bassia-server: already running at $($srv.Url) (mainline seq $((Get-ServerMain $srv).seq))."

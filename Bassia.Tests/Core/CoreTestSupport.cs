@@ -14,12 +14,28 @@ internal sealed class TestRepo
 	public TestRepo(IObjectStore? objects = null, ITreeStore? trees = null)
 	{
 		Objects = objects ?? new MemoryObjectStore();
-		Repo = new Repository(Objects, Views, Paths, Leases, SmallChunks, trees);
+		TreeStore = trees ?? new MemoryTreeStore();
+		Repo = new Repository(Objects, Views, Paths, Leases, SmallChunks, TreeStore);
 		Landing = new LandingService(Repo);
 		Workspaces = new WorkspaceService(Repo);
 	}
 
 	public IObjectStore Objects { get; }
+
+	/// <summary>Where trees live: in memory unless a test brings PostgreSQL (or blobs) - the stores a test's other repositories must share.</summary>
+	public ITreeStore TreeStore { get; }
+
+	/// <summary>The tree backends the property tests run over.</summary>
+	public static TheoryData<string> Backends => ["memory", "postgres"];
+
+	/// <summary>A repository on the given tree backend, or null when PostgreSQL is not available (the test then checks nothing).</summary>
+	public static TestRepo? For(string backend, IObjectStore? objects = null) => backend switch
+	{
+		"memory" => new TestRepo(objects),
+		"blobs" => new TestRepo(objects, new ObjectBackedTreeStore(objects ?? new MemoryObjectStore())),
+		"postgres" => Bassia.Tests.Backends.FreshPostgres() is { } connection ? new TestRepo(objects, new Bassia.Stores.PostgresTreeStore(connection)) : null,
+		_ => throw new ArgumentException(backend)
+	};
 
 	public MemoryViewStore Views { get; } = new();
 
@@ -149,5 +165,41 @@ internal sealed class TempDir : IDisposable
 		catch (UnauthorizedAccessException)
 		{
 		}
+	}
+}
+
+/// <summary>Counts the calls reaching a tree store and the trees it returns: tests assert that walks prune and stay lazy with it.</summary>
+internal sealed class CountingTreeStore(ITreeStore inner) : ITreeStore
+{
+	public int Calls { get; set; }
+
+	public int TreesRead { get; private set; }
+
+	public ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		Calls++;
+		return inner.HasAsync(ids, ct);
+	}
+
+	public async Task<IReadOnlyDictionary<ObjectId, Tree>> GetManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default) =>
+		Counted(await inner.GetManyAsync(ids, ct));
+
+	public async Task<IReadOnlyDictionary<ObjectId, Tree>> GetSubtreesAsync(ObjectId root, int depth, int limit, CancellationToken ct = default) =>
+		Counted(await inner.GetSubtreesAsync(root, depth, limit, ct));
+
+	public async Task<IReadOnlyDictionary<ObjectId, Tree>> GetPathAsync(ObjectId root, IReadOnlyList<string> names, CancellationToken ct = default) =>
+		Counted(await inner.GetPathAsync(root, names, ct));
+
+	public Task PutManyAsync(IReadOnlyList<(ObjectId Id, Tree Tree)> trees, CancellationToken ct = default)
+	{
+		Calls++;
+		return inner.PutManyAsync(trees, ct);
+	}
+
+	private IReadOnlyDictionary<ObjectId, Tree> Counted(IReadOnlyDictionary<ObjectId, Tree> trees)
+	{
+		Calls++;
+		TreesRead += trees.Count;
+		return trees;
 	}
 }

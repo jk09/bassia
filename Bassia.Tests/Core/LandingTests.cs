@@ -249,7 +249,7 @@ public class LandingTests
 		Assert.Equal(["src/a.cs"], (await repo.Paths.ChangedSinceAsync("src", 1).ToListAsync()).Select(version => version.Path));
 
 		var rebuilt = new MemoryPathIndex();
-		var replica = new Repository(repo.Objects, repo.Views, rebuilt, repo.Leases, TestRepo.SmallChunks);
+		var replica = new Repository(repo.Objects, repo.Views, rebuilt, repo.Leases, TestRepo.SmallChunks, repo.TreeStore);
 		await replica.EnsureIndexedAsync(await replica.GetMainAsync());
 		Assert.Equal(seq, await rebuilt.IndexedSeqAsync());
 		Assert.Equal((await repo.Paths.GetAsync("src/b/c.cs", seq))!.Leaf, (await rebuilt.GetAsync("src/b/c.cs", seq))!.Leaf);

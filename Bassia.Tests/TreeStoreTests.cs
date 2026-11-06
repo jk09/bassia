@@ -216,7 +216,7 @@ public sealed class TreeStoreTests
 		}
 
 		var blobs = new MemoryObjectStore();
-		var old = new TestRepo(blobs);
+		var old = new TestRepo(blobs, new ObjectBackedTreeStore(blobs));
 		await old.Repo.InitializeAsync("test");
 		await old.CommitAsync(new Dictionary<string, string?> { ["src/a.txt"] = "a\n", ["src/lib/b.txt"] = "b\n" });
 		await old.CommitAsync(new Dictionary<string, string?> { ["src/a.txt"] = "a2\n", ["docs/c.md"] = "c\n" }, "second");
@@ -255,41 +255,6 @@ public sealed class TreeStoreTests
 		Assert.Single(await clone.GetManyAsync([leaf.Id]));
 		Assert.Equal(2, (await clone.GetPathAsync(root.Id, ["d"])).Count);
 		Assert.Equal(0, server.Calls);
-	}
-
-	private sealed class CountingTreeStore(ITreeStore inner) : ITreeStore
-	{
-		public int Calls { get; set; }
-
-		public ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
-		{
-			Calls++;
-			return inner.HasAsync(ids, ct);
-		}
-
-		public Task<IReadOnlyDictionary<ObjectId, Tree>> GetManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
-		{
-			Calls++;
-			return inner.GetManyAsync(ids, ct);
-		}
-
-		public Task<IReadOnlyDictionary<ObjectId, Tree>> GetSubtreesAsync(ObjectId root, int depth, int limit, CancellationToken ct = default)
-		{
-			Calls++;
-			return inner.GetSubtreesAsync(root, depth, limit, ct);
-		}
-
-		public Task<IReadOnlyDictionary<ObjectId, Tree>> GetPathAsync(ObjectId root, IReadOnlyList<string> names, CancellationToken ct = default)
-		{
-			Calls++;
-			return inner.GetPathAsync(root, names, ct);
-		}
-
-		public Task PutManyAsync(IReadOnlyList<(ObjectId Id, Tree Tree)> trees, CancellationToken ct = default)
-		{
-			Calls++;
-			return inner.PutManyAsync(trees, ct);
-		}
 	}
 }
 

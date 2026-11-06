@@ -143,6 +143,10 @@ jobs:
           New-Item -ItemType Directory -Path 'R:\bassia-tests' | Out-Null
           'BASSIA_TEST_DEVDRIVE_DIR=R:\bassia-tests' | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
+      - name: Start a local PostgreSQL
+        shell: pwsh
+        run: ./scripts/Start-CiPostgres.ps1
+
       - name: Build
         run: dotnet build --configuration Release
 
@@ -311,6 +315,10 @@ jobs:
           # A tag builds as the release (v1.2.0); anything else as <branch>-<short commit>.
           PACKAGE_REF: ${{ github.ref_type == 'tag' && github.ref_name || github.head_ref || github.ref_name }}
         run: ./packaging/New-BassiaPackage.ps1 -Rid ${{ matrix.rid }} -Ref $env:PACKAGE_REF -OutputDirectory dist
+
+      - name: Start a local PostgreSQL
+        shell: pwsh
+        run: ./scripts/Start-CiPostgres.ps1
 
       - name: Install and check the package
         shell: pwsh
