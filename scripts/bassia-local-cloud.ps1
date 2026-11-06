@@ -665,7 +665,7 @@ function Invoke-Smoke {
 		Stop-Process -Id $serverProcess.Id -Force
 		$serverProcess.WaitForExit()
 		$scrub = & $serverExe scrub -data (Join-Path $temp 'server') @serverArgs 2>&1
-		$checked = [regex]::Match(($scrub -join "`n"), 'checked (\d+) blobs: (\d+) corrupt, (\d+) unreadable')
+		$checked = [regex]::Match(($scrub -join "`n"), 'checked (\d+) blobs(?: and \d+ trees)?: (\d+) corrupt, (\d+) unreadable')
 		Assert-Check 'Azurite holds every object, intact (scrub)' ($LASTEXITCODE -eq 0 -and $checked.Success -and [int] $checked.Groups[1].Value -gt 0) ($scrub -join ' ')
 		$passed = $true
 	}
