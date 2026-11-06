@@ -188,6 +188,51 @@ execute as cloud jobs (Azure Container Apps) with their output streamed live - s
 People sign in with Microsoft Entra ID; pages follow the monorepo live. `deploy/azure` deploys the server, Studio and the
 run job to Azure with Terraform in one command (feature record `bassia-681e8902`).
 
+![Overview: mainline's seq, open workspaces and the latest landings.](docs/images/studio-overview.png)
+*Overview: mainline's seq, open workspaces and the latest landings.*
+
+![Depot browser: mainline's tree at any seq, and a file's content.](docs/images/studio-depot.png)
+*Depot browser: mainline's tree at any seq, and a file's content.*
+
+![A file's history: the landings that changed it.](docs/images/studio-file-history.png)
+*A file's history: the landings that changed it.*
+
+![Mainline log, by seq.](docs/images/studio-log.png)
+*Mainline log, by seq.*
+
+![A landing's commit, intent and unified diff.](docs/images/studio-landing-diff.png)
+*A landing's commit, intent and unified diff.*
+
+![The same diff, side by side.](docs/images/studio-diff-side-by-side.png)
+*The same diff, side by side.*
+
+![Workspaces: open ones, with their base and intent.](docs/images/studio-workspaces.png)
+*Workspaces: open ones, with their base and intent.*
+
+![A workspace: Check, Land, Sync, Undo, Describe, stored conflicts, changes and the operation log with Restore.](docs/images/studio-workspace.png)
+*A workspace: Check, Land, Sync, Undo, Describe, stored conflicts, changes and the operation log with Restore.*
+
+![Resolving a stored conflict by editing the merged text.](docs/images/studio-conflict-editor.png)
+*Resolving a stored conflict by editing the merged text.*
+
+![A workspace's files: browse, edit, add, rename and delete in the browser.](docs/images/studio-workspace-files.png)
+*A workspace's files: browse, edit, add, rename and delete in the browser.*
+
+![Conflicts: workspaces that cannot land now, overlapping paths and hot paths.](docs/images/studio-conflicts.png)
+*Conflicts: workspaces that cannot land now, overlapping paths and hot paths.*
+
+![Leases: live leases, acquire and release.](docs/images/studio-leases.png)
+*Leases: live leases, acquire and release.*
+
+![Agentic runs, with their status.](docs/images/studio-runs.png)
+*Agentic runs, with their status.*
+
+![Starting a run: prompt or command, workspace, leases and land-when-done.](docs/images/studio-new-run.png)
+*Starting a run: prompt or command, workspace, leases and land-when-done.*
+
+![A run's page: live output, Stop, Land, Replay on mainline and Discard.](docs/images/studio-run.png)
+*A run's page: live output, Stop, Land, Replay on mainline and Discard.*
+
 ## A CLI made for agents
 
 Every command answers in TOML (`-human` for Markdown), with exit codes 0, 1 and 2. `bassia help -all` teaches an agent
