@@ -354,13 +354,15 @@ export continues from there.
 
 ## Bassia server
 
-`bassia-server` serves one monorepo to many clients and agents:
+`bassia-server` serves one monorepo to many clients and agents. It keeps heads, the path index and leases in
+PostgreSQL, so `-postgres <connection string>` (or `BASSIA_SERVER_POSTGRES`) is required:
 
 ```sh
-bassia-server -data /srv/bassia -url http://0.0.0.0:8080 -public-url https://bassia.example.com -token <shared-token>
-bassia-server -data /srv/bassia -storage s3 -bucket acme-bassia -region eu-central-1      # blobs on S3
-bassia-server gc -data /srv/bassia [-grace-hours 24] [-retention-days 14] [-dry-run]
-bassia-server scrub -data /srv/bassia [-sample 1000]
+bassia-server -data /srv/bassia -postgres "Host=db;Database=bassia;Username=bassia;Password=..." \
+  -url http://0.0.0.0:8080 -public-url https://bassia.example.com -token <shared-token>
+bassia-server -data /srv/bassia -postgres "<connection string>" -storage s3 -bucket acme-bassia -region eu-central-1   # blobs on S3
+bassia-server gc -data /srv/bassia -postgres "<connection string>" [-grace-hours 24] [-retention-days 14] [-dry-run]
+bassia-server scrub -data /srv/bassia -postgres "<connection string>" [-sample 1000]
 ```
 
 ### Azure: Blob Storage and Azure Database for PostgreSQL
@@ -371,7 +373,7 @@ leases in Azure Database for PostgreSQL (flexible server):
 ```sh
 bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https://bassia.example.com -token <shared-token> \
   -storage azure -azure-url https://acmebassia.blob.core.windows.net/bassia \
-  -state postgres -postgres "Host=acme-bassia.postgres.database.azure.com;Database=bassia;Username=bassia;Password=...;SSL Mode=Require"
+  -postgres "Host=acme-bassia.postgres.database.azure.com;Database=bassia;Username=bassia;Password=...;SSL Mode=Require"
 ```
 
 - **Blob Storage**: `-azure-url <container url>` authenticates with Microsoft Entra ID (`DefaultAzureCredential`: a
@@ -381,7 +383,7 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   and creates the container (`-azure-container`, default `bassia`) if it is missing. Objects are block blobs under
   `-azure-prefix` (default `objects/`), keyed by hash prefix. Chunks of 256 KiB and more move between clients and the
   container directly on SAS URLs valid for 30 minutes; the server never proxies them.
-- **PostgreSQL**: `-state postgres -postgres <connection string>` (PostgreSQL 13 or later). The tables (`bassia_heads`,
+- **PostgreSQL**: `-postgres <connection string>` (PostgreSQL 13 or later), the same as on any server. The tables (`bassia_heads`,
   `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, sequence `bassia_fencing`) are created on start.
   Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
   transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
@@ -390,7 +392,7 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   sets read only the history after their seq, and a directory listing skips from child to child: none of them grows
   with the size of the monorepo's history.
 - Every switch also comes from its environment variable (`BASSIA_SERVER_STORAGE`, `BASSIA_SERVER_AZURE_URL`,
-  `BASSIA_SERVER_AZURE_CONNECTION`, `BASSIA_SERVER_STATE`, `BASSIA_SERVER_POSTGRES`, ...). `bassia-server gc` and `scrub`
+  `BASSIA_SERVER_AZURE_CONNECTION`, `BASSIA_SERVER_POSTGRES`, ...). `bassia-server gc` and `scrub`
   run against the same backends.
 
 ### Client sync: what a client downloads and uploads
@@ -408,9 +410,12 @@ workspace on the machine: objects never change).
 Replies (JSON, object batches) are compressed (Brotli or gzip) when the client accepts it. Every object read from
 the server is checked against its id before it is cached.
 
-The data folder holds `state.db` (SQLite: heads, path index, leases) and, with the default `-storage disk`, the blob
-container `objects/` - a local-disk stand-in for cloud blob storage, laid out by hash prefix, so a server and all of
-its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
+The state - heads, path index and leases - lives in PostgreSQL only. SQLite was removed from the server (local
+monorepos made by `bassia init` still keep their state in SQLite); `-state postgres` is still accepted, any other
+`-state` is refused, and a data folder still holding an earlier server's `state.db` is refused at start, because that
+state is not migrated: move the file away to start on PostgreSQL. The data folder holds the key that signs blob URLs
+and, with the default `-storage disk`, the blob container `objects/` - a local-disk stand-in for cloud blob storage,
+laid out by hash prefix, so a server and its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
 Authentication is out of scope for this design: `-token` sets one shared bearer token for the API and the dashboard
 (`?token=<token>` once in a browser sets a cookie).
 
@@ -623,7 +628,7 @@ Bassia has four projects; each depends only on the ones before it.
      implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
      them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
-   may use (`Stores`: `SqliteState` and `PostgresState` for heads, path index and leases; `S3ObjectStore` and
+   may use (`Stores`: `SqliteState` (a local monorepo) and `PostgresState` (`bassia-server`) for heads, path index and leases; `S3ObjectStore` and
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
    (`Platform`), and the dashboard (`Web`).
@@ -631,7 +636,7 @@ Bassia has four projects; each depends only on the ones before it.
    the watch stream and the dashboard.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
    disk, garbage collection), the store contract over memory and SQLite, the CLI in-process on local monorepos, the
-   server in-process with clients over HTTP, and git interop.
+   server in-process with clients over HTTP (on PostgreSQL), and git interop.
 
 
 ## Build
@@ -659,7 +664,7 @@ release when a `v<semver>` tag is pushed. Build one locally with `./packaging/Ne
 dotnet test
 ```
 
-Everything runs without a network or a cloud account. `Bassia.Tests/Core` tests the version core on the in-memory
+Everything runs without a network or a cloud account; the tests that start a server need a PostgreSQL. `Bassia.Tests/Core` tests the version core on the in-memory
 stores: encoding and ids, chunking, property tests over the tree algebra (diff then apply reproduces the tree, merge
 identities, equal-subtree pruning), every landing case and conflict policy, strict mode, stacked workspaces, sync,
 undo and restore, the path index and its rebuild from the operation log, leases and fencing, a swarm of concurrent
@@ -667,9 +672,11 @@ agents landing through several landing services, a replay landing with the origi
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` holds the in-memory and SQLite
 stores to the same contract. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
-`bassia-server` in the test process over the local-disk blob storage and runs clients and raw HTTP clients against it: the
+`bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, and every dashboard page.
+Every test that starts a server (`ServerTests`, the Studio tests, `SyncEfficiencyTests` and the Azurite integration
+tests) needs PostgreSQL and is reported as skipped without `BASSIA_TEST_POSTGRES`.
 `PostgresStateTests`, `ObjectStoreContractTests` and `SyncEfficiencyTests` run against PostgreSQL
 (`BASSIA_TEST_POSTGRES`, a connection string; every test gets its own schema) and Azure Blob Storage
 (`BASSIA_TEST_AZURE_BLOB`, a connection string to Azurite; every test gets its own container) - CI provides both,
@@ -678,7 +685,7 @@ without them those tests check nothing. `SyncEfficiencyTests` counts the request
 second checkout and a snapshot, on the disk backend and on Azure + PostgreSQL, and runs two clients end to end on the
 latter.
 `AzuriteIntegrationTests` (`Category=Azurite`) runs the whole Azure path in one scenario. It starts a server on Azurite
-in a fresh container (with PostgreSQL state when `BASSIA_TEST_POSTGRES` is set). One client imports
+in a fresh container, with its state in PostgreSQL. One client imports
 `BASSIA_TEST_GIT_URL` (default `https://github.com/jk09/example.git`), and the test compares the imported files byte for
 byte with a git clone. Three clients then start eight agentic runs at once, each a separate `bassia agent start -land`
 process in a workspace of its own. The agents are a scripted stand-in that waits at a barrier until all have started,

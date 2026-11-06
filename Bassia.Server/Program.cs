@@ -6,9 +6,9 @@ using Bassia.Core.Version;
 /// <c>bassia-server</c>: runs the server, or a maintenance job over its data.
 /// <code>
 /// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t>]
-///               [-storage disk|s3|azure ...] [-state sqlite|postgres ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
-/// bassia-server gc -data <folder> [-grace-hours 24] [-retention-days 14] [-dry-run]
-/// bassia-server scrub -data <folder> [-sample <n>]
+///               -postgres <connection string> [-storage disk|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
+/// bassia-server gc -data <folder> -postgres <connection string> [-grace-hours 24] [-retention-days 14] [-dry-run]
+/// bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]
 /// </code>
 /// Every switch can also come from a <c>BASSIA_SERVER_*</c> environment variable (containers).
 /// </summary>
@@ -16,12 +16,12 @@ internal static class Program
 {
 	private const string Usage = """
 		Usage:
-		  bassia-server -data <folder> [-url <url>] [-public-url <url>] [-token <token>]
+		  bassia-server -data <folder> -postgres <connection string> [-url <url>] [-public-url <url>] [-token <token>]
 		                [-storage disk | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
-		                [-state sqlite | -state postgres -postgres <connection string>]
 		                [-semantic-driver <command>|off] [-validate <command>]        run the server
-		  bassia-server gc -data <folder> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
-		  bassia-server scrub -data <folder> [-sample <n>]                                      re-hash stored blobs
+		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
+		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs
+		The state (heads, path index, leases) lives in PostgreSQL; -data holds the signing key and the local-disk blobs.
 		Switches may also come from BASSIA_SERVER_<NAME> environment variables (BASSIA_SERVER_DATA, BASSIA_SERVER_TOKEN, ...).
 		""";
 

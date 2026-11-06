@@ -159,17 +159,17 @@ side, instead of as a wall of hunks.
 ## Client-server, testable on a laptop
 
 ```sh
-bassia-server -data /srv/bassia -url http://0.0.0.0:8080 -token <token>          # blobs on local disk
-bassia-server -data /srv/bassia -storage s3 -bucket acme-bassia -token <token>   # blobs on S3
-bassia-server -data /srv/bassia -storage azure -azure-url https://acme.blob.core.windows.net/bassia -state postgres -postgres "<connection string>"
+bassia-server -data /srv/bassia -postgres "<connection string>" -url http://0.0.0.0:8080 -token <token>          # blobs on local disk
+bassia-server -data /srv/bassia -postgres "<connection string>" -storage s3 -bucket acme-bassia -token <token>   # blobs on S3
+bassia-server -data /srv/bassia -postgres "<connection string>" -storage azure -azure-url https://acme.blob.core.windows.net/bassia
 bassia clone -from http://bassia.example.com:8080 -path ~/acme -token <token>         # a client
 ```
 
 The version core reaches storage only through four small interfaces - objects, heads, the path index and leases - so
 the same core runs in a local monorepo (`bassia init`: a local-disk blob container and SQLite) and in `bassia-server`
-(the same stores, S3, or Azure Blob Storage with Azure Database for PostgreSQL). A client talks to the server and
+(the local-disk blob container, S3 or Azure Blob Storage; its state always in PostgreSQL, such as Azure Database for PostgreSQL). A client talks to the server and
 caches every object it reads, in batches, for all its workspaces. Large chunks travel between
-clients and blob storage on signed URLs; the server never proxies file bytes. Every test runs without a cloud account.
+clients and blob storage on signed URLs; the server never proxies file bytes. Every test runs without a cloud account; the server's tests need a local PostgreSQL (`BASSIA_TEST_POSTGRES`).
 
 ## A dashboard you look at
 

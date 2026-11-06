@@ -17,16 +17,17 @@ instead of merging text.
 
 The version core (`Bassia.Core`) reaches storage only through four traits - `IObjectStore`, `IViewStore`, `IPathIndex`,
 `ILeaseStore` - and may not reference an HTTP client, a cloud SDK or a database driver. The same core runs in a local
-monorepo (a local-disk blob store standing in for S3, and SQLite) and in `bassia-server`; a clone of a server uses
+monorepo (a local-disk blob store standing in for S3, and SQLite) and in `bassia-server` (state in PostgreSQL only); a clone of a server uses
 remote implementations of the traits. See "Architecture" in `docs/reference.md`.
 
 ## Tech stack
 
 .NET 10 / C#: the `bassia` command-line frontend (TOML results, `-human` Markdown), `bassia-server` (ASP.NET Core,
-SQLite, the local-disk blob store or S3 via the AWS SDK, OpenTelemetry metrics), and a server-rendered web dashboard.
+PostgreSQL, the local-disk blob store or S3 via the AWS SDK, OpenTelemetry metrics), SQLite for local monorepos, and a server-rendered web dashboard.
 BLAKE3 (`Blake3` package) and canonical CBOR (`System.Formats.Cbor`) define object ids. A separately installed `git` is
 needed only for `bassia import` and `bassia export`; weave's `weave-driver` is the default semantic merge driver.
-Tests (xUnit) run without a network or a cloud account.
+Tests (xUnit) run without a network or a cloud account; those that start a `bassia-server` need a
+PostgreSQL (`BASSIA_TEST_POSTGRES`) and are skipped without one.
 
 ## Agentic workflow
 

@@ -57,7 +57,7 @@ Other switches: `-BlobPort`, `-PostgresPort` (on `up`), `-Shell pwsh|sh|cmd` (on
    tests pass without checking anything. Report the pass/fail counts and any failing test with its message.
 5. **Report** the mode, the ports, each smoke check and the test counts. Show `env -Shell <the user's shell>` if the
    user wants to run the tests or a server against the emulators themselves (`BASSIA_SERVER_*` configures
-   `bassia-server -storage azure -state postgres`).
+   `bassia-server -storage azure -postgres <connection string>`).
 
 Leave the emulators running unless the user asked to stop them: `down` stops them and keeps their data; `down -Purge`
 also deletes it. The npm package cache in the state folder is kept either way.

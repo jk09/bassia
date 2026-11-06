@@ -32,6 +32,9 @@ internal sealed class ServerApp : IAsyncDisposable
 	private static readonly Counter<long> BytesServed = Meter.CreateCounter<long>("bassia.bytes.served", description: "Object bytes served by the server itself");
 	private static readonly Counter<long> Redirects = Meter.CreateCounter<long>("bassia.reads.redirected", description: "Reads sent to blob storage on a signed URL");
 
+	/// <summary>Where a bassia-server on SQLite kept its state, in the data folder.</summary>
+	private const string LegacyStateFile = "state.db";
+
 	private readonly ServerOptions options;
 	private readonly byte[] signingKey;
 	private readonly List<Channel<Api.WatchEvent>> watchers = [];
@@ -42,13 +45,15 @@ internal sealed class ServerApp : IAsyncDisposable
 	{
 		this.options = options;
 		Directory.CreateDirectory(options.Data);
-		signingKey = LoadKey(Path.Combine(options.Data, "blob.key"));
-		State = options.State.ToLowerInvariant() switch
+		if (File.Exists(Path.Combine(options.Data, LegacyStateFile)))
 		{
-			"sqlite" => new SqliteState(Path.Combine(options.Data, "state.db")),
-			"postgres" => new PostgresState(options.Postgres ?? throw new ArgumentException("-postgres <connection string> is required with -state postgres.")),
-			var other => throw new ArgumentException($"-state is sqlite or postgres, not '{other}'.")
-		};
+			throw new ArgumentException($"'{Path.Combine(options.Data, LegacyStateFile)}' holds the state of an earlier bassia-server on SQLite, " +
+				"which the server no longer reads and does not migrate to PostgreSQL. Move it out of the data folder to start on PostgreSQL.");
+		}
+
+		signingKey = LoadKey(Path.Combine(options.Data, "blob.key"));
+		State = new PostgresState(options.Postgres
+			?? throw new ArgumentException("-postgres <connection string> is required (or BASSIA_SERVER_POSTGRES): bassia-server keeps its state in PostgreSQL."));
 		if (options.Storage.Equals("azure", StringComparison.OrdinalIgnoreCase))
 		{
 			var azure = options.AzureConnection is { } connection

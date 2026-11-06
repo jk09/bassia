@@ -25,7 +25,7 @@ public sealed class StudioAuthTests : IAsyncLifetime
 
 	public async Task InitializeAsync()
 	{
-		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384) });
+		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384) });
 		await server.StartAsync();
 		studio = new StudioApp(new StudioOptions
 		{
@@ -68,7 +68,7 @@ public sealed class StudioAuthTests : IAsyncLifetime
 		return options.TicketDataFormat.Protect(ticket);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Anonymous_IsSentToSignIn_ButHealthAndJobReportsAreNot()
 	{
 		using var http = Client();
@@ -84,7 +84,7 @@ public sealed class StudioAuthTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Unauthorized, report.StatusCode);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task SignedIn_ActsAsThePersonWithTheirRole()
 	{
 		var cookie = SessionCookie(new Claim("preferred_username", "ann@contoso.example"), new Claim("roles", "Reader"), new Claim("roles", "Contributor"));
@@ -103,7 +103,7 @@ public sealed class StudioAuthTests : IAsyncLifetime
 		Assert.Contains("is a reader and cannot create workspaces", readerBody);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public void Claims_MapToTheStrongestAppRole()
 	{
 		ClaimsPrincipal Principal(bool authenticated, params Claim[] claims) => new(new ClaimsIdentity(claims, authenticated ? "test" : null));
@@ -114,7 +114,7 @@ public sealed class StudioAuthTests : IAsyncLifetime
 		Assert.Equal(StudioRole.Contributor, StudioClaims.From(Principal(true, new Claim(ClaimTypes.Role, "Contributor"))).Role);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Entra_NeedsATenantAndAClient()
 	{
 		await using var broken = new StudioApp(new StudioOptions { Server = server.Address!, Url = "http://127.0.0.1:0", Auth = "entra", EntraClientId = "x" });

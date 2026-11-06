@@ -11,7 +11,7 @@ using static Bassia.Tests.TestEnvironment;
 
 /// <summary>
 /// The Azure backend end to end (bassia-07d97c3d). A <c>bassia-server</c> keeps its objects in Azure Blob Storage on
-/// Azurite (and its state in PostgreSQL when <c>BASSIA_TEST_POSTGRES</c> is set). A client imports a git repository
+/// Azurite and its state in PostgreSQL (<c>BASSIA_TEST_POSTGRES</c>; skipped without it). A client imports a git repository
 /// (<c>BASSIA_TEST_GIT_URL</c>, by default jk09/example on GitHub), and three clients run agentic edits in parallel, each
 /// in its own workspace and as its own <c>bassia</c> process. Disjoint edits land, a conflicting one needs a replay and
 /// then lands with its change id, and mainline, a fresh workspace and the blob container agree.
@@ -48,7 +48,7 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 	/// <summary>One agentic edit: which client runs it, its workspace, and what it writes (appends, when <c>Append</c>).</summary>
 	private sealed record Edit(string Client, string Name, string File, string Line, bool Append);
 
-	[Fact]
+	[PostgresFact]
 	public async Task AMonorepoOnAzurite_ImportsFromGit_AndLandsParallelAgenticEditsFromSeveralClients()
 	{
 		if (Backends.AzureBlob is not { } azure)
@@ -64,7 +64,7 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 		// ----- the server on Azurite, in a container of its own -----
 
 		var container = "it" + Guid.NewGuid().ToString("N")[..12];
-		var postgres = Backends.FreshPostgres();
+		var postgres = Backends.RequiredPostgres();
 		var options = new ServerOptions
 		{
 			Data = temp.Combine("server"),
@@ -73,12 +73,11 @@ public sealed class AzuriteIntegrationTests(ITestOutputHelper output) : IAsyncLi
 			Storage = "azure",
 			AzureConnection = azure,
 			AzureContainer = container,
-			State = postgres is null ? "sqlite" : "postgres",
 			Postgres = postgres
 		};
 		await using var server = new ServerApp(options);
 		await server.StartAsync();
-		output.WriteLine($"Server {server.Address}: blobs in Azurite container '{container}', state in {options.State}.");
+		output.WriteLine($"Server {server.Address}: blobs in Azurite container '{container}', state in PostgreSQL.");
 
 		// ----- several clients, each a folder connected to the server -----
 

@@ -45,7 +45,7 @@ public sealed class StudioTests : IAsyncLifetime
 	public async Task InitializeAsync()
 	{
 		var chunks = new ChunkParameters(1024, 4096, 16384);
-		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Url = "http://127.0.0.1:0", Token = Token, Chunks = chunks });
+		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", Token = Token, Chunks = chunks });
 		await server.StartAsync();
 		await SeedAsync(chunks);
 		studio = new StudioApp(new StudioOptions { Server = server.Address!, Token = Token, Url = "http://127.0.0.1:0", Cache = temp.Combine("cache"), Label = "test" });
@@ -108,7 +108,7 @@ public sealed class StudioTests : IAsyncLifetime
 		return WebUtility.HtmlDecode(body);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Overview_ShowsMainlineAndRecentLandings()
 	{
 		var page = await PageAsync("/");
@@ -118,7 +118,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("Greet the moon", page);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Depot_ListsFoldersAndShowsFileContentAtAnySeq()
 	{
 		var root = await PageAsync("/depot");
@@ -139,7 +139,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("'nope.txt' does not exist", missing);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Depot_ShowsPathHistoryNewestFirst()
 	{
 		var page = await PageAsync("/depot?path=src/hello.txt&tab=history");
@@ -148,7 +148,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.True(moon > 0 && greeter > moon, "history lists the newer landing first");
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Raw_DownloadsFileContent()
 	{
 		Assert.Equal([0, 1, 2, 0, 255], await http.GetByteArrayAsync("/raw?path=assets/logo.bin"));
@@ -156,7 +156,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync("/raw?path=src")).StatusCode);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Log_ListsLandingsAndALandingShowsItsDiff()
 	{
 		var log = await PageAsync("/log");
@@ -176,7 +176,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("moon", split);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Workspaces_ListOpenWorkAndShowItsChanges()
 	{
 		var list = await PageAsync("/workspaces");
@@ -189,7 +189,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("carol", detail);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task UnreachableServer_IsAMessageNotACrash()
 	{
 		await using var orphan = new StudioApp(new StudioOptions { Server = "http://127.0.0.1:9", Url = "http://127.0.0.1:0", Cache = temp.Combine("cache2") });
@@ -199,7 +199,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("unreachable", page);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public void SplitDiff_PairsChangedLinesAndFoldsUnchangedRuns()
 	{
 		var old = string.Join('\n', Enumerable.Range(1, 20).Select(i => $"line {i}")) + "\n";
@@ -212,7 +212,7 @@ public sealed class StudioTests : IAsyncLifetime
 
 	// ----- slice (b): workspaces, editing, landing, conflicts, leases -----
 
-	[Fact]
+	[PostgresFact]
 	public async Task Actions_CreateEditRenameDeleteAndLand()
 	{
 		var dana = As("dana");
@@ -247,7 +247,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("delete notes/tmp.txt", operations);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Actions_StaleEditIsRefusedAndLosesNothing()
 	{
 		var erin = As("erin");
@@ -263,7 +263,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Equal("two\n", Encoding.UTF8.GetString(await server.Repo.Objects.ReadContentAsync(leaf!)));
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Actions_SyncStoresConflictsThatResolveToLand()
 	{
 		var fred = As("fred");
@@ -296,7 +296,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Equal("hello\nsun\nstars\n", await MainlineTextAsync("src/hello.txt"));
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Actions_UndoRestoreAndAbandon()
 	{
 		var hal = As("hal");
@@ -315,7 +315,7 @@ public sealed class StudioTests : IAsyncLifetime
 		await Assert.ThrowsAsync<VersionException>(() => hal.SaveTextAsync(ws.Id, "z.txt", "3\n", null));
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Actions_StackAndClone()
 	{
 		var ivy = As("ivy");
@@ -334,7 +334,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.NotEqual(parentCommit.ChangeId, cloneCommit.ChangeId);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Roles_ReadersReadContributorsOwnAdminsAll()
 	{
 		var reader = As("rita", StudioRole.Reader);
@@ -356,7 +356,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Equal(LandOutcome.Landed, (await admin.LandAsync(workspaceId)).Outcome);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Leases_ExclusiveLeaseBlocksOthersAndLandsWithItsHolder()
 	{
 		var uma = As("uma");
@@ -376,7 +376,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("locked", page);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Parity_StudioAndCliMakeTheSameChange()
 	{
 		var clone = temp.Combine("clone");
@@ -407,7 +407,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Equal(studioCheck.Outcome, cliCheck["outcome"]);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Pages_ForWorkspaceManagementRender()
 	{
 		var newPage = await PageAsync("/workspaces/new?on=open-work");
@@ -436,7 +436,7 @@ public sealed class StudioTests : IAsyncLifetime
 		Assert.Contains("src/hello.txt", conflicts);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Watch_TellsStudioAboutLandingsAsTheyHappen()
 	{
 		var seen = new TaskCompletionSource<Bassia.Stores.Api.WatchEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
