@@ -34,7 +34,7 @@ internal static class WebCommand
 			return (key.Key, key.Key == "server.token" && value.Length > 0 ? "(set)" : value, source);
 		}).ToList();
 		var scope = new DashboardScope(monorepo.Repo, monorepo.Landing, monorepo.IsRemote ? $"{monorepo.Root} (clone of {monorepo.Url})" : monorepo.Root,
-			run => runner.ReadLogAsync(run), Settings: settings);
+			run => runner.ReadLogAsync(run), Settings: settings, Overview: monorepo.Overview);
 		await using var app = new Dashboard(_ => Task.FromResult(scope)).Build(url);
 		await app.StartAsync();
 		Console.Error.WriteLine($"bassia: dashboard for '{monorepo.Root}' at {url} (Ctrl-C stops it).");

@@ -430,6 +430,15 @@ public sealed class StudioTests : IAsyncLifetime
 		var theirs = await gina.CreateAsync("first-in");
 		await gina.SaveTextAsync(theirs.Id, "src/hello.txt", "y\n", (await LeafAsync(server.Repo, theirs, "src/hello.txt"))!.Id);
 		await gina.LandAsync(theirs.Id);
+
+		// The conflicts page reads the server's live overview, which the server reconciles in the background after the landing.
+		var clock = System.Diagnostics.Stopwatch.StartNew();
+		while (!server.Reconciling.Idle)
+		{
+			Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), "the server's reconciliation did not settle");
+			await Task.Delay(20);
+		}
+
 		var conflicts = await PageAsync("/conflicts");
 		Assert.Contains("blocked", conflicts);
 		Assert.Contains("needs-replay", conflicts);

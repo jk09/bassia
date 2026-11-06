@@ -86,6 +86,10 @@ internal sealed class ServerApp : IAsyncDisposable
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
 		Landing.Landed += landed => Publish(new Api.WatchEvent("landed", landed.Seq, landed.Prefixes, landed.Workspace, landed.Time));
+		Reconciling = new ReconcileQueue(Landing.Reconciler) { Log = message => Console.Error.WriteLine(message) };
+		Landing.Landed += landed => Reconciling.Landed(landed.Seq, landed.Workspace);
+		Landing.Reconciler.Reconciled += candidate =>
+			Publish(new Api.WatchEvent("reconciled", candidate.MainSeq, null, candidate.Workspace, candidate.Time));
 	}
 
 	private static readonly TimeSpan UrlLifetime = TimeSpan.FromMinutes(30);
@@ -106,6 +110,9 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	public LandingService Landing { get; }
 
+	/// <summary>Keeps open workspaces reconciled with mainline in the background (bassia-f162a7fd).</summary>
+	internal ReconcileQueue Reconciling { get; }
+
 	/// <summary>Where the server listens once started (the actual port when the options asked for port 0).</summary>
 	public string? Address { get; private set; }
 
@@ -119,6 +126,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		await Repo.InitializeAsync("bassia-server");
+		Reconciling.Start();
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
 		builder.Logging.ClearProviders();
 		builder.WebHost.UseUrls(options.Url);
@@ -138,7 +146,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		app = builder.Build();
 		app.UseResponseCompression();
 		var dashboard = new Dashboard(context => Task.FromResult(new DashboardScope(Repo, Landing, $"bassia-server · {options.Data}", ReadLogAsync,
-			Events: "/events")));
+			Events: "/events", Overview: Landing.Reconciler)));
 		app.Use(AuthorizeAsync);
 		app.UseWhen(context => Dashboard.IsDashboardPath(context.Request.Path), branch => branch.Use(dashboard.ServeAsync));
 		dashboard.Map(app);
@@ -235,6 +243,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			if (update.Success && name.IsWorkspace)
 			{
 				server.Publish(new Api.WatchEvent("workspace", Workspace: name.WorkspaceId, Time: DateTimeOffset.UtcNow));
+				server.Reconciling?.Workspace(name.WorkspaceId);
 			}
 
 			return update;
@@ -353,7 +362,9 @@ internal sealed class ServerApp : IAsyncDisposable
 		{
 			var body = await BodyAsync<Api.DeleteHeadRequest>(request);
 			var name = new HeadName(body.Name);
-			return name == HeadName.Main ? Error(StatusCodes.Status403Forbidden, "Mainline cannot be deleted.") : Json(new Api.AdvanceReply(await State.DeleteHeadAsync(name, body.Expected), null));
+			return name == HeadName.Main ? Error(StatusCodes.Status403Forbidden, "Mainline cannot be deleted.")
+				: name.IsCandidate ? Error(StatusCodes.Status403Forbidden, "Reconciled candidates are kept by the server.")
+				: Json(new Api.AdvanceReply(await State.DeleteHeadAsync(name, body.Expected), null));
 		});
 
 		// Objects.
@@ -523,9 +534,12 @@ internal sealed class ServerApp : IAsyncDisposable
 		{
 			var body = await BodyAsync<Api.LandRequestDto>(request);
 			var result = await Landing.LandAsync(body.ToRequest());
-			Landings.Add(1, new KeyValuePair<string, object?>("outcome", result.Outcome));
+			Landings.Add(1, new KeyValuePair<string, object?>("outcome", result.Outcome), new KeyValuePair<string, object?>("reconciled", result.Reconciled));
 			return Json(result);
 		});
+
+		// The live conflict overview: every open workspace reconciled with mainline, their overlaps and the hot paths.
+		api.MapGet("/conflicts", async () => Json(await Landing.Reconciler.OverviewAsync()));
 
 		// Signed blob access: the disk store's stand-in for presigned cloud URLs.
 		web.MapGet("/blobs/{id}", async (string id, HttpRequest request, HttpResponse response) =>
@@ -637,5 +651,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			await app.StopAsync();
 			await app.DisposeAsync();
 		}
+
+		await Reconciling.DisposeAsync();
 	}
 }

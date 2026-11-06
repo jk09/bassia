@@ -57,6 +57,8 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 
 	public Task<View> ReadViewAsync(ObjectId id, CancellationToken ct = default) => ReadAsync<View>(id, ct);
 
+	public Task<Candidate> ReadCandidateAsync(ObjectId id, CancellationToken ct = default) => ReadAsync<Candidate>(id, ct);
+
 	/// <summary>The objects written inside <see cref="BatchAsync{T}"/>, sent together by <see cref="FlushAsync"/>.</summary>
 	private readonly AsyncLocal<List<(ObjectId Id, byte[] Bytes)>?> deferred = new();
 

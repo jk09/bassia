@@ -3,7 +3,8 @@
 
 <PageTitle>Conflicts · Bassia Studio</PageTitle>
 <h1>Conflicts</h1>
-<p class="muted">When two changes rewrote the same path, the policy in .bassia.toml decides: replay (re-run the task on the new mainline - agentic runs), merge text, merge semantically, or stop as a conflict. Open a workspace to sync it and resolve what is left.</p>
+<p class="muted">When two changes rewrote the same path, the policy in .bassia.toml decides: replay (re-run the task on the new mainline - agentic runs), merge text, merge semantically, or stop as a conflict. Open a workspace to sync it and resolve what is left.
+	The server reconciles every open workspace with mainline as its snapshots arrive, so this page is live.</p>
 <Banner Notice="@Notice" Error="@Error" />
 @if (rows.Count == 0 && Error is null)
 {
@@ -12,53 +13,71 @@
 @foreach (var row in rows)
 {
 	<section class="conflict">
-		<h3><a href="/workspaces/@Format.Q(row.State.Id)">@row.State.Name</a> <span class="muted">@row.State.Record.Owner</span>
-			<span class="st st-@row.Check.Outcome">@row.Check.Outcome</span></h3>
-		<div class="attn">@row.Check.Message</div>
-		@if (row.Check.Conflicts.Count > 0)
+		<h3><a href="/workspaces/@Format.Q(row.Workspace)">@row.Name</a> <span class="muted">@row.Owner</span>
+			<span class="st st-@row.Outcome">@row.Outcome</span>
+			@if (!row.Current) { <span class="muted" title="Its paths or commits moved since it was reconciled; the server is reconciling it again.">(reconciling)</span> }</h3>
+		<div class="attn">@row.Message</div>
+		@if (row.Conflicts.Count > 0)
 		{
-			<ConflictTable Conflicts="row.Check.Conflicts" />
+			<ConflictTable Conflicts="row.Conflicts" />
 		}
-		<p class="muted">@Next(row.Check.Outcome) @if (row.State.Record.Run is { } run) { <a href="/runs/@run.RunId">Open its run to replay it.</a> }</p>
+		<p class="muted">@Next(row.Outcome) @if (runs.TryGetValue(row.Workspace, out var run)) { <a href="/runs/@run">Open its run to replay it.</a> }</p>
 	</section>
+}
+<h2>Overlapping open workspaces</h2>
+@if (overlaps.Count == 0)
+{
+	<p class="notice">No two open workspaces change the same path.</p>
+}
+else
+{
+	<p class="muted">Paths two or more open workspaces change: whichever lands second will meet the first.</p>
+	<table class="list">
+		<tr><th>Path</th><th>Workspaces</th></tr>
+		@foreach (var overlap in overlaps)
+		{
+			<tr><td class="id">@overlap.Path</td>
+				<td>@for (var index = 0; index < overlap.Workspaces.Count; index++)
+					{
+						var id = overlap.Workspaces[index];
+						@if (index > 0) { <text>, </text> }
+						<a href="/workspaces/@Format.Q(id)">@names.GetValueOrDefault(id, id)</a>
+					}</td></tr>
+		}
+	</table>
 }
 @if (hot.Count > 0)
 {
 	<h2>Hot paths</h2>
 	<p class="muted">Paths that keep colliding are candidates for an exclusive <a href="/leases">lease</a>.</p>
 	<table class="list">
-		<tr><th>Path</th><th>Blocked workspaces</th></tr>
-		@foreach (var (path, count) in hot)
+		<tr><th>Path</th><th>Open workspaces</th><th>Conflicts</th><th>Refused landings</th></tr>
+		@foreach (var path in hot)
 		{
-			<tr><td class="id">@path</td><td>@count</td></tr>
+			<tr><td class="id">@path.Path</td><td>@path.Workspaces</td><td>@path.Conflicts</td><td>@path.Refused</td></tr>
 		}
 	</table>
 }
 
 @code {
-	private sealed record Row(WorkspaceState State, LandResult Check);
-
-	private List<Row> rows = [];
-	private List<(string Path, int Count)> hot = [];
+	private List<WorkspaceReconciliation> rows = [];
+	private List<PathOverlap> overlaps = [];
+	private List<HotPath> hot = [];
+	private Dictionary<string, string> names = [];
+	private Dictionary<string, string> runs = [];
 
 	protected override bool LiveUpdates => true;
 
 	protected override async Task LoadAsync()
 	{
 		var repo = await Client.OpenAsync();
-		var found = new List<Row>();
-		foreach (var state in await repo.ListWorkspacesAsync())
-		{
-			var check = await Actions.CheckAsync(state.Id);
-			if (check.Outcome is LandOutcome.NeedsReplay or LandOutcome.Conflict or LandOutcome.Rejected)
-			{
-				found.Add(new Row(state, check));
-			}
-		}
-
-		rows = found;
-		hot = found.SelectMany(row => row.Check.Conflicts.Select(conflict => conflict.Path)).GroupBy(path => path)
-			.Select(group => (group.Key, group.Count())).OrderByDescending(item => item.Item2).Take(20).ToList();
+		var overview = await Actions.OverviewAsync();
+		rows = overview.Workspaces.Where(row => row.Outcome is LandOutcome.NeedsReplay or LandOutcome.Conflict or LandOutcome.Rejected).ToList();
+		overlaps = overview.Overlaps.Take(50).ToList();
+		hot = overview.HotPaths.Take(20).ToList();
+		var open = await repo.ListWorkspacesAsync();
+		names = open.ToDictionary(state => state.Id, state => state.Name);
+		runs = open.Where(state => state.Record.Run is not null).ToDictionary(state => state.Id, state => state.Record.Run!.RunId);
 	}
 
 	private static string Next(string outcome) => outcome switch

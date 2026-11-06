@@ -71,11 +71,20 @@ public readonly record struct HeadName(string Value)
 
 	public const string WorkspacePrefix = "ws/";
 
+	/// <summary>Heads of reconciled candidates, <c>rc/&lt;workspace id&gt;</c>: they point at a Candidate, not an operation.</summary>
+	public const string CandidatePrefix = "rc/";
+
 	public static HeadName Workspace(string id) => new(WorkspacePrefix + id);
+
+	public static HeadName Candidate(string workspaceId) => new(CandidatePrefix + workspaceId);
 
 	public bool IsWorkspace => Value.StartsWith(WorkspacePrefix, StringComparison.Ordinal);
 
-	public string WorkspaceId => IsWorkspace ? Value[WorkspacePrefix.Length..] : throw new InvalidOperationException($"'{Value}' is not a workspace head.");
+	public bool IsCandidate => Value.StartsWith(CandidatePrefix, StringComparison.Ordinal);
+
+	public string WorkspaceId => IsWorkspace ? Value[WorkspacePrefix.Length..]
+		: IsCandidate ? Value[CandidatePrefix.Length..]
+		: throw new InvalidOperationException($"'{Value}' is not a workspace or candidate head.");
 
 	public override string ToString() => Value;
 }

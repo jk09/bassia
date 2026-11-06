@@ -194,6 +194,16 @@ public sealed class StudioActions(MonorepoClient client, StudioUser user)
 		return await client.Landing.LandAsync(new LandRequest(state.Id, DryRun: true, Agent: user.Name), ct);
 	}
 
+	/// <summary>
+	/// The live conflict overview the server keeps: every open workspace reconciled with mainline, their overlaps and
+	/// the hot paths, in one call instead of a dry run per workspace.
+	/// </summary>
+	public async Task<ConflictOverview> OverviewAsync(CancellationToken ct = default)
+	{
+		await OpenAsync(ct);
+		return await client.Overview.OverviewAsync(ct);
+	}
+
 	/// <summary>Lands the workspace on mainline, holding the leases its owner has on the paths it touches.</summary>
 	public async Task<LandResult> LandAsync(string workspace, CancellationToken ct = default)
 	{

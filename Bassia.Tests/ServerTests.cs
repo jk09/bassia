@@ -227,6 +227,64 @@ public sealed class ServerTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Forbidden, (await new HttpClient().GetAsync($"{Url}/blobs/{id.Hex}?op=get&exp=9999999999&sig=00")).StatusCode);
 	}
 
+	/// <summary>Waits until the server's background reconciliation has nothing left to do.</summary>
+	private async Task ReconciledAsync()
+	{
+		var clock = System.Diagnostics.Stopwatch.StartNew();
+		while (!server.Reconciling.Idle)
+		{
+			Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), "the server's reconciliation did not settle");
+			await Task.Delay(20);
+		}
+	}
+
+	[PostgresFact]
+	public async Task TheServer_ReconcilesSnapshotsAheadOfLanding_AndShowsTheOverviewLive()
+	{
+		var (repo, landing, connection) = Client();
+		using var _ = connection;
+		var service = new WorkspaceService(repo);
+		async Task<WorkspaceState> WorkspaceAsync(string name, params (string Path, string Text)[] files)
+		{
+			var ws = await service.CreateAsync(name, "agent-" + name);
+			var working = await repo.Objects.ReadCommitAsync(ws.Record.Working);
+			var tree = await repo.Trees.EditAsync(working.Tree,
+				await Task.WhenAll(files.Select(async file => new PathChange(file.Path, await repo.Objects.WriteContentAsync(Encoding.UTF8.GetBytes(file.Text))))));
+			return await service.SetTreeAsync(ws.Id, tree, "snapshot", null, null);
+		}
+
+		var a = await WorkspaceAsync("a", ("shared.txt", "a\n"), ("a.txt", "a\n"));
+		var b = await WorkspaceAsync("b", ("shared.txt", "b\n"));
+		await ReconciledAsync();
+
+		var overview = new RemoteConflictOverview(connection);
+		var rows = (await overview.OverviewAsync()).Workspaces.ToDictionary(row => row.Name);
+		Assert.True(rows["a"].Current);
+		Assert.Equal(LandOutcome.WouldLand, rows["a"].Outcome);
+		Assert.Equal(["shared.txt"], rows["b"].Overlaps);
+		Assert.Equal("shared.txt", Assert.Single((await overview.OverviewAsync()).Overlaps).Path);
+
+		var landed = await landing.LandAsync(new LandRequest(a.Id));
+		Assert.Equal(LandOutcome.Landed, landed.Outcome);
+		Assert.True(landed.Reconciled);
+
+		// The landing made b stale; the server reconciles it on its own and the overview shows the replay it needs.
+		await ReconciledAsync();
+		var after = await overview.OverviewAsync();
+		var row = Assert.Single(after.Workspaces);
+		Assert.Equal(b.Id, row.Workspace);
+		Assert.True(row.Current);
+		Assert.Equal(LandOutcome.NeedsReplay, row.Outcome);
+		Assert.Equal(landed.Seq, row.ReconciledSeq);
+		Assert.Contains(after.HotPaths, hot => hot.Path == "shared.txt");
+		Assert.Null(await server.Repo.Views.GetHeadAsync(HeadName.Candidate(a.Id)));
+
+		// Candidates are the server's: a client may neither move nor delete one.
+		var head = (await server.Repo.Views.GetHeadAsync(HeadName.Candidate(b.Id)))!.Value;
+		await Assert.ThrowsAsync<VersionException>(async () => await repo.Views.AdvanceHeadAsync(HeadName.Candidate(b.Id), head, head));
+		await Assert.ThrowsAsync<VersionException>(async () => await repo.Views.DeleteHeadAsync(HeadName.Candidate(b.Id), head));
+	}
+
 	[PostgresFact]
 	public async Task Watch_StreamsLandingsWithTheirPrefixes()
 	{

@@ -115,28 +115,48 @@ internal sealed class AgentRunner(Monorepo monorepo)
 		reporter?.Start(workspace.Id, stop);
 		var lastLine = "";
 		int? exit;
-		await using (var writer = new StreamWriter(log, append: true, Encoding.UTF8) { AutoFlush = true })
-		{
-			var environment = new Dictionary<string, string>
-			{
-				["BASSIA_RUN_ID"] = runId,
-				["BASSIA_WORKSPACE"] = workspace.Id,
-				["BASSIA_MONOREPO"] = monorepo.Root
-			};
-			exit = await ShellCommand.RunAsync(line, local.Root, environment, null, text =>
-			{
-				lock (writer)
-				{
-					writer.WriteLine(text);
-					if (text.Trim().Length > 0)
-					{
-						lastLine = text.Trim();
-					}
-				}
 
-				reporter?.Line(text);
-				output?.Invoke(text);
-			}, stop.Token);
+		// While the agent works, snapshots taken once its files settle tell the server what it is changing, so the
+		// workspace is reconciled with mainline before it lands.
+		var autoSnapshot = AutoSnapshot.Start(local.Root, TimeSpan.FromSeconds(monorepo.Config.GetInt("agent.snapshot_quiet")), async token =>
+		{
+			if (await monorepo.Repo.FindWorkspaceAsync(workspace.Id, token) is { } state)
+			{
+				await monorepo.Workspaces.SnapshotAsync(state, runId, token);
+			}
+		}, message => output?.Invoke(message));
+		try
+		{
+			await using (var writer = new StreamWriter(log, append: true, Encoding.UTF8) { AutoFlush = true })
+			{
+				var environment = new Dictionary<string, string>
+				{
+					["BASSIA_RUN_ID"] = runId,
+					["BASSIA_WORKSPACE"] = workspace.Id,
+					["BASSIA_MONOREPO"] = monorepo.Root
+				};
+				exit = await ShellCommand.RunAsync(line, local.Root, environment, null, text =>
+				{
+					lock (writer)
+					{
+						writer.WriteLine(text);
+						if (text.Trim().Length > 0)
+						{
+							lastLine = text.Trim();
+						}
+					}
+
+					reporter?.Line(text);
+					output?.Invoke(text);
+				}, stop.Token);
+			}
+		}
+		finally
+		{
+			if (autoSnapshot is not null)
+			{
+				await autoSnapshot.DisposeAsync();
+			}
 		}
 
 		await renew.CancelAsync();
