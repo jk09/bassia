@@ -107,7 +107,7 @@ trees, each with all siblings re-listed); two sources of truth to keep consisten
 - [x] Open questions answered.
 - [x] Implementation: tree store, PostgreSQL store, server `/trees/*`, GC/scrub/migration, local monorepos and clones on PostgreSQL.
 - [x] Tests: full suite against a local PostgreSQL 16.
-- [ ] CI: `scripts/Start-CiPostgres.ps1` starts a PostgreSQL in the Dev Drive and package jobs (and `bassia-local-cloud.ps1` exports `BASSIA_POSTGRES` for clones); written but not yet run on the hosted runners - confirm on the first CI run, then move this record to `feat/done/`.
+- [x] CI: `scripts/Start-CiPostgres.ps1` starts a PostgreSQL in the Dev Drive and package jobs (and `bassia-local-cloud.ps1` exports `BASSIA_POSTGRES` for clones); all 11 checks of PR #72 green on `82cf5ab`.
 
 ## Validation
 
