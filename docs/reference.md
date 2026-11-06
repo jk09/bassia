@@ -100,11 +100,19 @@ bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
   joined back into one line. On Linux and macOS, a word that holds whitespace, a quote, a backslash or a backtick is
   single-quoted, so it reaches the agent's shell exactly as given. Other words (`&&`, `|`, `>`, globs, `$VAR`) stay
   shell syntax. On Windows, a word with whitespace is put in double quotes.
-- `-C <path>`, before the command, runs `bassia` as if it had been started in `<path>`, same as `git -C <path>`.
+- `-C <path>` runs `bassia` as if it had been started in `<path>`, same as `git -C <path>`; it may repeat, each relative
+  to the one before. `-human` and `-help` (`-h`, `--help`) are accepted anywhere on the line.
 - A workspace is named by its name, its id (`w3f9a1c2b0d`), or a unique prefix of either of at least four characters.
   Inside a workspace's folder the workspace switch can be left out.
 - Runs are named by their id (`run-brave-otter-3f2a91`), a unique prefix of its key of at least four characters
   (`brave-ot`), or the name of their workspace.
+
+The command line is declared once, as a tree of [`System.CommandLine`](https://learn.microsoft.com/dotnet/standard/commandline/)
+`Command`, `Option` and `Argument` objects in `Bassia/Cli/CommandTable.cs`: groups (`workspace`, `mainline`, `agent`, ...)
+nest their subcommands, each command lists its switches (`Value`, `List`, `Flag`, `Rest`) and names the switch its bare
+argument stands for. The parser, `bassia help`, the usage line of an error and the tests all read that tree, so to add a
+command or a switch, declare it there and give the command a handler. A thin pass (`CommandLineNormalizer`) keeps the
+grammar above in front of the library, which is case-sensitive and has no rest-of-line switch.
 
 A bare `bassia` prints the full help as TOML, or a short help when a person is at a terminal. `bassia help` explains
 the concepts (`[[concept]]`), the usual `workflow`, how to learn more (`discover`) and lists every command

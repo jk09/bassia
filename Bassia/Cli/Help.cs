@@ -1,5 +1,7 @@
 namespace Bassia.Cli;
 
+using System.CommandLine;
+
 /// <summary>
 /// Help as TOML, like every other result: the overview of all commands, every command in full (<c>-all</c>), the
 /// subcommands of a group, or one command's summary, usage, switches and examples - generated from
@@ -61,8 +63,17 @@ internal static class Help
 		"bassia config list: every setting with its value, source and meaning."
 	];
 
-	public static Task<int> RunAsync(Invocation invocation) =>
-		Task.FromResult(Show((invocation.Get("command") ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries)));
+	/// <summary><c>bassia help [&lt;command&gt; [&lt;subcommand&gt;]] [-all]</c>.</summary>
+	public static Task<int> RunAsync(Invocation invocation)
+	{
+		var words = invocation.Words.Concat((invocation.Get("command") ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToList();
+		if (invocation.Has("all"))
+		{
+			words.Add("-all");
+		}
+
+		return Task.FromResult(Show(words));
+	}
 
 	/// <summary>Help for the words after <c>bassia help</c>: none, <c>-all</c>, a command or group, or a group and subcommand.</summary>
 	public static int Show(IReadOnlyList<string> words)
@@ -78,8 +89,8 @@ internal static class Help
 			return Overview();
 		}
 
-		var group = CommandTable.Group(words[0]);
-		if (group.Count == 0)
+		var group = CommandTable.Find(words[0]);
+		if (group is null)
 		{
 			return ProgramCli.UsageError("help", CommandTable.Replaced.TryGetValue(words[0], out var replacement)
 				? replacement
@@ -88,12 +99,12 @@ internal static class Help
 
 		if (words.Count == 1)
 		{
-			return group.Count == 1 && group[0].Sub is null ? Command(group[0]) : Group(words[0], group);
+			return group.IsGroup ? Group(group) : Command(group);
 		}
 
-		var spec = group.FirstOrDefault(candidate => string.Equals(candidate.Sub, words[1], StringComparison.OrdinalIgnoreCase));
+		var spec = group.FindChild(words[1]);
 		return spec is null
-			? ProgramCli.UsageError("help", $"'bassia {group[0].Name}' has no subcommand '{words[1]}'; it has {string.Join(", ", group.Select(candidate => candidate.Sub))}.")
+			? ProgramCli.UsageError("help", $"'bassia {group.Name}' has no subcommand '{words[1]}'; it has {string.Join(", ", group.Nested.Select(candidate => candidate.Name))}.")
 			: Command(spec);
 	}
 
@@ -162,14 +173,14 @@ internal static class Help
 			data);
 	}
 
-	private static int Group(string name, IReadOnlyList<CommandSpec> group) =>
+	private static int Group(BassiaCommand group) =>
 		ProgramCli.WriteResult(true, "help",
-			$"'bassia {group[0].Name}' has the subcommands {string.Join(", ", group.Select(command => command.Sub))}. Run 'bassia help {group[0].Name} <subcommand>' for switches and examples.",
+			$"'bassia {group.Name}' has the subcommands {string.Join(", ", group.Nested.Select(command => command.Name))}. Run 'bassia help {group.Name} <subcommand>' for switches and examples.",
 			new Dictionary<string, object?>
 			{
-				["topic"] = group[0].Name,
-				["usage"] = $"bassia {group[0].Name} <subcommand> [-switch [value]]...",
-				["entry"] = group.Select(command => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+				["topic"] = group.Name,
+				["usage"] = $"bassia {group.Name} <subcommand> [-switch [value]]...",
+				["entry"] = group.Nested.Select(command => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 				{
 					["name"] = command.FullName,
 					["summary"] = command.Summary,
@@ -180,7 +191,7 @@ internal static class Help
 				}).ToList()
 			});
 
-	private static int Command(CommandSpec spec)
+	private static int Command(BassiaCommand spec)
 	{
 		var data = new Dictionary<string, object?> { ["topic"] = spec.FullName };
 		foreach (var (key, value) in Describe(spec).Where(entry => entry.Key is not ("name" or "summary")))
@@ -192,7 +203,7 @@ internal static class Help
 	}
 
 	/// <summary>Everything about one command, as <c>help &lt;command&gt;</c> and <c>help -all</c> print it.</summary>
-	private static IReadOnlyDictionary<string, object?> Describe(CommandSpec spec) => new Dictionary<string, object?>
+	private static IReadOnlyDictionary<string, object?> Describe(BassiaCommand spec) => new Dictionary<string, object?>
 	{
 		["name"] = spec.FullName,
 		["summary"] = spec.Summary,
@@ -202,12 +213,12 @@ internal static class Help
 		["details"] = spec.Details,
 		["positional"] = spec.Positional is null ? null : $"-{spec.Positional}",
 		["examples"] = spec.Examples.ToList(),
-		["switch"] = spec.Switches.Where(option => !option.Hidden).Select(option => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+		["switch"] = spec.VisibleSwitches.Select(option => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
 		{
-			["name"] = $"-{option.Name}",
-			["value"] = option.Value,
-			["required"] = option.Required,
-			["rest_of_line"] = option.Rest,
+			["name"] = option.Name,
+			["value"] = option.ValueName(),
+			["required"] = option.IsRequired(),
+			["rest_of_line"] = option.IsRest(),
 			["description"] = option.Description
 		}).ToList()
 	};
