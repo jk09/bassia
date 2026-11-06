@@ -19,6 +19,7 @@ internal sealed class MonorepoConfig(string file)
 		new("user.id", "", "Who acts: recorded as the agent of operations and as the owner of workspaces. Default: the login name.", "BASSIA_USER"),
 		new("agent.command", "claude -p --permission-mode acceptEdits", "The agent an agentic run starts; the prompt is appended as one quoted argument."),
 		new("agent.model", "", "The model passed to the agent as --model, when set."),
+		new("agent.snapshot_quiet", "2", "While an agent runs, snapshot its workspace once its files have been quiet this many seconds, so the server reconciles the workspace with mainline before it lands; 0 turns it off."),
 		new("server.url", "", "The bassia-server a clone talks to (set by 'bassia clone')."),
 		new("server.token", "", "The server's shared token, when it requires one.", "BASSIA_SERVER_TOKEN"),
 		new("merge.semantic_driver", "weave-driver", "The language-aware merge driver for the semantic conflict policy (git merge-driver style: %O %A %B); 'off' disables it."),

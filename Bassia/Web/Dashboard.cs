@@ -19,7 +19,8 @@ internal sealed record DashboardScope(
 	Func<RunRecord, Task<string>> ReadLog,
 	string? Account = null,
 	string? Events = null,
-	IReadOnlyList<(string Key, string Value, string Source)>? Settings = null);
+	IReadOnlyList<(string Key, string Value, string Source)>? Settings = null,
+	IConflictOverviewSource? Overview = null);
 
 /// <summary>
 /// The web dashboard (<c>bassia web</c>, and the server's pages): a read-only site for watching agentic work - every
@@ -136,30 +137,36 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 
 	// ----- data -----
 
-	private sealed record Row(WorkspaceState State, LandResult? Check, Commit Working);
+	private sealed record Row(WorkspaceState State, WorkspaceReconciliation? Check, Commit Working);
 
-	/// <summary>Every workspace (open ones with a dry-run landing: can it land now?).</summary>
-	private static async Task<List<Row>> RowsAsync(bool includeClosed, bool check = true)
+	/// <summary>
+	/// Every workspace; open ones with their reconciliation from the live conflict overview (can it land now?), read once
+	/// for all of them instead of a dry-run landing per workspace.
+	/// </summary>
+	private static async Task<List<Row>> RowsAsync(bool includeClosed, bool check = true) => (await RowsWithOverviewAsync(includeClosed, check)).Rows;
+
+	private static async Task<(List<Row> Rows, ConflictOverview? Overview)> RowsWithOverviewAsync(bool includeClosed, bool check = true)
 	{
+		ConflictOverview? overview = null;
+		if (check)
+		{
+			try
+			{
+				overview = Current.Overview is { } source ? await source.OverviewAsync() : null;
+			}
+			catch (VersionException)
+			{
+			}
+		}
+
+		var reconciled = overview?.Workspaces.ToDictionary(workspace => workspace.Workspace) ?? [];
 		var rows = new List<Row>();
 		foreach (var state in await Repo.ListWorkspacesAsync(includeClosed))
 		{
-			LandResult? result = null;
-			if (check && state.IsOpen)
-			{
-				try
-				{
-					result = await Current.Landing.LandAsync(new LandRequest(state.Id, DryRun: true));
-				}
-				catch (VersionException)
-				{
-				}
-			}
-
-			rows.Add(new Row(state, result, await Repo.Objects.ReadCommitAsync(state.Record.Working)));
+			rows.Add(new Row(state, state.IsOpen ? reconciled.GetValueOrDefault(state.Id) : null, await Repo.Objects.ReadCommitAsync(state.Record.Working)));
 		}
 
-		return rows;
+		return (rows, overview);
 	}
 
 	private static bool Live(RunRecord? run) => run is not null && Agents.AgentRunner.IsAlive(run);
@@ -338,7 +345,9 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 		var body = new StringBuilder("<div class=\"split\"><section>");
 		body.Append("<table class=\"list facts\">");
 		body.Append($"<tr><td>status</td><td>{Status(record.Status)}</td></tr>");
-		body.Append($"<tr><td>can land</td><td>{Landability(new Row(state, check, working))}</td></tr>");
+		var asReconciled = check is null ? null : new WorkspaceReconciliation(record.Id, record.Name, record.Owner, record.Status, record.BaseSeq, false,
+			check.Outcome, check.Message, check.MainSeq, true, check.Touched, check.Conflicts, check.Merged, []);
+		body.Append($"<tr><td>can land</td><td>{Landability(new Row(state, asReconciled, working))}</td></tr>");
 		body.Append($"<tr><td>base</td><td>{(record.Parent is null ? SeqLink(record.BaseSeq) : $"workspace {E(record.Parent)} (on {SeqLink(record.BaseSeq)})")}</td></tr>");
 		body.Append($"<tr><td>change</td><td class=\"id\">{E(working.ChangeId.Hex)}</td></tr>");
 		body.Append($"<tr><td>working commit</td><td class=\"id\">{E(record.Working.Short)}</td></tr>");
@@ -589,7 +598,7 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 
 	private static async Task<IResult> ConflictsAsync()
 	{
-		var rows = await RowsAsync(true);
+		var (rows, overview) = await RowsWithOverviewAsync(true);
 		var blocked = rows.Where(row => row.Check?.Outcome is LandOutcome.NeedsReplay or LandOutcome.Conflict or LandOutcome.Rejected).ToList();
 		var body = new StringBuilder();
 		body.Append("<p class=\"muted\">When two agents rewrote the same path, the default is to re-run the later task on the new mainline (replay), not to merge text " +
@@ -616,21 +625,40 @@ internal sealed class Dashboard(Func<HttpContext, Task<DashboardScope>> open)
 			}).Append("</p>");
 		}
 
+		// Paths open workspaces both change: whoever lands second meets the first.
+		var names = rows.ToDictionary(row => row.State.Id, row => row.State.Name);
+		var overlaps = overview?.Overlaps ?? [];
+		body.Append($"<h2>Overlapping open workspaces <span class=\"count\">{overlaps.Count}</span></h2>");
+		if (overlaps.Count == 0)
+		{
+			body.Append(Notice("No two open workspaces change the same path."));
+		}
+		else
+		{
+			body.Append("<table class=\"list\"><tr><th>Path</th><th>Workspaces</th></tr>");
+			foreach (var overlap in overlaps.Take(50))
+			{
+				body.Append($"<tr><td class=\"id\">{E(overlap.Path)}</td><td>")
+					.Append(string.Join(", ", overlap.Workspaces.Select(id => WorkspaceLink(id, names.GetValueOrDefault(id, id))))).Append("</td></tr>");
+			}
+
+			body.Append("</table>");
+		}
+
 		// Paths that keep colliding: candidates for an exclusive lease or for splitting the task.
-		var hot = rows.SelectMany(row => (row.Check?.Conflicts.Select(conflict => conflict.Path) ?? []).Concat(row.State.Record.LastLand?.Conflicts ?? []))
-			.GroupBy(path => path).Select(group => (Path: group.Key, Count: group.Count())).OrderByDescending(item => item.Count).Take(20).ToList();
+		var hot = (overview?.HotPaths ?? []).Take(20).Select(path => (path.Path, Count: path.Conflicts + path.Refused + path.Workspaces, path.Workspaces, path.Conflicts, path.Refused)).ToList();
 		body.Append("<h2>Hot paths</h2>");
 		if (hot.Count == 0)
 		{
-			body.Append(Notice("No path has caused a conflict."));
+			body.Append(Notice("No path has caused a conflict, and no two open workspaces change the same path."));
 		}
 		else
 		{
 			var max = hot.Max(item => item.Count);
-			body.Append("<table class=\"list\"><tr><th>Path</th><th>Conflicts</th><th></th></tr>");
-			foreach (var (path, count) in hot)
+			body.Append("<table class=\"list\"><tr><th>Path</th><th>Open workspaces</th><th>Conflicts</th><th>Refused landings</th><th></th></tr>");
+			foreach (var (path, count, workspaces, conflicts, refused) in hot)
 			{
-				body.Append($"<tr><td class=\"id\">{E(path)}</td><td>{count}</td><td class=\"stackcell\"><div class=\"stack\"><span class=\"st-manual\" style=\"width:{100 * count / max}%\"></span></div></td></tr>");
+				body.Append($"<tr><td class=\"id\">{E(path)}</td><td>{workspaces}</td><td>{conflicts}</td><td>{refused}</td><td class=\"stackcell\"><div class=\"stack\"><span class=\"st-manual\" style=\"width:{100 * count / max}%\"></span></div></td></tr>");
 			}
 
 			body.Append("</table><p>A path that keeps causing replays is a candidate for an exclusive lease: ")

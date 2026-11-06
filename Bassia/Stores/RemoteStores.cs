@@ -327,3 +327,9 @@ public sealed class RemoteLanding(ServerConnection server) : ILanding
 	public Task<LandResult> LandAsync(LandRequest request, CancellationToken ct = default) =>
 		server.PostAsync<LandResult>("land", Api.LandRequestDto.From(request), ct);
 }
+
+/// <summary>The server's live conflict overview, which its reconciler keeps current.</summary>
+public sealed class RemoteConflictOverview(ServerConnection server) : IConflictOverviewSource
+{
+	public Task<ConflictOverview> OverviewAsync(CancellationToken ct = default) => server.GetAsync<ConflictOverview>("conflicts", ct);
+}

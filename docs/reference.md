@@ -274,6 +274,34 @@ landed, on the new head with a fresh change; by default it is marked `landed`.
 
 `mainline restore -seq <n>` puts an earlier seq's tree back, as a new landing: history stays linear.
 
+### Pre-reconciled landings and the conflict overview
+
+Deciding a landing - the diff of the workspace, the conflict policies, merge drivers and the validation hook - is
+done ahead of time, as the workspace changes, so that landing it costs little more than the compare-and-swap of
+`main`:
+
+- **Edits reach the server as snapshots.** Every command that reads a workspace snapshots it, and while an agent runs,
+  `bassia agent start` also snapshots its folder whenever the files have been quiet for `agent.snapshot_quiet` seconds
+  (default 2; 0 turns it off). Each snapshot moves the workspace head.
+- **The server reconciles.** The node that receives a snapshot, or performs a landing, reconciles the workspaces it
+  affects in the background: it plans their landing on the current mainline, with the same planner a landing uses,
+  and stores the result as a **candidate** - the commits it is for, the mainline seq, the touched paths, the resolved
+  changes, conflicts, merged paths and the outcome a landing would have. A candidate is an object behind the head
+  `rc/<workspace>`, so it lives wherever heads do (PostgreSQL on a server) and every node sees it. After a landing,
+  only the workspaces whose touched paths (or `.bassia.toml`) moved are reconciled again. A node catches up on stale
+  candidates when it starts. Clients cannot move or delete `rc/` heads.
+- **A landing takes the fast path** when the workspace's candidate is for its current commits, would land, and none of
+  its paths nor `.bassia.toml` changed on mainline since: it applies the candidate's changes to mainline's current
+  tree, checks leases and advances `main`, with no diff, policies, merges or validation. A machine-merged candidate is
+  used only on the very seq it was validated on; a `-strict` landing never uses one. Otherwise the landing plans as
+  above. The outcome is the same either way; `reconciled = true` in the result (and the `reconciled` tag of the
+  landing metric) says the fast path was taken.
+- **The conflict overview** (`GET /api/v1/conflicts`) reads the candidates: every open workspace with what a landing
+  would do now, whether its candidate is current, the **overlaps** - paths two or more open workspaces change, so
+  whichever lands second will meet the first - and the **hot paths**. Studio's and the dashboard's conflict pages show
+  it and refresh on the `reconciled` watch event. A local monorepo runs nothing in the background: it reconciles stale
+  candidates when the overview is read.
+
 ### Conflict policies: `.bassia.toml`
 
 The repository's policy is versioned with the code, in `.bassia.toml` at the root of the tree, and read from mainline
@@ -330,8 +358,9 @@ command instead. Bassia:
    as its intent;
 2. records the run on the workspace (`running`, host, process) and starts the agent in the workspace's folder with
    `BASSIA_RUN_ID`, `BASSIA_WORKSPACE` and `BASSIA_MONOREPO` set, its output going to `.bassia/runs/<run>.log`;
-3. snapshots what the agent changed, stores the log with the run, and records how it ended (`succeeded`, `failed`,
-   `stopped`);
+3. snapshots the workspace whenever the agent's files settle (`agent.snapshot_quiet`), so a server reconciles it with
+   mainline while the agent works (see "Pre-reconciled landings"); at the end snapshots what the agent changed, stores
+   the log with the run, and records how it ended (`succeeded`, `failed`, `stopped`);
 4. with `-land`, lands the workspace when the agent succeeded.
 
 `-detach` runs it in the background and returns at once; `agent list|show|logs|wait|stop` follow it from any shell.
@@ -424,7 +453,8 @@ The RPC surface under `/api/v1` is what a client's remote stores call:
 | Call | Purpose |
 | --- | --- |
 | `GET /main` | GetHead: mainline's head operation, seq, commit and tree. |
-| `GET /watch` (and `/events`) | A stream (server-sent events) of landings with the prefixes they touched, and of workspaces that moved. |
+| `GET /watch` (and `/events`) | A stream (server-sent events) of landings with the prefixes they touched, of workspaces that moved, and of workspaces reconciled (`reconciled`). |
+| `GET /conflicts` | The live conflict overview: every open workspace reconciled with mainline, overlaps between open workspaces, hot paths. |
 | `POST /objects/fetch` | GetObjects: many objects in one binary reply (structural objects and chunks under 256 KiB); what it leaves out is read on its direct URL. |
 | `POST /objects/put` | Many small objects in one binary request, each checked like a single put. |
 | `POST /objects/batch` | Structural objects by id as JSON, optionally with subtrees to a depth. |
@@ -432,7 +462,7 @@ The RPC surface under `/api/v1` is what a client's remote stores call:
 | `POST /objects/have` | Which ids the server already holds; asked before every upload. |
 | `POST /objects/read-urls`, `POST /objects/upload-urls` | GetChunkUrls and BeginUpload: signed URLs for direct transfers. |
 | `GET/PUT /objects/{id}` | One object; large chunks are redirected to their signed URL, structural objects are validated on upload. |
-| `GET /heads...`, `POST /heads/advance` | Workspace heads, by compare-and-swap; `main` is refused (only landing moves it). |
+| `GET /heads...`, `POST /heads/advance` | Workspace heads, by compare-and-swap; `main` is refused (only landing moves it), and so are the server's `rc/` candidate heads. |
 | `POST /leases/acquire`, `renew`, `release`, `GET /leases` | Leases; waiting happens on the server. |
 | `POST /land` | Land (or check, with `dry_run`) a workspace. |
 
@@ -463,8 +493,9 @@ click one to copy it.
 - **Runs**: live runs as animated cards, every run over time, runs by status; a run's page streams its output.
 - **Mainline**: the landings by seq; a landing's page shows its commit, change id, intent, recipe and changes, and on
   request the hunks (rewritten files as a summary).
-- **Conflicts**: every workspace blocked from landing with its conflicting paths, policies and the commands that deal
-  with it, and the **hot paths** that keep colliding - candidates for an exclusive lease.
+- **Conflicts**: from the live conflict overview, every workspace blocked from landing with its conflicting paths,
+  policies and the commands that deal with it, the open workspaces that overlap on a path, and the **hot paths** that
+  keep colliding - candidates for an exclusive lease.
 - **Leases**, **Files** (mainline's tree at any seq, from tree metadata) and **Config** (the policy in `.bassia.toml`
   and the folder's settings).
 
@@ -494,7 +525,8 @@ Delivered in slices (feature record `bassia-681e8902`):
 - **Files** of a workspace: browse its working tree, edit text in the browser, add, rename, delete and download files.
   Every save is a snapshot (an operation, so undo works); a save is refused, with the text kept, when the file changed
   since it was opened.
-- **Conflicts**: every open workspace that cannot land now, why, and the hot paths.
+- **Conflicts**: from the server's live conflict overview, every open workspace that cannot land now and why, the open
+  workspaces that overlap on a path, and the hot paths; it refreshes as the server reconciles.
 - **Leases**: live leases; acquire (exclusive or intent) for a workspace, release.
 
 - **Agentic runs**: every run (those started here and those recorded on workspaces by the CLI); **New run** with a
@@ -555,6 +587,7 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 | `user.id` (`BASSIA_USER`) | the login name | Who acts: the agent of operations, the owner of workspaces. |
 | `agent.command` | `claude -p --permission-mode acceptEdits` | The agent a run starts; the prompt is appended as one quoted argument. To let Claude Code also run builds and tests, allow them and keep `-p` last, since `--allowedTools` takes a list that would swallow the prompt: `claude --permission-mode acceptEdits --allowedTools "Bash(dotnet:*)" -p`. |
 | `agent.model` | | Passed to the agent as `--model`. |
+| `agent.snapshot_quiet` | `2` | While an agent runs, snapshot its workspace once its files have been quiet this many seconds, so the server reconciles it before it lands; `0` turns it off. |
 | `server.url` | | The server a client talks to (set by `bassia clone`). |
 | `server.token` (`BASSIA_SERVER_TOKEN`) | | The server's shared token. |
 | `merge.semantic_driver` | `weave-driver` | The driver of the semantic policy, git merge-driver style (`%O %A %B`); `off` disables it. The release packages bundle it. |
@@ -570,7 +603,8 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 
 Rewrites create garbage quickly. `bassia gc` (local monorepo) and `bassia-server gc` mark every object reachable from
 the retained operations - mainline's whole log (the audit trail), every workspace head, and heads named `pin/...` - and
-sweep the blobs nothing reaches that are older than the grace period. A closed workspace's head is pruned
+the candidates of open workspaces (`rc/...`, whose merge results exist nowhere else; those of closed workspaces are
+dropped), and sweep the blobs nothing reaches that are older than the grace period. A closed workspace's head is pruned
 `gc.retention_days` after it closed, which makes its unlanded snapshots collectable. `scrub` re-hashes stored blobs (all,
 or a `-sample`) and reports any whose bytes do not match their id.
 
@@ -615,15 +649,18 @@ Bassia has four projects; each depends only on the ones before it.
    checks its references).
    - `Model`: the objects - chunks (FastCDC, 256 KiB / 1 MiB / 4 MiB), `FileObject`, `Tree` (sorted entries with kind,
      id, size and mode), `ConflictObject` (bases and sides), `Commit` (tree, parents, change id, author, intent, replay
-     recipe), `Operation` and `View` - with ids as BLAKE3-256 hashes of canonical CBOR (`ObjectCodec`).
+     recipe), `Operation`, `View` and `Candidate` (a workspace reconciled with mainline) - with ids as BLAKE3-256 hashes of
+     canonical CBOR (`ObjectCodec`).
    - `Storage`: the four traits - `IObjectStore` (immutable objects: has, stat, ranged read, put, begin upload),
      `IViewStore` (heads moved by compare-and-swap), `IPathIndex` (mainline's path versions by seq) and `ILeaseStore`
      (leases with fencing tokens) - with in-memory implementations, the local-disk blob store (`DiskObjectStore`) and
      decorators (caching, counting, verifying).
    - `Version`: `Repository` (mainline, workspace heads, operation logs, path index catch-up), `Trees` (lookup, edit,
      diff and three-way merge, all skipping equal subtrees), `Diffs` (renames, rewrites, hunks), `WorkspaceService`
-     (create, stack, clone, amend, sync, undo, restore, close), `LandingService` (the only writer of `main`),
-     `RepoPolicy` and `ConflictResolver` (the conflict policies), `GarbageCollector`.
+     (create, stack, clone, amend, sync, undo, restore, close), `LandingService` (the only writer of `main`, with the
+     fast path for reconciled candidates), `LandingPlanner` (the decision of a landing, shared by the landing and the
+     reconciler), `Reconciler` (candidates behind `rc/` heads and the conflict overview), `RepoPolicy` and
+     `ConflictResolver` (the conflict policies), `GarbageCollector`.
    - `Workspaces`: `IWorkspaceProvider` - the plain-checkout `CheckoutProvider` (a ProjFS provider on Windows would
      implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
      them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
@@ -674,7 +711,10 @@ materialized conflicts, undo, and status reading no file bytes). `StoreContractT
 stores to the same contract. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
-the server, object validation, mainline's protection and signed blob URLs, and every dashboard page.
+the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict
+overview, and every dashboard page. `ReconcilerTests` covers candidates, the landing's fast path (and when it must not
+be taken), validation kept out of the landing, the overview and garbage collection of candidates; `AutoSnapshotTests`
+the snapshots taken while an agent works.
 Every test that starts a server (`ServerTests`, the Studio tests, `SyncEfficiencyTests` and the Azurite integration
 tests) needs PostgreSQL and is reported as skipped without `BASSIA_TEST_POSTGRES`.
 `PostgresStateTests`, `ObjectStoreContractTests` and `SyncEfficiencyTests` run against PostgreSQL

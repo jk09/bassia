@@ -210,3 +210,31 @@ public sealed record LandRecord(
 	ObjectId? Commit,
 	IReadOnlyList<string> Conflicts,
 	string Message);
+
+/// <summary>A path a candidate changes on mainline, with its resolved content; a null leaf deletes it.</summary>
+public sealed record CandidateChange(string Path, Leaf? Leaf);
+
+/// <summary>Why a candidate cannot land as it is: the path, the case, the policy and a detail.</summary>
+public sealed record CandidateConflict(string Path, string Case, string Policy, string Detail);
+
+/// <summary>
+/// An open workspace reconciled with mainline ahead of its landing: for the workspace's <see cref="Base"/> and
+/// <see cref="Working"/> commits, against mainline at <see cref="MainSeq"/>, the paths it touches, the changes a
+/// landing would apply (conflict policies and merge drivers already resolved), what blocks it, and the outcome a landing
+/// would have. Stored behind the head <c>rc/&lt;workspace&gt;</c>; a landing that finds it current applies
+/// <see cref="Changes"/> without deciding anything again.
+/// </summary>
+public sealed record Candidate(
+	string Workspace,
+	ObjectId Base,
+	ObjectId Working,
+	long MainSeq,
+	ObjectId MainCommit,
+	string Outcome,
+	string Message,
+	IReadOnlyList<string> Touched,
+	IReadOnlyList<CandidateChange> Changes,
+	IReadOnlyList<CandidateConflict> Conflicts,
+	IReadOnlyList<string> Merged,
+	bool MachineMerged,
+	DateTimeOffset Time) : StoredObject;

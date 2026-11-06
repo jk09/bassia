@@ -24,6 +24,7 @@ public sealed class MonorepoClient(StudioOptions options) : IDisposable
 	private ServerConnection? connection;
 	private Repository? repo;
 	private ILanding? landing;
+	private IConflictOverviewSource? overview;
 
 	public string Server => options.Server;
 
@@ -32,6 +33,9 @@ public sealed class MonorepoClient(StudioOptions options) : IDisposable
 	public Repository Repo => repo ?? throw new InvalidOperationException("Open the monorepo first.");
 
 	public ILanding Landing => landing ?? throw new InvalidOperationException("Open the monorepo first.");
+
+	/// <summary>The server's live conflict overview (bassia-f162a7fd).</summary>
+	public IConflictOverviewSource Overview => overview ?? throw new InvalidOperationException("Open the monorepo first.");
 
 	/// <summary>Connects to the server (once): its chunk parameters, the remote stores and the landing service.</summary>
 	public async Task<Repository> OpenAsync(CancellationToken ct = default)
@@ -54,6 +58,7 @@ public sealed class MonorepoClient(StudioOptions options) : IDisposable
 					Directory.CreateDirectory(options.Cache);
 					var objects = new CachingObjectStore(new DiskObjectStore(options.Cache), new RemoteObjectStore(server));
 					landing = new RemoteLanding(server);
+					overview = new RemoteConflictOverview(server);
 					connection = server;
 					repo = new Repository(objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks);
 				}

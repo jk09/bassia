@@ -22,8 +22,16 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 		var now = repo.Clock();
 		var pruned = 0;
 		var roots = new List<ObjectId>();
+		var candidates = new List<(HeadName Name, ObjectId Head)>();
 		await foreach (var (name, head) in repo.Views.ListHeadsAsync("", ct))
 		{
+			// A candidate head points at a Candidate, not an operation; it is kept only while its workspace is open.
+			if (name.IsCandidate)
+			{
+				candidates.Add((name, head));
+				continue;
+			}
+
 			if (name.IsWorkspace)
 			{
 				var state = await repo.WorkspaceAtAsync(head, ct);
@@ -47,6 +55,18 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 		}
 
 		var live = await MarkAsync(roots, ct);
+		foreach (var (name, head) in candidates)
+		{
+			if (await repo.FindWorkspaceAsync(name.WorkspaceId, ct) is { IsOpen: true })
+			{
+				await MarkCandidateAsync(head, live, ct);
+			}
+			else if (!dryRun)
+			{
+				await repo.Views.DeleteHeadAsync(name, head, ct);
+			}
+		}
+
 		int blobs = 0, swept = 0, young = 0;
 		long sweptBytes = 0;
 		var doomed = new List<BlobInfo>();
@@ -81,11 +101,26 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 		return new GcReport(roots.Count, live.Count, blobs, swept, sweptBytes, young, pruned, dryRun);
 	}
 
-	/// <summary>Every object reachable from the given operations. Shared subtrees are walked once.</summary>
-	public async Task<HashSet<ObjectId>> MarkAsync(IEnumerable<ObjectId> operations, CancellationToken ct = default)
+	/// <summary>Marks a candidate and the leaves of its changes (merge results exist nowhere else).</summary>
+	private async Task MarkCandidateAsync(ObjectId id, HashSet<ObjectId> live, CancellationToken ct)
 	{
-		var live = new HashSet<ObjectId>();
-		var pending = new Stack<(ObjectId Id, string Kind)>(operations.Select(op => (op, "op")));
+		if (!live.Add(id))
+		{
+			return;
+		}
+
+		var candidate = await repo.Objects.ReadCandidateAsync(id, ct);
+		await WalkAsync(candidate.Changes.Select(change => change.Leaf).OfType<Leaf>().Select(LeafItem), live, ct);
+	}
+
+	/// <summary>Every object reachable from the given operations. Shared subtrees are walked once.</summary>
+	public Task<HashSet<ObjectId>> MarkAsync(IEnumerable<ObjectId> operations, CancellationToken ct = default) =>
+		WalkAsync(operations.Select(op => (op, "op")), [], ct);
+
+	/// <summary>Adds to <paramref name="live"/> everything reachable from the given objects, skipping what it already holds.</summary>
+	private async Task<HashSet<ObjectId>> WalkAsync(IEnumerable<(ObjectId Id, string Kind)> start, HashSet<ObjectId> live, CancellationToken ct)
+	{
+		var pending = new Stack<(ObjectId Id, string Kind)>(start);
 		while (pending.TryPop(out var item))
 		{
 			if (!live.Add(item.Id))
@@ -167,15 +202,15 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 		}
 
 		return live;
-
-		static (ObjectId, string) LeafItem(Leaf leaf) => leaf.Kind switch
-		{
-			EntryKind.Tree => (leaf.Id, "tree"),
-			EntryKind.Chunked => (leaf.Id, "file"),
-			EntryKind.Conflict => (leaf.Id, "conflict"),
-			_ => (leaf.Id, "chunk")
-		};
 	}
+
+	private static (ObjectId, string) LeafItem(Leaf leaf) => leaf.Kind switch
+	{
+		EntryKind.Tree => (leaf.Id, "tree"),
+		EntryKind.Chunked => (leaf.Id, "file"),
+		EntryKind.Conflict => (leaf.Id, "conflict"),
+		_ => (leaf.Id, "chunk")
+	};
 
 	/// <summary>Re-hashes a sample of stored blobs (every blob when <paramref name="sample"/> is null) and reports mismatches.</summary>
 	public async Task<ScrubReport> ScrubAsync(int? sample = null, CancellationToken ct = default)

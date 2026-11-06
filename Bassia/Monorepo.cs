@@ -41,6 +41,7 @@ internal sealed class Monorepo : IDisposable
 			Objects = new CachingObjectStore(new DiskObjectStore(Path.Combine(BassiaDir, "cache")), new RemoteObjectStore(server));
 			Repo = new Repository(Objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks);
 			Landing = new RemoteLanding(server);
+			Overview = new RemoteConflictOverview(server);
 		}
 		else
 		{
@@ -53,6 +54,10 @@ internal sealed class Monorepo : IDisposable
 			var validate = Config.GetOrNull("land.validate") is { } command ? new ShellValidationHook(Repo, command) : null;
 			LocalLanding = new LandingService(Repo, semantic, validate);
 			Landing = LocalLanding;
+
+			// No process runs in the background of a local monorepo: stale candidates are reconciled when the overview is read.
+			LocalLanding.Reconciler.ReconcileOnRead = true;
+			Overview = LocalLanding.Reconciler;
 		}
 
 		// On a Windows Dev Drive (block-cloning ReFS), workspace files are cloned from a local content cache.
@@ -85,6 +90,9 @@ internal sealed class Monorepo : IDisposable
 	public ILanding Landing { get; }
 
 	public LandingService? LocalLanding { get; }
+
+	/// <summary>The live conflict overview: the server's on a clone, reconciled on read in a local monorepo.</summary>
+	public IConflictOverviewSource Overview { get; }
 
 	public WorkspaceClient Workspaces { get; }
 

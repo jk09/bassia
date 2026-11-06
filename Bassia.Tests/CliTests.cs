@@ -1,5 +1,6 @@
 namespace Bassia.Tests;
 
+using Bassia.Core.Model;
 using Tomlyn.Model;
 using static Bassia.Tests.TestEnvironment;
 
@@ -158,6 +159,36 @@ public sealed class CliTests : IDisposable
 		var failed = await FailAsync(Root, "agent", "start", "-name", "broken", "-land", "-run", OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3");
 		Assert.Equal("failed", ((TomlTable)failed["run"])["status"]);
 		Assert.False(failed.ContainsKey("land"));
+	}
+
+	[Fact]
+	public async Task AgentStart_SnapshotsTheWorkspaceWhileTheAgentWorks()
+	{
+		await InitAsync();
+		await OkAsync(Root, "config", "set", "-key", "agent.snapshot_quiet", "-value", "1");
+		var command = OperatingSystem.IsWindows()
+			? "echo one> a.txt & ping -n 4 127.0.0.1 > nul & echo two> b.txt"
+			: "echo one > a.txt; sleep 3; echo two > b.txt";
+		var run = await OkAsync(Root, "agent", "start", "-name", "settle", "-run", command);
+		var runId = (string)run["run_id"];
+
+		// The workspace's operation log holds a snapshot of a.txt alone, taken while the agent was still working.
+		using var monorepo = Monorepo.Open(Root);
+		var workspace = await monorepo.Repo.ResolveWorkspaceAsync("settle");
+		var snapshots = new List<string>();
+		for (ObjectId? op = workspace.Head; op is { } id;)
+		{
+			var operation = await monorepo.Repo.Objects.ReadOperationAsync(id);
+			if (operation.Run == runId && operation.Description.StartsWith("snapshot:", StringComparison.Ordinal))
+			{
+				snapshots.Add(operation.Description);
+			}
+
+			op = operation.Parents.Count > 0 ? operation.Parents[0] : null;
+		}
+
+		Assert.Contains("snapshot: a.txt", snapshots);
+		Assert.Contains(snapshots, snapshot => snapshot.Contains("b.txt"));
 	}
 
 	[Fact]

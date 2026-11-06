@@ -38,7 +38,8 @@ public static class LandOutcome
 
 /// <summary>
 /// The outcome of a landing: on success the new seq and commit; otherwise the conflicting paths and the current
-/// mainline head the workspace has to catch up with (sync, or replay on it).
+/// mainline head the workspace has to catch up with (sync, or replay on it). <see cref="Reconciled"/>: the landing
+/// applied the workspace's reconciled candidate instead of planning (the fast path).
 /// </summary>
 public sealed record LandResult(
 	string Outcome,
@@ -51,7 +52,8 @@ public sealed record LandResult(
 	int Touched,
 	IReadOnlyList<string> Merged,
 	IReadOnlyList<string> Warnings,
-	int Attempts);
+	int Attempts,
+	bool Reconciled = false);
 
 /// <summary>A landing as a watcher sees it: the new seq and the top-level prefixes it touched.</summary>
 public sealed record LandedEvent(long Seq, ObjectId Commit, string Workspace, IReadOnlyList<string> Prefixes, DateTimeOffset Time);
@@ -67,12 +69,32 @@ public interface ILanding
 /// touched paths with the path index since the workspace's base seq, applies its changes onto the current mainline
 /// tree, writes the rebased commit (same ChangeId, new CommitId) and advances <c>main</c> by compare-and-swap; a lost race
 /// repeats from the comparison, which costs only the touched paths.
+///
+/// When the workspace has a current reconciled candidate (<see cref="Reconciler"/>) - computed for its commits, and
+/// none of its paths (nor <c>.bassia.toml</c>) changed on mainline since - the landing skips the diff, the conflict
+/// policies, the merge drivers and validation: it applies the candidate's changes, checks leases and advances
+/// <c>main</c>. A machine-merged candidate is used only on the very mainline it was validated on.
 /// </summary>
-public sealed class LandingService(Repository repo, IMergeDriver? semantic = null, IValidationHook? validator = null) : ILanding
+public sealed class LandingService : ILanding
 {
 	private const int MaxAttempts = 100;
 
 	private readonly SemaphoreSlim gate = new(1, 1);
+
+	private readonly Repository repo;
+
+	public LandingService(Repository repo, IMergeDriver? semantic = null, IValidationHook? validator = null)
+	{
+		this.repo = repo;
+		Planner = new LandingPlanner(repo, semantic, validator);
+		Reconciler = new Reconciler(repo, Planner);
+	}
+
+	/// <summary>The decision a landing makes, shared with the reconciler.</summary>
+	public LandingPlanner Planner { get; }
+
+	/// <summary>Keeps workspaces reconciled ahead of their landings, with the same planner.</summary>
+	public Reconciler Reconciler { get; }
 
 	public event Action<LandedEvent>? Landed;
 
@@ -101,32 +123,35 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 		var workspace = await repo.ResolveWorkspaceAsync(request.Workspace, ct);
 		var record = workspace.Record;
 		var main = await repo.GetMainAsync(ct);
-		LandResult Fail(string outcome, string message, IReadOnlyList<PathConflict>? conflicts = null, int touched = 0, int attempts = 0) =>
-			new(outcome, message, null, null, main.Seq, main.CommitId, conflicts ?? [], touched, [], [], attempts);
+		LandResult Fail(string outcome, string message, IReadOnlyList<PathConflict>? conflicts = null, int touchedCount = 0, int attempts = 0) =>
+			new(outcome, message, null, null, main.Seq, main.CommitId, conflicts ?? [], touchedCount, [], [], attempts);
 
-		if (!workspace.IsOpen)
+		if (await Planner.RefusalAsync(workspace, ct) is { } refusal)
 		{
-			return Fail(LandOutcome.Rejected, $"Workspace '{record.Name}' is {record.Status}; only an open workspace can land.");
+			return Fail(refusal.Outcome, refusal.Message);
 		}
 
-		if (record.Parent is { } parentId && await repo.FindWorkspaceAsync(parentId, ct) is { IsOpen: true } parent)
+		// A candidate for exactly these commits that would land replaces the diff and the planning below.
+		var candidate = await Reconciler.GetAsync(record.Id, ct);
+		if (request.Strict || !Reconciler.Matches(candidate, record) || candidate!.Outcome != LandOutcome.WouldLand)
 		{
-			return Fail(LandOutcome.Rejected, $"Workspace '{record.Name}' is stacked on '{parent.Name}', which has not landed; land '{parent.Name}' first.");
+			candidate = null;
 		}
 
-		var working = await repo.Objects.ReadCommitAsync(record.Working, ct);
-		var baseCommit = await repo.Objects.ReadCommitAsync(record.Base, ct);
-		var touched = await repo.Trees.DiffAsync(baseCommit.Tree, working.Tree, "", ct);
-		if (touched.Count == 0)
+		IReadOnlyList<TreeChange>? touched = null;
+		async Task<LandResult?> PlanFromScratchAsync()
 		{
-			return new LandResult(LandOutcome.Nothing, $"Workspace '{record.Name}' has no changes against its base.", null, null, main.Seq, main.CommitId, [], 0, [], [], 0);
+			touched = await Planner.TouchedAsync(record, ct);
+			return LandingPlanner.RefusalFor(record, touched) is { } refused
+				? refused.Outcome == LandOutcome.Nothing
+					? new LandResult(LandOutcome.Nothing, refused.Message, null, null, main.Seq, main.CommitId, [], 0, [], [], 0)
+					: Fail(refused.Outcome, refused.Message, refused.Conflicts, touched.Count)
+				: null;
 		}
 
-		var conflicted = touched.Where(change => change.New?.Kind == EntryKind.Conflict).Select(change => change.Path).ToList();
-		if (conflicted.Count > 0)
+		if (candidate is null && await PlanFromScratchAsync() is { } early)
 		{
-			return Fail(LandOutcome.Conflict, $"Workspace '{record.Name}' holds {conflicted.Count} unresolved conflict(s); mainline refuses conflicts. Resolve them, then land.",
-				conflicted.Select(path => new PathConflict(path, "unresolved", ConflictPolicy.Conflict, "the workspace stores a conflict here")).ToList(), touched.Count);
+			return early;
 		}
 
 		var warnings = new List<string>();
@@ -135,126 +160,74 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 			main = await repo.GetMainAsync(ct);
 			await repo.EnsureIndexedAsync(main, ct);
 			var policy = await RepoPolicy.LoadAsync(repo.Trees, main.Tree, ct);
+			var paths = candidate?.Touched ?? touched!.Select(change => change.Path).ToList();
 
 			// Leases are checked on every attempt, against the policy of the mainline this attempt lands on: a lost
 			// race may have outlived a presented lease or landed a new [leases] required prefix.
 			warnings.Clear();
-			var leaseProblems = await CheckLeasesAsync(record, request, touched, policy, warnings, ct);
+			var leaseProblems = await CheckLeasesAsync(record, request, paths, policy, warnings, ct);
 			if (leaseProblems.Count > 0)
 			{
-				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", leaseProblems, touched.Count, attempt);
+				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", leaseProblems, paths.Count, attempt);
 			}
 
-			var resolver = new ConflictResolver(repo.Objects, policy, validator is null ? null : semantic);
-			var conflicts = new List<PathConflict>();
-			var merged = new List<string>();
-			var changes = new List<PathChange>();
-
-			if (request.Strict)
+			// The fast path: the candidate holds while none of its paths moved since it was reconciled.
+			LandingPlan? plan = null;
+			if (candidate is not null)
 			{
-				foreach (var prefix in request.ReadSet ?? [])
+				if (await Reconciler.MovedSinceAsync(candidate, main.Seq, ct) || (candidate.MachineMerged && candidate.MainSeq != main.Seq))
 				{
-					await foreach (var moved in repo.Paths.ChangedSinceAsync(PathNames.Normalize(prefix), record.BaseSeq, ct))
-					{
-						if (moved.Seq <= main.Seq)
-						{
-							conflicts.Add(new PathConflict(moved.Path, "read-set", "strict", $"changed at seq {moved.Seq}, after the workspace's base seq {record.BaseSeq}"));
-						}
-					}
-				}
-			}
-
-			// Every touched path's mainline version in a few round trips, not one per path.
-			var versions = await repo.Paths.GetManyAsync(touched.Select(change => change.Path).ToList(), main.Seq, ct);
-			for (var index = 0; index < touched.Count; index++)
-			{
-				var change = touched[index];
-				var version = versions[index];
-				if (version is null || version.Seq <= record.BaseSeq)
-				{
-					changes.Add(new PathChange(change.Path, change.New));
-					continue;
-				}
-
-				// The path moved on mainline after the workspace's base.
-				var mainline = version.Leaf;
-				if (Trees.SameContent(mainline, change.New))
-				{
-					continue;
-				}
-
-				if (Trees.SameContent(mainline, change.Old))
-				{
-					changes.Add(new PathChange(change.Path, change.New));
-					continue;
-				}
-
-				var kind = policy.PolicyFor(change.Path);
-				var resolution = await resolver.ResolveAsync(change.Path, change.Old, change.New, mainline, ct);
-				if (resolution.Resolved)
-				{
-					changes.Add(new PathChange(change.Path, resolution.Leaf));
-					merged.Add($"{change.Path} ({resolution.How})");
+					candidate = null;
 				}
 				else
 				{
-					conflicts.Add(new PathConflict(change.Path, "both-rewrote", kind,
-						$"mainline changed it at seq {version.Seq} after the workspace's base seq {record.BaseSeq}"));
+					var changes = candidate.Changes.Select(change => new PathChange(change.Path, change.Leaf)).ToList();
+					try
+					{
+						var edited = await repo.Trees.EditAsync(main.Tree, changes, ct);
+						plan = new LandingPlan(LandOutcome.WouldLand, edited == main.Tree
+								? $"Workspace '{record.Name}' would land without changing mainline: its changes are already there."
+								: $"Workspace '{record.Name}' can land on seq {main.Seq}: {paths.Count} touched path(s), no conflicts (reconciled at seq {candidate.MainSeq}).",
+							changes, [], candidate.Merged, candidate.MachineMerged, edited);
+					}
+					catch (PathClashException)
+					{
+						candidate = null;
+					}
 				}
-			}
 
-			if (conflicts.Count > 0)
-			{
-				var replay = conflicts.Any(conflict => conflict.Policy is ConflictPolicy.Replay or ConflictPolicy.Semantic or "strict");
-				return Fail(replay ? LandOutcome.NeedsReplay : LandOutcome.Conflict,
-					replay
-						? $"{conflicts.Count} path(s) changed on mainline since seq {record.BaseSeq}; replay the task on seq {main.Seq} ('bassia agent replay') or sync and resolve."
-						: $"{conflicts.Count} path(s) conflict with mainline; sync the workspace to store the conflicts, resolve them, then land.",
-					conflicts, touched.Count, attempt);
-			}
-
-			ObjectId tree;
-			try
-			{
-				tree = await repo.Trees.EditAsync(main.Tree, changes, ct);
-			}
-			catch (PathClashException clash)
-			{
-				return Fail(LandOutcome.NeedsReplay, clash.Message,
-					clash.Paths.Select(path => new PathConflict(path, "clash", ConflictPolicy.Replay, "a file and a directory at the same path")).ToList(), touched.Count, attempt);
-			}
-
-			if (resolver.MachineMerged && validator is not null)
-			{
-				var (ok, message) = await validator.ValidateAsync(tree, ct);
-				if (!ok)
+				if (candidate is null && await PlanFromScratchAsync() is { } refused)
 				{
-					return Fail(LandOutcome.NeedsReplay, $"The semantic merge did not pass validation: {message}",
-						merged.Select(path => new PathConflict(path, "validation", ConflictPolicy.Semantic, message)).ToList(), touched.Count, attempt);
+					return refused;
 				}
+			}
+
+			plan ??= await Planner.PlanAsync(record, touched!, main, policy, request.Strict, request.ReadSet, ct);
+			var reconciled = candidate is not null;
+			if (plan.Tree is not { } tree)
+			{
+				return Fail(plan.Outcome, plan.Message, plan.Conflicts, paths.Count, attempt);
 			}
 
 			if (request.DryRun)
 			{
-				return new LandResult(LandOutcome.WouldLand, tree == main.Tree
-					? $"Workspace '{record.Name}' would land without changing mainline: its changes are already there."
-					: $"Workspace '{record.Name}' can land on seq {main.Seq}: {touched.Count} touched path(s), no conflicts.",
-					null, null, main.Seq, main.CommitId, [], touched.Count, merged, warnings, attempt);
+				return new LandResult(LandOutcome.WouldLand, plan.Message, null, null, main.Seq, main.CommitId, [], paths.Count, plan.Merged, warnings, attempt, reconciled);
 			}
 
 			// Merging and validation take time: the presented leases must still hold right before main moves.
 			var lapsed = await LapsedLeasesAsync(request, ct);
 			if (lapsed.Count > 0)
 			{
-				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", lapsed, touched.Count, attempt);
+				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", lapsed, paths.Count, attempt);
 			}
 
+			var working = await repo.Objects.ReadCommitAsync(record.Working, ct);
 			var commit = working with
 			{
 				Tree = tree,
 				Parents = [main.CommitId],
 				Time = repo.Clock(),
-				MachineMerged = working.MachineMerged || resolver.MachineMerged
+				MachineMerged = working.MachineMerged || plan.MachineMerged
 			};
 			var commitId = await repo.Objects.WriteAsync(commit, ct);
 			var seq = main.Seq + 1;
@@ -273,34 +246,35 @@ public sealed class LandingService(Repository repo, IMergeDriver? semantic = nul
 			await repo.EnsureIndexedAsync(await repo.MainAtAsync(op, ct), ct);
 			var prefixes = applied.Select(change => PathNames.Split(change.Path)[0]).Distinct(StringComparer.Ordinal).ToList();
 			Landed?.Invoke(new LandedEvent(seq, commitId, record.Id, prefixes, repo.Clock()));
-			return new LandResult(LandOutcome.Landed, $"Landed workspace '{record.Name}' at seq {seq} ({touched.Count} touched path(s){(merged.Count > 0 ? $", {merged.Count} merged" : "")}).",
-				seq, commitId, seq, commitId, [], touched.Count, merged, warnings, attempt);
+			return new LandResult(LandOutcome.Landed,
+				$"Landed workspace '{record.Name}' at seq {seq} ({paths.Count} touched path(s){(plan.Merged.Count > 0 ? $", {plan.Merged.Count} merged" : "")}{(reconciled ? ", pre-reconciled" : "")}).",
+				seq, commitId, seq, commitId, [], paths.Count, plan.Merged, warnings, attempt, reconciled);
 		}
 
-		return Fail(LandOutcome.Rejected, $"Mainline kept moving; gave up after {MaxAttempts} attempts.", null, touched.Count, MaxAttempts);
+		return Fail(LandOutcome.Rejected, $"Mainline kept moving; gave up after {MaxAttempts} attempts.", null, touched?.Count ?? candidate?.Touched.Count ?? 0, MaxAttempts);
 	}
 
 	/// <summary>
 	/// The lease problems of a landing under <paramref name="policy"/>, the policy of the mainline it is about to land on:
 	/// presented leases that lapsed, and touched paths under a required prefix that no presented exclusive lease covers.
 	/// </summary>
-	private async Task<List<PathConflict>> CheckLeasesAsync(WorkspaceRecord record, LandRequest request, IReadOnlyList<TreeChange> touched,
+	private async Task<List<PathConflict>> CheckLeasesAsync(WorkspaceRecord record, LandRequest request, IReadOnlyList<string> touched,
 		RepoPolicy policy, List<string> warnings, CancellationToken ct)
 	{
 		var (presented, problems) = await PresentedLeasesAsync(request, ct);
 		var held = await repo.Leases.ListAsync(null, ct);
-		foreach (var change in touched)
+		foreach (var path in touched)
 		{
-			var covered = presented.Any(lease => lease.Mode == LeaseMode.Exclusive && LeaseRules.Covers(lease.Prefix, change.Path));
-			if (policy.EnforcementFor(change.Path) == LeaseEnforcement.LeaseRequired && !covered)
+			var covered = presented.Any(lease => lease.Mode == LeaseMode.Exclusive && LeaseRules.Covers(lease.Prefix, path));
+			if (policy.EnforcementFor(path) == LeaseEnforcement.LeaseRequired && !covered)
 			{
-				problems.Add(new PathConflict(change.Path, "lease", LeaseEnforcement.LeaseRequired, "this prefix requires an exclusive lease, and the landing presents none covering it"));
+				problems.Add(new PathConflict(path, "lease", LeaseEnforcement.LeaseRequired, "this prefix requires an exclusive lease, and the landing presents none covering it"));
 			}
 
-			var others = held.Where(lease => lease.Owner != record.Id && lease.Mode == LeaseMode.Exclusive && LeaseRules.Covers(lease.Prefix, change.Path)).ToList();
+			var others = held.Where(lease => lease.Owner != record.Id && lease.Mode == LeaseMode.Exclusive && LeaseRules.Covers(lease.Prefix, path)).ToList();
 			foreach (var other in others)
 			{
-				warnings.Add($"{change.Path} is under '{other.Prefix}', leased exclusively by workspace {other.Owner}.");
+				warnings.Add($"{path} is under '{other.Prefix}', leased exclusively by workspace {other.Owner}.");
 			}
 		}
 

@@ -110,6 +110,42 @@ public static class ObjectCodec
 				}
 
 				break;
+			case Candidate candidate:
+				Head(writer, "candidate", 13);
+				writer.WriteTextString(candidate.Workspace);
+				WriteId(writer, candidate.Base);
+				WriteId(writer, candidate.Working);
+				writer.WriteInt64(candidate.MainSeq);
+				WriteId(writer, candidate.MainCommit);
+				writer.WriteTextString(candidate.Outcome);
+				writer.WriteTextString(candidate.Message);
+				WriteTexts(writer, candidate.Touched);
+				writer.WriteStartArray(candidate.Changes.Count);
+				foreach (var change in candidate.Changes)
+				{
+					writer.WriteStartArray(2);
+					writer.WriteTextString(change.Path);
+					WriteLeaves(writer, [change.Leaf]);
+					writer.WriteEndArray();
+				}
+
+				writer.WriteEndArray();
+				writer.WriteStartArray(candidate.Conflicts.Count);
+				foreach (var conflict in candidate.Conflicts)
+				{
+					writer.WriteStartArray(4);
+					writer.WriteTextString(conflict.Path);
+					writer.WriteTextString(conflict.Case);
+					writer.WriteTextString(conflict.Policy);
+					writer.WriteTextString(conflict.Detail);
+					writer.WriteEndArray();
+				}
+
+				writer.WriteEndArray();
+				WriteTexts(writer, candidate.Merged);
+				writer.WriteBoolean(candidate.MachineMerged);
+				WriteTime(writer, candidate.Time);
+				break;
 			default:
 				throw new ArgumentException($"Cannot encode {value.GetType().Name}.", nameof(value));
 		}
@@ -136,7 +172,7 @@ public static class ObjectCodec
 			}
 
 			var type = reader.ReadTextString();
-			return type is "tree" or "file" or "conflict" or "commit" or "op" or "view" && reader.PeekState() == CborReaderState.UnsignedInteger
+			return type is "tree" or "file" or "conflict" or "commit" or "op" or "view" or "candidate" && reader.PeekState() == CborReaderState.UnsignedInteger
 				&& reader.ReadInt32() == Version ? type : null;
 		}
 		catch (Exception ex) when (ex is CborContentException or InvalidOperationException or FormatException)
@@ -170,6 +206,7 @@ public static class ObjectCodec
 				"commit" => ReadCommit(reader),
 				"op" => ReadOperation(reader),
 				"view" => ReadView(reader),
+				"candidate" => ReadCandidate(reader),
 				_ => throw new InvalidDataException($"Unknown object type '{type}'.")
 			};
 			reader.ReadEndArray();
@@ -443,6 +480,73 @@ public static class ObjectCodec
 		var closed = ReadOptionalTime(reader);
 		reader.ReadEndArray();
 		return new WorkspaceRecord(id, name, parent, baseCommit, baseSeq, working, status, created, owner, path, host, run, land, replayOf, closed);
+	}
+
+	private static Candidate ReadCandidate(CborReader reader)
+	{
+		var workspace = reader.ReadTextString();
+		var baseCommit = ReadId(reader);
+		var working = ReadId(reader);
+		var mainSeq = reader.ReadInt64();
+		var mainCommit = ReadId(reader);
+		var outcome = reader.ReadTextString();
+		var message = reader.ReadTextString();
+		var touched = ReadTexts(reader);
+		var count = reader.ReadStartArray() ?? throw new InvalidDataException("Indefinite array.");
+		var changes = new List<CandidateChange>(count);
+		for (var index = 0; index < count; index++)
+		{
+			reader.ReadStartArray();
+			var path = reader.ReadTextString();
+			var leaves = ReadLeaves(reader);
+			reader.ReadEndArray();
+			if (leaves.Count != 1)
+			{
+				throw new InvalidDataException("A candidate change holds one leaf.");
+			}
+
+			changes.Add(new CandidateChange(path, leaves[0]));
+		}
+
+		reader.ReadEndArray();
+		count = reader.ReadStartArray() ?? throw new InvalidDataException("Indefinite array.");
+		var conflicts = new List<CandidateConflict>(count);
+		for (var index = 0; index < count; index++)
+		{
+			reader.ReadStartArray();
+			conflicts.Add(new CandidateConflict(reader.ReadTextString(), reader.ReadTextString(), reader.ReadTextString(), reader.ReadTextString()));
+			reader.ReadEndArray();
+		}
+
+		reader.ReadEndArray();
+		var merged = ReadTexts(reader);
+		var machineMerged = reader.ReadBoolean();
+		var time = ReadTime(reader);
+		return new Candidate(workspace, baseCommit, working, mainSeq, mainCommit, outcome, message, touched, changes, conflicts, merged, machineMerged, time);
+	}
+
+	private static void WriteTexts(CborWriter writer, IReadOnlyList<string> texts)
+	{
+		writer.WriteStartArray(texts.Count);
+		foreach (var text in texts)
+		{
+			writer.WriteTextString(text);
+		}
+
+		writer.WriteEndArray();
+	}
+
+	private static IReadOnlyList<string> ReadTexts(CborReader reader)
+	{
+		var count = reader.ReadStartArray() ?? throw new InvalidDataException("Indefinite array.");
+		var texts = new List<string>(count);
+		for (var index = 0; index < count; index++)
+		{
+			texts.Add(reader.ReadTextString());
+		}
+
+		reader.ReadEndArray();
+		return texts;
 	}
 
 	private static T? ReadNull<T>(CborReader reader) where T : struct
