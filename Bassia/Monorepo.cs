@@ -15,8 +15,9 @@ internal sealed class MonorepoException(string message) : Exception(message);
 
 /// <summary>
 /// A monorepo folder on this machine: <c>.bassia/repo.toml</c> says whether it is a local monorepo (the version core
-/// runs in-process over a local-disk blob store and SQLite) or a clone of a <c>bassia-server</c> (the same core over the
-/// server's stores, with a local cache of objects). Both modes give commands the same <see cref="Repository"/>,
+/// runs in-process over a local-disk blob store and a local PostgreSQL, which holds heads, path index, leases and trees)
+/// or a clone of a <c>bassia-server</c> (the same core over the server's stores, with a local cache of objects and, in
+/// the local PostgreSQL, of the trees its work touched). Both modes give commands the same <see cref="Repository"/>,
 /// <see cref="ILanding"/> and <see cref="WorkspaceClient"/>, so every command behaves the same in both.
 /// </summary>
 internal sealed class Monorepo : IDisposable
@@ -25,6 +26,7 @@ internal sealed class Monorepo : IDisposable
 	public const string RepoFile = "repo.toml";
 
 	private readonly ServerConnection? server;
+	private readonly List<IAsyncDisposable> postgres = [];
 
 	private Monorepo(string root, TomlTable settings)
 	{
@@ -39,7 +41,12 @@ internal sealed class Monorepo : IDisposable
 			Url = Config.GetOrNull("server.url") ?? (settings.TryGetValue("url", out var url) ? (string)url : throw new MonorepoException("The clone has no server.url."));
 			server = new ServerConnection(Url, Config.GetOrNull("server.token"));
 			Objects = new CachingObjectStore(new DiskObjectStore(Path.Combine(BassiaDir, "cache")), new RemoteObjectStore(server));
-			Repo = new Repository(Objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks);
+
+			// The trees a clone's work touches are kept in its own schema of the local PostgreSQL; the rest stays on the server.
+			var localTrees = new PostgresTreeStore(LocalPostgres.Connect(Config, settings));
+			postgres.Add(localTrees);
+			Repo = new Repository(Objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks,
+				new CachingTreeStore(localTrees, new RemoteTreeStore(server)));
 			Landing = new RemoteLanding(server);
 			Overview = new RemoteConflictOverview(server);
 		}
@@ -48,8 +55,12 @@ internal sealed class Monorepo : IDisposable
 			var disk = new DiskObjectStore(Path.Combine(BassiaDir, "objects"));
 			Objects = disk;
 			Maintenance = disk;
-			State = new SqliteState(Path.Combine(BassiaDir, "state.db"));
-			Repo = new Repository(disk, State, State, State, chunks);
+			var connection = LocalPostgres.Connect(Config, settings, Path.Combine(BassiaDir, "state.db"));
+			State = new PostgresState(connection);
+			var trees = new PostgresTreeStore(connection);
+			postgres.Add(State);
+			postgres.Add(trees);
+			Repo = new Repository(disk, State, State, State, chunks, trees);
 			var semantic = MergeDrivers.Semantic(Config.Get("merge.semantic_driver"));
 			var validate = Config.GetOrNull("land.validate") is { } command ? new ShellValidationHook(Repo, command) : null;
 			LocalLanding = new LandingService(Repo, semantic, validate);
@@ -83,7 +94,7 @@ internal sealed class Monorepo : IDisposable
 
 	public IObjectStoreMaintenance? Maintenance { get; }
 
-	public SqliteState? State { get; }
+	public PostgresState? State { get; }
 
 	public Repository Repo { get; }
 
@@ -143,16 +154,26 @@ internal sealed class Monorepo : IDisposable
 		Open(FindRoot(Environment.CurrentDirectory)
 			?? throw new MonorepoException($"'{Environment.CurrentDirectory}' is not inside a Bassia monorepo. Run 'bassia init' or 'bassia clone' first."));
 
-	/// <summary>Creates a local monorepo: a local-disk blob store standing in for the cloud, SQLite for heads, path index and leases.</summary>
-	public static async Task<Monorepo> InitAsync(string path, ChunkParameters? chunks = null, CancellationToken ct = default)
+	/// <summary>
+	/// Creates a local monorepo: a local-disk blob store standing in for the cloud, and a schema of the local PostgreSQL
+	/// (<paramref name="postgres"/>, else BASSIA_POSTGRES) for heads, path index, leases and trees.
+	/// </summary>
+	public static async Task<Monorepo> InitAsync(string path, ChunkParameters? chunks = null, string? postgres = null, CancellationToken ct = default)
 	{
 		var root = Path.GetFullPath(path);
+		LocalPostgres.Require(postgres);
 		Prepare(root);
+		if (postgres is not null)
+		{
+			new MonorepoConfig(Path.Combine(root, DirName, MonorepoConfig.FileName)).Set("postgres.connection", postgres);
+		}
+
 		chunks ??= ChunkParameters.Default;
 		chunks.Validate();
 		var settings = new TomlTable
 		{
 			["kind"] = "local",
+			["postgres_schema"] = LocalPostgres.NewSchema(),
 			["chunk_min"] = (long)chunks.Min,
 			["chunk_average"] = (long)chunks.Average,
 			["chunk_max"] = (long)chunks.Max
@@ -164,9 +185,10 @@ internal sealed class Monorepo : IDisposable
 	}
 
 	/// <summary>Creates a clone of a server's monorepo: settings and an empty cache; everything else is read on demand.</summary>
-	public static async Task<Monorepo> CloneAsync(string url, string path, string? token, CancellationToken ct = default)
+	public static async Task<Monorepo> CloneAsync(string url, string path, string? token, string? postgres = null, CancellationToken ct = default)
 	{
 		var root = Path.GetFullPath(path);
+		LocalPostgres.Require(postgres);
 		using (var probe = new ServerConnection(url, token ?? Environment.GetEnvironmentVariable("BASSIA_SERVER_TOKEN")))
 		{
 			var info = await probe.GetAsync<Api.Info>("info", ct);
@@ -175,6 +197,7 @@ internal sealed class Monorepo : IDisposable
 			{
 				["kind"] = "remote",
 				["url"] = url.TrimEnd('/'),
+				["postgres_schema"] = LocalPostgres.NewSchema(),
 				["chunk_min"] = (long)info.ChunkMin,
 				["chunk_average"] = (long)info.ChunkAverage,
 				["chunk_max"] = (long)info.ChunkMax
@@ -186,6 +209,11 @@ internal sealed class Monorepo : IDisposable
 		if (token is not null)
 		{
 			config.Set("server.token", token);
+		}
+
+		if (postgres is not null)
+		{
+			config.Set("postgres.connection", postgres);
 		}
 
 		return Open(root);
@@ -271,5 +299,12 @@ internal sealed class Monorepo : IDisposable
 			?? throw new MonorepoException("Name the workspace (-workspace <name>), or run the command inside a workspace's folder.");
 	}
 
-	public void Dispose() => server?.Dispose();
+	public void Dispose()
+	{
+		server?.Dispose();
+		foreach (var store in postgres)
+		{
+			store.DisposeAsync().AsTask().GetAwaiter().GetResult();
+		}
+	}
 }

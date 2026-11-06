@@ -36,13 +36,13 @@ public sealed class ConcurrentUpdateException(HeadName head) : VersionException(
 /// </summary>
 public sealed class Repository
 {
-	public Repository(IObjectStore objects, IViewStore views, IPathIndex paths, ILeaseStore leases, ChunkParameters? chunks = null)
+	public Repository(IObjectStore objects, IViewStore views, IPathIndex paths, ILeaseStore leases, ChunkParameters? chunks = null, ITreeStore? trees = null)
 	{
 		Store = objects;
 		Views = views;
 		Paths = paths;
 		Leases = leases;
-		Objects = new ObjectAccess(objects, chunks);
+		Objects = new ObjectAccess(objects, chunks, trees);
 		Trees = new Trees(Objects);
 		Diffs = new Diffs(Trees);
 	}

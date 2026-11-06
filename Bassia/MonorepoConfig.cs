@@ -20,6 +20,7 @@ internal sealed class MonorepoConfig(string file)
 		new("agent.command", "claude -p --permission-mode acceptEdits", "The agent an agentic run starts; the prompt is appended as one quoted argument."),
 		new("agent.model", "", "The model passed to the agent as --model, when set."),
 		new("agent.snapshot_quiet", "2", "While an agent runs, snapshot its workspace once its files have been quiet this many seconds, so the server reconciles the workspace with mainline before it lands; 0 turns it off."),
+		new("postgres.connection", "", "The local PostgreSQL a monorepo or clone keeps its state and trees in (an Npgsql connection string; each monorepo gets a schema of its own). Set by 'bassia init -postgres' / 'bassia clone -postgres'.", "BASSIA_POSTGRES"),
 		new("server.url", "", "The bassia-server a clone talks to (set by 'bassia clone')."),
 		new("server.token", "", "The server's shared token, when it requires one.", "BASSIA_SERVER_TOKEN"),
 		new("merge.semantic_driver", "weave-driver", "The language-aware merge driver for the semantic conflict policy (git merge-driver style: %O %A %B); 'off' disables it."),

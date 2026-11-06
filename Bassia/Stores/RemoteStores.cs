@@ -229,6 +229,97 @@ public sealed class RemoteObjectStore(ServerConnection server) : IObjectStore, I
 	}
 }
 
+/// <summary>
+/// Trees on the server, over the <c>/trees</c> calls: a path, a subtree or a set of trees comes back in one round trip as
+/// canonical encodings, each checked against its id here.
+/// </summary>
+public sealed class RemoteTreeStore(ServerConnection server) : ITreeStore
+{
+	public async ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		var result = new List<bool>(ids.Count);
+		foreach (var batch in ids.Chunk(1000))
+		{
+			result.AddRange((await server.PostAsync<Api.HaveReply>("trees/have", new Api.IdsRequest(batch), ct)).Have);
+		}
+
+		return result;
+	}
+
+	public async Task<IReadOnlyDictionary<ObjectId, Tree>> GetManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		var result = new Dictionary<ObjectId, Tree>();
+		foreach (var part in ids.Distinct().Chunk(1000))
+		{
+			foreach (var (id, tree) in await ReadAsync("trees/fetch", new Api.IdsRequest(part), ct))
+			{
+				result[id] = tree;
+			}
+		}
+
+		return result;
+	}
+
+	public async Task<IReadOnlyDictionary<ObjectId, Tree>> GetSubtreesAsync(ObjectId root, int depth, int limit, CancellationToken ct = default) =>
+		await ReadAsync("trees/subtree", new Api.SubtreeRequest(root, depth, limit), ct);
+
+	public async Task<IReadOnlyDictionary<ObjectId, Tree>> GetPathAsync(ObjectId root, IReadOnlyList<string> names, CancellationToken ct = default) =>
+		await ReadAsync("trees/path", new Api.TreePathRequest(root, names), ct);
+
+	public async Task PutManyAsync(IReadOnlyList<(ObjectId Id, Tree Tree)> trees, CancellationToken ct = default)
+	{
+		const int BatchBytes = 8 * 1024 * 1024;
+		var batch = new List<(ObjectId, ReadOnlyMemory<byte>)>();
+		var size = 0;
+		async Task FlushAsync()
+		{
+			if (batch.Count == 0)
+			{
+				return;
+			}
+
+			using var content = new ByteArrayContent(Api.Frames.Write(batch));
+			content.Headers.ContentType = new MediaTypeHeaderValue(Api.Frames.MediaType);
+			using var response = await server.Http.PostAsync(ServerConnection.Path("trees/put"), content, ct);
+			await ServerConnection.EnsureAsync(response, ct);
+			batch.Clear();
+			size = 0;
+		}
+
+		foreach (var (id, tree) in trees)
+		{
+			var bytes = ObjectCodec.Encode(tree);
+			if (size + bytes.Length > BatchBytes)
+			{
+				await FlushAsync();
+			}
+
+			batch.Add((id, bytes));
+			size += bytes.Length;
+		}
+
+		await FlushAsync();
+	}
+
+	private async Task<IReadOnlyDictionary<ObjectId, Tree>> ReadAsync(string call, object body, CancellationToken ct)
+	{
+		using var response = await server.Http.PostAsJsonAsync(ServerConnection.Path(call), body, Api.Json, ct);
+		await ServerConnection.EnsureAsync(response, ct);
+		var result = new Dictionary<ObjectId, Tree>();
+		foreach (var (id, bytes) in Api.Frames.Read(await response.Content.ReadAsByteArrayAsync(ct)))
+		{
+			if (ObjectId.Of(bytes.Span) != id)
+			{
+				throw new VersionException($"Tree {id.Short} read from the server does not match its id.");
+			}
+
+			result[id] = ObjectCodec.Decode<Tree>(bytes);
+		}
+
+		return result;
+	}
+}
+
 /// <summary>Heads on the server: every compare-and-swap is decided there.</summary>
 public sealed class RemoteViewStore(ServerConnection server) : IViewStore
 {

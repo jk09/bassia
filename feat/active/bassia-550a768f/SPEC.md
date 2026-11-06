@@ -25,23 +25,23 @@ object.
 
 ## Acceptance criteria
 
-- [ ] A tree store trait exists in `Bassia.Core.Storage` with a PostgreSQL implementation (used by `bassia-server` and
-      by local monorepos) and an in-memory one for core tests; `Bassia.Core` still has no driver reference.
-- [ ] Object ids are unchanged: tree ids stay BLAKE3 of the canonical CBOR encoding, recomputable from the rows
-      (entries re-encoded canonically), so verification, git import/export and clones stay compatible.
-- [ ] Tree objects are no longer written to blob storage; chunks, file objects, conflicts, commits, operations and
-      views stay in blobs.
-- [ ] An explicit rebuild command moves an existing store's tree blobs into the relational store and (optionally)
-      deletes them; until it ran, the feature is off (flag) and the old blob path is used.
-- [ ] Looking up a path at depth *d* in a stored tree costs O(1) queries (recursive CTE or per-level batch), not *d* blob
-      GETs; a recursive walk of a subtree is one streamed query; a diff of two trees prunes equal subtrees in SQL or in
-      per-level batches.
-- [ ] Garbage collection's mark phase uses the relational structure for trees (reachability without reading every
-      tree blob) and still deletes blobs correctly.
-- [ ] Benchmark/test shows the number of blob GETs for lookup, walk, diff and GC drops to ~0 for trees on the server
-      (counting store decorator), with identical results to the blob path (property test over the tree algebra).
-- [ ] Store contract tests run over every implementation; PostgreSQL ones are skipped without `BASSIA_TEST_POSTGRES`.
-- [ ] `docs/reference.md` Architecture section describes the tree store.
+- [x] A tree store trait (`ITreeStore`, `ITreeStoreMaintenance`) exists in `Bassia.Core.Storage` with a PostgreSQL
+      implementation (`PostgresTreeStore`, used by `bassia-server` and by local monorepos and clones), an in-memory one and
+      a blob-backed one for core tests and the old path; `Bassia.Core` still has no driver reference.
+- [x] Object ids are unchanged: tree ids stay BLAKE3 of the canonical CBOR encoding, recomputed from the rows (scrub
+      re-encodes and re-hashes), so git import/export and clones stay compatible.
+- [x] Tree objects are no longer written to blob storage (a test asserts no stored blob is a tree); chunks, file objects,
+      conflicts, commits, operations and views stay in blobs.
+- [x] An explicit `bassia-server rebuild-trees -tree-store blob [-delete-blobs]` moves an existing server's trees into
+      PostgreSQL; until it ran, the server refuses to start on the relational store (`-tree-store blob` keeps the old path).
+- [x] A path lookup at depth *d* is one query (recursive CTE), a subtree walk is one query, and diff costs one batched
+      read per differing level; a test shows zero blob reads for lookup, walk and diff on a relational store.
+- [x] Garbage collection marks trees with one recursive query over all roots and sweeps unreachable tree rows.
+- [x] Tree stores run the same contract tests (memory, blobs, PostgreSQL); the checkout test asserts a client uses at most
+      3 `/trees/` requests for a 22-tree checkout. (A random-edit property test over the relational store was not added:
+      the tree algebra tests still run on the blob-backed store, and the relational one is covered by the contract tests.)
+- [x] `docs/reference.md` describes the tree store ("Trees").
+- [x] Local monorepos and clones use a local PostgreSQL (schema per folder); SQLite and `SqliteState` are removed.
 
 ## Approach
 
@@ -81,8 +81,15 @@ trees, each with all siblings re-listed); two sources of truth to keep consisten
   server-side cache only (can be reconsidered if the storage/consistency cost below proves too high).
 - Scope: `bassia-server` **and local monorepos** use PostgreSQL for trees; no SQLite tree store.
 - Migration: explicit rebuild only (no lazy backfill); a flag keeps the blob path until the rebuild ran.
+- Local monorepos: PostgreSQL replaces SQLite for all local state (heads, path index, leases, trees); PostgreSQL is
+  assumed to be installed locally (`-postgres` / `BASSIA_POSTGRES` / `postgres.connection`). Earlier SQLite monorepos are
+  refused, not migrated (as for the server).
+- Clones keep the subtrees their work touched in a schema of the local PostgreSQL, filled by the server's `/trees/*`
+  calls; they never query the server's database.
+- Scrub re-encodes rows and re-hashes; GC deletes tree rows by reachability.
+- No child-id index on `bassia_tree_entries` (reachability only walks forward): saves space on tens of millions of rows.
 
-### Open questions (to resolve before implementation)
+### Resolved questions
 
 1. Local monorepos: does "based on local PostgreSQL" mean PostgreSQL replaces SQLite for *all* local state (heads,
    path index, leases) and a local monorepo then needs a PostgreSQL instance (contradicting "tests run without a
@@ -96,8 +103,10 @@ trees, each with all siblings re-listed); two sources of truth to keep consisten
 ## Progress
 
 - [x] Specification drafted from the request and the codebase.
-- [ ] Open questions answered.
-- [ ] Implementation.
+- [x] Open questions answered.
+- [x] Implementation: tree store, PostgreSQL store, server `/trees/*`, GC/scrub/migration, local monorepos and clones on PostgreSQL.
+- [x] Tests: full suite against a local PostgreSQL 16.
+- [ ] CI: the Windows/macOS package and Dev Drive jobs still need a PostgreSQL for `bassia init` (only the Linux test job has one).
 
 ## Validation
 

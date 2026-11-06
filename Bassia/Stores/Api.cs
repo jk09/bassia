@@ -52,11 +52,11 @@ public static class Api
 
 	public sealed record UrlsReply(IReadOnlyList<UrlEntry> Urls);
 
-	public sealed record BatchRequest(IReadOnlyList<ObjectId> Ids, int Depth = 0);
+	/// <summary>A tree and the trees below it, down to <see cref="Depth"/> levels, at most <see cref="Limit"/> trees (<c>/trees/subtree</c>).</summary>
+	public sealed record SubtreeRequest(ObjectId Root, int Depth, int Limit);
 
-	public sealed record BatchObject(ObjectId Id, string Data);
-
-	public sealed record BatchReply(IReadOnlyList<BatchObject> Objects);
+	/// <summary>The trees along a path: the root, then the directory named by each of <see cref="Names"/> (<c>/trees/path</c>).</summary>
+	public sealed record TreePathRequest(ObjectId Root, IReadOnlyList<string> Names);
 
 	/// <summary>The current mainline head, its seq and commit (GetHead).</summary>
 	public sealed record MainReply(ObjectId Head, long Seq, ObjectId Commit, ObjectId Tree);

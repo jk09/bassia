@@ -11,10 +11,10 @@ internal sealed class TestRepo
 {
 	public static readonly ChunkParameters SmallChunks = new(64, 256, 1024);
 
-	public TestRepo(IObjectStore? objects = null)
+	public TestRepo(IObjectStore? objects = null, ITreeStore? trees = null)
 	{
 		Objects = objects ?? new MemoryObjectStore();
-		Repo = new Repository(Objects, Views, Paths, Leases, SmallChunks);
+		Repo = new Repository(Objects, Views, Paths, Leases, SmallChunks, trees);
 		Landing = new LandingService(Repo);
 		Workspaces = new WorkspaceService(Repo);
 	}

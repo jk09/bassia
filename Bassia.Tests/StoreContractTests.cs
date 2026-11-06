@@ -4,24 +4,19 @@ using Bassia.Core.Model;
 using Bassia.Core.Storage;
 using Bassia.Stores;
 
-/// <summary>The same contract over every implementation of the mutable stores: memory (reference) and SQLite.</summary>
+/// <summary>The contract of the mutable stores over the in-memory reference (PostgreSQL's is <c>PostgresStateTests</c>).</summary>
 public sealed class StoreContractTests : IDisposable
 {
 	private readonly TempDirectory temp = new();
 
 	public void Dispose() => temp.Dispose();
 
-	public static TheoryData<string> Kinds => ["memory", "sqlite"];
+	public static TheoryData<string> Kinds => ["memory"];
 
 	private (IViewStore Views, IPathIndex Paths, ILeaseStore Leases) Create(string kind)
 	{
-		if (kind == "memory")
-		{
-			return (new MemoryViewStore(), new MemoryPathIndex(), new MemoryLeaseStore());
-		}
-
-		var state = new SqliteState(temp.Combine($"state-{Guid.NewGuid():N}.db"));
-		return (state, state, state);
+		return kind == "memory" ? (new MemoryViewStore(), new MemoryPathIndex(), new MemoryLeaseStore())
+			: throw new ArgumentException($"Unknown kind '{kind}'.");
 	}
 
 	private static readonly ObjectId A = ObjectId.Of([1]);

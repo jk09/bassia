@@ -63,7 +63,7 @@ internal static class Backends
 	}
 }
 
-/// <summary>The mutable stores' contract on PostgreSQL (the same cases as memory and SQLite, plus several nodes).</summary>
+/// <summary>The mutable stores' contract on PostgreSQL (the same cases as memory, plus several nodes).</summary>
 public sealed class PostgresStateTests
 {
 	[Fact]
@@ -284,7 +284,8 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 	{
 		var connection = new ServerConnection(url, null, handler);
 		var objects = new CachingObjectStore(new DiskObjectStore(cache), new RemoteObjectStore(connection));
-		var repo = new Repository(objects, new RemoteViewStore(connection), new RemotePathIndex(connection), new RemoteLeaseStore(connection), new ChunkParameters(1024, 4096, 16384));
+		var trees = new CachingTreeStore(new MemoryTreeStore(), new RemoteTreeStore(connection));
+		var repo = new Repository(objects, new RemoteViewStore(connection), new RemotePathIndex(connection), new RemoteLeaseStore(connection), new ChunkParameters(1024, 4096, 16384), trees);
 		return (repo, new RemoteLanding(connection), connection);
 	}
 
@@ -337,6 +338,9 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 			var fetches = handler.Count("/objects/fetch");
 			// One by one this checkout would cost ~260 requests (22 trees, a file object, 221+ chunks).
 			Assert.True(fetches + singleReads <= 16, $"checkout used {fetches} batched and {singleReads} single object requests");
+
+			// The 22 trees come from the tree store: the whole subtree in a call or two, and no tree is read as an object.
+			Assert.True(handler.Count("/api/v1/trees/") <= 3, $"checkout used {handler.Count("/api/v1/trees/")} tree requests: {handler.Paths()}");
 
 			handler.Reset();
 			var (_, second) = await workspaces.CreateAsync("two", temp.Combine("two"));

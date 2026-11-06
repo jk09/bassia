@@ -44,12 +44,14 @@ internal static class CommandTable
 	public static readonly IReadOnlyList<CommandSpec> Commands =
 	[
 		// ----- monorepo -----
-		new("init", null, "Create a local monorepo: the version core runs in-process over a local-disk blob store (a stand-in for cloud storage) and SQLite.",
-			[new("path", "dir", "The folder (new or empty). Default: the current folder.")],
+		new("init", null, "Create a local monorepo: the version core runs in-process over a local-disk blob store (a stand-in for cloud storage) and a local PostgreSQL (state and trees).",
+			[new("path", "dir", "The folder (new or empty). Default: the current folder."),
+				new("postgres", "connection", "The local PostgreSQL connection string (else BASSIA_POSTGRES); the monorepo gets a schema of its own.")],
 			["bassia init -path R:\\acme", "bassia init"], MonorepoCommands.InitAsync, Positional: "path"),
 		new("clone", null, "Make this machine a client of a bassia-server's monorepo. Nothing is downloaded until something reads it.",
 			[new("from", "url", "The server's URL.", Required: true), new("path", "dir", "The folder (new or empty). Default: named after the server."),
-				new("token", "token", "The server's shared token, when it requires one (else BASSIA_SERVER_TOKEN).")],
+				new("token", "token", "The server's shared token, when it requires one (else BASSIA_SERVER_TOKEN)."),
+				new("postgres", "connection", "The local PostgreSQL connection string (else BASSIA_POSTGRES): the clone keeps the trees its work touches there.")],
 			["bassia clone -from http://bassia.example.com:8080 -path acme"], MonorepoCommands.CloneAsync, Positional: "from"),
 		new("status", null, "Whether the current folder is in a monorepo: mainline's seq, the open workspaces, live runs and what needs a replay.",
 			[], ["bassia status", "bassia -C R:\\acme status -human"], MonorepoCommands.StatusAsync),

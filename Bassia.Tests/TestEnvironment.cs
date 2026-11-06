@@ -51,6 +51,9 @@ internal static class TestEnvironment
 		// A test runner may hand bassia a terminal; a bare 'bassia' must still print the plain help.
 		ProgramCli.Interactive = () => false;
 		Environment.SetEnvironmentVariable("BASSIA_USER", "tester");
+
+		// A local monorepo keeps its state in PostgreSQL (a schema of its own); tests use the test database.
+		Environment.SetEnvironmentVariable("BASSIA_POSTGRES", Environment.GetEnvironmentVariable("BASSIA_TEST_POSTGRES"));
 	}
 
 	public static void EnsureGitIdentity()

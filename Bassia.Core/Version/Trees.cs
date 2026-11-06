@@ -29,8 +29,9 @@ public sealed class Trees(ObjectAccess objects)
 			return new Leaf(EntryKind.Tree, root, (await objects.ReadTreeAsync(root, ct)).TotalSize);
 		}
 
-		var tree = await objects.ReadTreeAsync(root, ct);
 		var parts = PathNames.Split(path);
+		await objects.PrefetchPathAsync(root, parts[..^1], ct);
+		var tree = await objects.ReadTreeAsync(root, ct);
 		for (var index = 0; index < parts.Length; index++)
 		{
 			var entry = tree.Find(parts[index]);
@@ -58,6 +59,7 @@ public sealed class Trees(ObjectAccess objects)
 	/// <summary>Every non-directory leaf under <paramref name="tree"/>, depth first, paths prefixed with <paramref name="prefix"/>.</summary>
 	public async IAsyncEnumerable<(string Path, Leaf Leaf)> WalkAsync(ObjectId tree, string prefix = "", [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
 	{
+		await objects.PrefetchSubtreeAsync(tree, ct: ct);
 		foreach (var entry in (await objects.ReadTreeAsync(tree, ct)).Entries)
 		{
 			var path = PathNames.Join(prefix, entry.Name);
@@ -195,7 +197,7 @@ public sealed class Trees(ObjectAccess objects)
 		while (level.Count > 0)
 		{
 			level = level.Where(pair => pair.Old != pair.New).ToList();
-			await objects.PrefetchAsync(level.SelectMany(pair => new[] { pair.Old, pair.New }).OfType<ObjectId>(), ct);
+			await objects.PrefetchTreesAsync(level.SelectMany(pair => new[] { pair.Old, pair.New }).OfType<ObjectId>(), ct);
 			var next = new List<(ObjectId? Old, ObjectId? New, string Prefix)>();
 			foreach (var (o, n, at) in level)
 			{

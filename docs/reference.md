@@ -141,7 +141,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 
 | Area | Commands |
 | --- | --- |
-| Monorepo | `init [-path <dir>]`, `clone -from <url> [-path <dir>] [-token <t>]`, `status`, `version`, `help` |
+| Monorepo | `init [-path <dir>] [-postgres <connection>]`, `clone -from <url> [-path <dir>] [-token <t>] [-postgres <connection>]`, `status`, `version`, `help` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>`, `config unset -key <k>` |
 | Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-load <rules>]`, `workspace clone -from <w> -name <n> [-load <rules>]`, `workspace checkout <w> [-load <rules>]`, `workspace load [<w>] [-load <rules>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
@@ -439,8 +439,8 @@ workspace on the machine: objects never change).
 Replies (JSON, object batches) are compressed (Brotli or gzip) when the client accepts it. Every object read from
 the server is checked against its id before it is cached.
 
-The state - heads, path index and leases - lives in PostgreSQL only. SQLite was removed from the server (local
-monorepos made by `bassia init` still keep their state in SQLite); `-state postgres` is still accepted, any other
+The state - heads, path index, leases and trees - lives in PostgreSQL only. SQLite is gone from Bassia altogether (local
+monorepos made by `bassia init` keep their state in a local PostgreSQL too); `-state postgres` is still accepted, any other
 `-state` is refused, and a data folder still holding an earlier server's `state.db` is refused at start, because that
 state is not migrated: move the file away to start on PostgreSQL. The data folder holds the key that signs blob URLs
 and, with the default `-storage disk`, the blob container `objects/` - a local-disk stand-in for cloud blob storage,
@@ -665,7 +665,7 @@ Bassia has four projects; each depends only on the ones before it.
      implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
      them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
-   may use (`Stores`: `SqliteState` (a local monorepo) and `PostgresState` (`bassia-server`) for heads, path index and leases; `S3ObjectStore` and
+   may use (`Stores`: `PostgresState` (`bassia-server` and local monorepos) for heads, path index and leases and `PostgresTreeStore` for trees; `S3ObjectStore` and
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
    (`Platform`), and the dashboard (`Web`).
@@ -674,6 +674,32 @@ Bassia has four projects; each depends only on the ones before it.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
    disk, garbage collection), the store contract over memory and SQLite, the CLI in-process on local monorepos, the
    server in-process with clients over HTTP (on PostgreSQL), and git interop.
+
+
+### Trees
+
+Chunks, file objects, conflicts, commits, operations and views are blobs. **Trees are not**: a tree is stored as rows in
+PostgreSQL (`ITreeStore`; `PostgresTreeStore` keeps `bassia_trees` and `bassia_tree_entries`, keyed by tree and entry
+name with the entry's position, so a tree is rebuilt in canonical order). Ids do not change - a tree's id is still the
+BLAKE3 hash of its canonical CBOR encoding, recomputed from the rows by `scrub` - so git import and export, clones and
+history are unaffected. What this buys is traversal without a blob `GET` per directory:
+
+| Operation | Cost |
+| --- | --- |
+| Path lookup at any depth (`Trees.GetAsync`) | one recursive query (`GetPathAsync`) |
+| Walk of a subtree (`WalkAsync`, checkout) | one recursive query (`GetSubtreesAsync`, at most 20 000 trees), then the cache |
+| Diff of two trees | one query per level for the levels that differ (equal subtrees pruned by id) |
+| Garbage collection | trees are marked by one recursive query over all roots (`ReachAsync`); unreachable rows older than the grace period are deleted |
+
+A clone keeps its own trees in its schema of the local PostgreSQL (`CachingTreeStore` over `RemoteTreeStore`): the
+`/trees/{have,fetch,subtree,path,put}` calls return whole subtrees as canonical encodings, each verified against its id,
+and only the subtrees the clone's work touched are kept - never the whole monorepo.
+
+A server that kept trees as blobs refuses to start on the relational store until they are moved:
+`bassia-server rebuild-trees -tree-store blob [-delete-blobs]` copies every tree the heads reach into PostgreSQL
+(`-tree-store blob` keeps the old behaviour meanwhile). New servers and monorepos start relational. Local monorepos
+need a PostgreSQL: `bassia init -postgres "<connection string>"` (or `BASSIA_POSTGRES`, or the `postgres.connection`
+setting); each monorepo folder gets a schema of its own named in `.bassia/repo.toml`.
 
 
 ## Build
@@ -707,8 +733,8 @@ identities, equal-subtree pruning), every landing case and conflict policy, stri
 undo and restore, the path index and its rebuild from the operation log, leases and fencing, a swarm of concurrent
 agents landing through several landing services, a replay landing with the original change id, garbage collection
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
-materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` holds the in-memory and SQLite
-stores to the same contract. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
+materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` and `PostgresStateTests` hold the
+in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict

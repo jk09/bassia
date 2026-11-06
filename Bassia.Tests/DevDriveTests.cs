@@ -176,8 +176,6 @@ public sealed class DevDriveTests : IDisposable
 			return;
 		}
 
-		// SQLite's connection pool keeps state.db open, and Windows deletes no open file.
-		Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
 		try
 		{
 			foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))

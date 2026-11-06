@@ -166,7 +166,7 @@ bassia clone -from http://bassia.example.com:8080 -path ~/acme -token <token>   
 ```
 
 The version core reaches storage only through four small interfaces - objects, heads, the path index and leases - so
-the same core runs in a local monorepo (`bassia init`: a local-disk blob container and SQLite) and in `bassia-server`
+the same core runs in a local monorepo (`bassia init`: a local-disk blob container and a local PostgreSQL) and in `bassia-server`
 (the local-disk blob container, S3 or Azure Blob Storage; its state always in PostgreSQL, such as Azure Database for PostgreSQL). A client talks to the server and
 caches every object it reads, in batches, for all its workspaces. Large chunks travel between
 clients and blob storage on signed URLs; the server never proxies file bytes. Every test runs without a cloud account; the server's tests need a local PostgreSQL (`BASSIA_TEST_POSTGRES`).

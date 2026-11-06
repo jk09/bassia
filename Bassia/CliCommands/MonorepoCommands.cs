@@ -13,7 +13,7 @@ internal static class MonorepoCommands
 	public static async Task<int> InitAsync(Invocation invocation)
 	{
 		var path = invocation.Get("path") ?? Environment.CurrentDirectory;
-		using var monorepo = await Monorepo.InitAsync(path);
+		using var monorepo = await Monorepo.InitAsync(path, postgres: invocation.Get("postgres"));
 		var main = await monorepo.Repo.GetMainAsync();
 		return Ok(invocation, $"Created a local monorepo in '{monorepo.Root}': blobs in .bassia/objects (local-disk stand-in for cloud storage), " +
 			"heads, path index and leases in .bassia/state.db. Next: 'bassia import -git <url>' or 'bassia workspace create <name>'.",
@@ -30,7 +30,7 @@ internal static class MonorepoCommands
 	{
 		var url = invocation.Require("from");
 		var path = invocation.Get("path") ?? Path.Combine(Environment.CurrentDirectory, new Uri(url).Host.Split('.')[0]);
-		using var monorepo = await Monorepo.CloneAsync(url, path, invocation.Get("token"));
+		using var monorepo = await Monorepo.CloneAsync(url, path, invocation.Get("token"), invocation.Get("postgres"));
 		var main = await monorepo.Repo.GetMainAsync();
 		return Ok(invocation, $"Cloned '{url}' into '{monorepo.Root}': nothing is downloaded until a workspace or a command reads it.",
 			new Dictionary<string, object?>

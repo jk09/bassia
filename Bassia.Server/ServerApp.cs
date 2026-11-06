@@ -21,7 +21,7 @@ using OpenTelemetry.Metrics;
 
 /// <summary>
 /// The single-node server: the version core over the server's stores (a blob container - local disk or S3 - and
-/// SQLite for heads, path index and leases), the RPC surface clients' remote stores call, signed URLs so large chunks
+/// PostgreSQL for heads, path index, leases and trees), the RPC surface clients' remote stores call, signed URLs so large chunks
 /// never pass through it, the landing service (the only writer of mainline), a watch stream, and the dashboard.
 /// </summary>
 internal sealed class ServerApp : IAsyncDisposable
@@ -82,7 +82,27 @@ internal sealed class ServerApp : IAsyncDisposable
 			Disk = disk;
 		}
 
-		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks);
+		if (options.TreeStore.Equals("postgres", StringComparison.OrdinalIgnoreCase))
+		{
+			var trees = new PostgresTreeStore(options.Postgres);
+			Trees = trees;
+			if (!trees.IsReadyAsync().GetAwaiter().GetResult())
+			{
+				if (State.GetHeadAsync(HeadName.Main).AsTask().GetAwaiter().GetResult() is not null)
+				{
+					throw new ArgumentException("This server's trees are still stored as blobs. Run 'bassia-server rebuild-trees' once to move them into PostgreSQL " +
+						"(or start with -tree-store blob to keep using blobs).");
+				}
+
+				trees.MarkReadyAsync().GetAwaiter().GetResult();
+			}
+		}
+		else if (!options.TreeStore.Equals("blob", StringComparison.OrdinalIgnoreCase))
+		{
+			throw new ArgumentException($"-tree-store '{options.TreeStore}' is not supported: use postgres or blob.");
+		}
+
+		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees);
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
 		Landing.Landed += landed => Publish(new Api.WatchEvent("landed", landed.Seq, landed.Prefixes, landed.Workspace, landed.Time));
@@ -95,6 +115,9 @@ internal sealed class ServerApp : IAsyncDisposable
 	private static readonly TimeSpan UrlLifetime = TimeSpan.FromMinutes(30);
 
 	public IServerState State { get; }
+
+	/// <summary>The relational tree store (null when trees are blobs).</summary>
+	public PostgresTreeStore? Trees { get; }
 
 	public AzureBlobObjectStore? Azure { get; }
 
@@ -368,36 +391,50 @@ internal sealed class ServerApp : IAsyncDisposable
 		});
 
 		// Objects.
-		api.MapPost("/objects/have", async (HttpRequest request) => Json(new Api.HaveReply(await Blobs.HasAsync((await BodyAsync<Api.IdsRequest>(request)).Ids))));
+		api.MapPost("/objects/have", async (HttpRequest request) => Json(new Api.HaveReply(await HaveAsync((await BodyAsync<Api.IdsRequest>(request)).Ids))));
 		api.MapGet("/objects/{id}/stat", async (string id) =>
-			TryId(id, out var objectId) && await Blobs.StatAsync(objectId) is { } stat ? Json(new Api.StatReply(stat.Length)) : Error(404, $"No object {id}."));
-		api.MapGet("/objects/{id}", ReadObjectAsync);
-		api.MapPut("/objects/{id}", PutObjectAsync);
-		api.MapPost("/objects/batch", async (HttpRequest request) =>
+			TryId(id, out var objectId) && await StatObjectAsync(objectId) is { } stat ? Json(new Api.StatReply(stat.Length)) : Error(404, $"No object {id}."));
+
+		// Trees (directories) live in the tree store; a path, a subtree or a set of trees comes back in one call.
+		api.MapPost("/trees/have", async (HttpRequest request) => Json(new Api.HaveReply(await Repo.Objects.TreeStore.HasAsync((await BodyAsync<Api.IdsRequest>(request)).Ids))));
+		api.MapPost("/trees/fetch", async (HttpRequest request) =>
+			TreeFrames(await Repo.Objects.TreeStore.GetManyAsync((await BodyAsync<Api.IdsRequest>(request)).Ids.Take(5000).ToList(), request.HttpContext.RequestAborted)));
+		api.MapPost("/trees/subtree", async (HttpRequest request) =>
 		{
-			var body = await BodyAsync<Api.BatchRequest>(request);
-			var result = new List<Api.BatchObject>();
-			var pending = new Queue<(ObjectId Id, int Depth)>(body.Ids.Select(id => (id, 0)));
-			var seen = new HashSet<ObjectId>();
-			while (pending.TryDequeue(out var item) && result.Count < 5000)
+			var body = await BodyAsync<Api.SubtreeRequest>(request);
+			return TreeFrames(await Repo.Objects.TreeStore.GetSubtreesAsync(body.Root, Math.Max(0, body.Depth), Math.Clamp(body.Limit, 1, ObjectAccess.SubtreeLimit), request.HttpContext.RequestAborted));
+		});
+		api.MapPost("/trees/path", async (HttpRequest request) =>
+		{
+			var body = await BodyAsync<Api.TreePathRequest>(request);
+			return TreeFrames(await Repo.Objects.TreeStore.GetPathAsync(body.Root, body.Names.Take(1000).ToList(), request.HttpContext.RequestAborted));
+		});
+		api.MapPost("/trees/put", async (HttpRequest request) =>
+		{
+			var trees = new List<(ObjectId, Tree)>();
+			foreach (var (id, bytes) in Api.Frames.Read(await ReadBodyAsync(request)))
 			{
-				if (!seen.Add(item.Id) || await Blobs.ReadAsync(item.Id) is not { } bytes || ObjectCodec.TypeOf(bytes) is null)
+				if (ObjectId.Of(bytes.Span) != id)
 				{
-					continue;
+					return Error(StatusCodes.Status400BadRequest, $"Tree {id.Short}: the bytes do not hash to its id.");
 				}
 
-				result.Add(new Api.BatchObject(item.Id, Convert.ToBase64String(bytes.Span)));
-				if (item.Depth < body.Depth && ObjectCodec.Decode(bytes) is Tree tree)
+				try
 				{
-					foreach (var entry in tree.Entries.Where(entry => entry.Kind == EntryKind.Tree))
-					{
-						pending.Enqueue((entry.Id, item.Depth + 1));
-					}
+					trees.Add((id, ObjectCodec.Decode<Tree>(bytes)));
+				}
+				catch (InvalidDataException ex)
+				{
+					return Error(StatusCodes.Status400BadRequest, $"Refused a malformed tree {id.Short}: {ex.Message}");
 				}
 			}
 
-			return Json(new Api.BatchReply(result));
+			await Repo.Objects.TreeStore.PutManyAsync(trees, request.HttpContext.RequestAborted);
+			ObjectsStored.Add(trees.Count);
+			return Results.NoContent();
 		});
+		api.MapGet("/objects/{id}", ReadObjectAsync);
+		api.MapPut("/objects/{id}", PutObjectAsync);
 		// Many small objects in one reply; those missing or large enough for a direct URL are left out.
 		api.MapPost("/objects/fetch", async (HttpRequest request) =>
 		{
@@ -411,6 +448,16 @@ internal sealed class ServerApp : IAsyncDisposable
 						found.Add((id, bytes));
 					}
 				});
+			var lacking = body.Ids.Distinct().Take(5000).Except(found.Select(item => item.Item1)).ToList();
+			if (lacking.Count > 0)
+			{
+				// A tree asked for as an object (an older client): its canonical encoding, from the tree store.
+				foreach (var (id, tree) in await Repo.Objects.TreeStore.GetManyAsync(lacking, request.HttpContext.RequestAborted))
+				{
+					found.Add((id, ObjectCodec.Encode(tree)));
+				}
+			}
+
 			var reply = Api.Frames.Write(found);
 			BytesServed.Add(reply.Length);
 			return Results.Bytes(reply, "application/octet-stream");
@@ -440,7 +487,13 @@ internal sealed class ServerApp : IAsyncDisposable
 				}
 			}
 
-			await Parallel.ForEachAsync(objects, new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
+			var trees = objects.Where(item => ObjectCodec.TypeOf(item.Bytes) == "tree").ToList();
+			if (trees.Count > 0)
+			{
+				await Repo.Objects.TreeStore.PutManyAsync(trees.Select(item => (item.Id, ObjectCodec.Decode<Tree>(item.Bytes))).ToList(), request.HttpContext.RequestAborted);
+			}
+
+			await Parallel.ForEachAsync(objects.Except(trees), new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
 				async (item, ct) => await Blobs.PutAsync(item.Id, item.Bytes, ct));
 			ObjectsStored.Add(objects.Count);
 			return Results.NoContent();
@@ -580,12 +633,58 @@ internal sealed class ServerApp : IAsyncDisposable
 		return buffer.ToArray();
 	}
 
+	/// <summary>Which objects are stored: blobs, or (for an id that is no blob) trees.</summary>
+	private async Task<IReadOnlyList<bool>> HaveAsync(IReadOnlyList<ObjectId> ids)
+	{
+		var have = (await Blobs.HasAsync(ids)).ToList();
+		var missing = ids.Where((_, index) => !have[index]).ToList();
+		if (missing.Count > 0)
+		{
+			var trees = await Repo.Objects.TreeStore.HasAsync(missing);
+			var next = 0;
+			for (var index = 0; index < have.Count; index++)
+			{
+				if (!have[index])
+				{
+					have[index] = trees[next++];
+				}
+			}
+		}
+
+		return have;
+	}
+
+	/// <summary>A blob's size, or the size of a tree's canonical encoding.</summary>
+	private async Task<ObjectStat?> StatObjectAsync(ObjectId id, CancellationToken ct = default)
+	{
+		if (await Blobs.StatAsync(id, ct) is { } stat)
+		{
+			return stat;
+		}
+
+		return (await Repo.Objects.TreeStore.GetManyAsync([id], ct)).TryGetValue(id, out var tree) ? new ObjectStat(id, ObjectCodec.Encode(tree).Length) : null;
+	}
+
+	private IResult TreeFrames(IReadOnlyDictionary<ObjectId, Tree> trees)
+	{
+		var reply = Api.Frames.Write(trees.Select(pair => (pair.Key, (ReadOnlyMemory<byte>)ObjectCodec.Encode(pair.Value))));
+		BytesServed.Add(reply.Length);
+		return Results.Bytes(reply, "application/octet-stream");
+	}
+
 	/// <summary>Serves an object: small ones and structural objects directly, large chunks by redirect to a signed URL.</summary>
 	private async Task<IResult> ReadObjectAsync(string id, HttpRequest request)
 	{
-		if (!TryId(id, out var objectId) || await Blobs.StatAsync(objectId) is not { } stat)
+		if (!TryId(id, out var objectId) || await StatObjectAsync(objectId) is not { } stat)
 		{
 			return Error(404, $"No object {id}.");
+		}
+
+		if (await Blobs.StatAsync(objectId) is null && (await Repo.Objects.TreeStore.GetManyAsync([objectId])).TryGetValue(objectId, out var stored))
+		{
+			var encoded = ObjectCodec.Encode(stored);
+			BytesServed.Add(encoded.Length);
+			return Results.Bytes(encoded, "application/octet-stream");
 		}
 
 		if (stat.Length >= ServerConnection.DirectTransferThreshold)
@@ -631,7 +730,12 @@ internal sealed class ServerApp : IAsyncDisposable
 		{
 			try
 			{
-				ObjectCodec.Decode(bytes);
+				if (ObjectCodec.Decode(bytes) is Tree tree)
+				{
+					await Repo.Objects.TreeStore.PutManyAsync([(objectId, tree)]);
+					ObjectsStored.Add(1);
+					return Results.NoContent();
+				}
 			}
 			catch (InvalidDataException ex)
 			{
@@ -653,5 +757,14 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		await Reconciling.DisposeAsync();
+		if (Trees is not null)
+		{
+			await Trees.DisposeAsync();
+		}
+
+		if (State is IAsyncDisposable state)
+		{
+			await state.DisposeAsync();
+		}
 	}
 }

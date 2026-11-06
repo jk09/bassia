@@ -8,8 +8,16 @@ using Bassia.Core.Storage;
 /// Typed access to an <see cref="IObjectStore"/>: decoded structural objects (cached, since they never change), file
 /// content assembled from chunks, and writing files and objects with <c>Have</c> first so only missing chunks move.
 /// </summary>
-public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = null)
+public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = null, ITreeStore? treeStore = null)
 {
+	/// <summary>The most trees one subtree prefetch brings into the cache.</summary>
+	public const int SubtreeLimit = 20_000;
+
+	private readonly ITreeStore treeStore = treeStore ?? new ObjectBackedTreeStore(store);
+
+	/// <summary>Where tree objects live: a relational tree store on the server and in local monorepos, else the object store.</summary>
+	public ITreeStore TreeStore => treeStore;
+
 	private const int CacheLimit = 50_000;
 	private const int UploadBatch = 16;
 
@@ -29,27 +37,75 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 			return cached as T ?? throw new VersionException($"Object {id.Short} is a {cached.GetType().Name}, not a {typeof(T).Name}.");
 		}
 
-		var bytes = await store.ReadAsync(id, null, ct) ?? throw new MissingObjectException(id);
 		StoredObject value;
-		try
+		if (typeof(T) == typeof(Tree))
 		{
-			value = ObjectCodec.Decode(bytes);
+			value = (await treeStore.GetManyAsync([id], ct)).TryGetValue(id, out var tree) ? tree : throw new MissingObjectException(id);
 		}
-		catch (InvalidDataException ex)
+		else
 		{
-			throw new VersionException($"Object {id.Short} is malformed: {ex.Message}", ex);
+			var bytes = await store.ReadAsync(id, null, ct) ?? throw new MissingObjectException(id);
+			try
+			{
+				value = ObjectCodec.Decode(bytes);
+			}
+			catch (InvalidDataException ex)
+			{
+				throw new VersionException($"Object {id.Short} is malformed: {ex.Message}", ex);
+			}
 		}
 
+		Remember(id, value);
+		return value as T ?? throw new VersionException($"Object {id.Short} is a {value.GetType().Name}, not a {typeof(T).Name}.");
+	}
+
+	private void Remember(ObjectId id, StoredObject value)
+	{
 		if (cache.Count > CacheLimit)
 		{
 			cache.Clear();
 		}
 
 		cache[id] = value;
-		return value as T ?? throw new VersionException($"Object {id.Short} is a {value.GetType().Name}, not a {typeof(T).Name}.");
+	}
+
+	private void Remember(IReadOnlyDictionary<ObjectId, Tree> trees)
+	{
+		foreach (var (id, tree) in trees)
+		{
+			Remember(id, tree);
+		}
 	}
 
 	public Task<Tree> ReadTreeAsync(ObjectId id, CancellationToken ct = default) => ReadAsync<Tree>(id, ct);
+
+	/// <summary>Brings these trees into the cache in one call (a level of a diff).</summary>
+	public async Task PrefetchTreesAsync(IEnumerable<ObjectId> ids, CancellationToken ct = default)
+	{
+		var missing = ids.Where(id => !cache.ContainsKey(id)).Distinct().ToList();
+		if (missing.Count > 0)
+		{
+			Remember(await treeStore.GetManyAsync(missing, ct));
+		}
+	}
+
+	/// <summary>Brings a tree and the trees below it into the cache in one call: a walk of the subtree then reads nothing more.</summary>
+	public async Task PrefetchSubtreeAsync(ObjectId root, int depth = int.MaxValue, CancellationToken ct = default)
+	{
+		if (!cache.ContainsKey(root))
+		{
+			Remember(await treeStore.GetSubtreesAsync(root, depth, SubtreeLimit, ct));
+		}
+	}
+
+	/// <summary>Brings the trees along a path into the cache in one call, so a lookup at any depth reads nothing more.</summary>
+	public async Task PrefetchPathAsync(ObjectId root, IReadOnlyList<string> names, CancellationToken ct = default)
+	{
+		if (names.Count > 0)
+		{
+			Remember(await treeStore.GetPathAsync(root, names, ct));
+		}
+	}
 
 	public Task<Commit> ReadCommitAsync(ObjectId id, CancellationToken ct = default) => ReadAsync<Commit>(id, ct);
 
@@ -60,7 +116,14 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	public Task<Candidate> ReadCandidateAsync(ObjectId id, CancellationToken ct = default) => ReadAsync<Candidate>(id, ct);
 
 	/// <summary>The objects written inside <see cref="BatchAsync{T}"/>, sent together by <see cref="FlushAsync"/>.</summary>
-	private readonly AsyncLocal<List<(ObjectId Id, byte[] Bytes)>?> deferred = new();
+	private sealed class Pending
+	{
+		public List<(ObjectId Id, byte[] Bytes)> Blobs { get; } = [];
+
+		public List<(ObjectId Id, Tree Tree)> Trees { get; } = [];
+	}
+
+	private readonly AsyncLocal<Pending?> deferred = new();
 
 	/// <summary>
 	/// Runs <paramref name="work"/> with its writes held back and sends them together at the end (or at the first
@@ -73,7 +136,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 			return await work();
 		}
 
-		deferred.Value = [];
+		deferred.Value = new Pending();
 		try
 		{
 			var result = await work();
@@ -89,14 +152,26 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	/// <summary>Sends the writes held back so far; a head may only point at objects that are stored.</summary>
 	public async Task FlushAsync(CancellationToken ct = default)
 	{
-		if (deferred.Value is not { Count: > 0 } pending)
+		if (deferred.Value is not { } pending || (pending.Blobs.Count == 0 && pending.Trees.Count == 0))
 		{
 			return;
 		}
 
-		var items = pending.DistinctBy(item => item.Id).ToList();
-		pending.Clear();
+		var items = pending.Blobs.DistinctBy(item => item.Id).ToList();
+		var trees = pending.Trees.DistinctBy(item => item.Id).ToList();
+		pending.Blobs.Clear();
+		pending.Trees.Clear();
 		await StoreMissingAsync(items, ct);
+		await WriteTreesAsync(trees, ct);
+	}
+
+	/// <summary>Stores trees in the tree store, after the blobs they point at.</summary>
+	private async Task WriteTreesAsync(IReadOnlyList<(ObjectId Id, Tree Tree)> trees, CancellationToken ct)
+	{
+		foreach (var part in trees.Chunk(500))
+		{
+			await treeStore.PutManyAsync(part, ct);
+		}
 	}
 
 	/// <summary>Objects at least this large go one by one (on direct URLs, for a remote store); smaller ones travel in batches.</summary>
@@ -142,20 +217,28 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	{
 		var encoded = values.Select(value => (Value: value, Bytes: ObjectCodec.Encode(value))).Select(item => (item.Value, Id: ObjectId.Of(item.Bytes), item.Bytes)).ToList();
 		var fresh = encoded.Where(item => !cache.ContainsKey(item.Id)).DistinctBy(item => item.Id).ToList();
+		var freshTrees = fresh.Where(item => item.Value is Tree).Select(item => (item.Id, (Tree)item.Value)).ToList();
+		var freshBlobs = fresh.Where(item => item.Value is not Tree).ToList();
 		if (deferred.Value is { } pending)
 		{
-			pending.AddRange(fresh.Select(item => (item.Id, item.Bytes)));
-		}
-		else if (store is IObjectBatchWriter batches && fresh.Count > 1)
-		{
-			await batches.PutManyAsync(fresh.Select(item => (item.Id, (ReadOnlyMemory<byte>)item.Bytes)).ToList(), ct);
+			pending.Blobs.AddRange(freshBlobs.Select(item => (item.Id, item.Bytes)));
+			pending.Trees.AddRange(freshTrees);
 		}
 		else
 		{
-			foreach (var item in fresh)
+			if (store is IObjectBatchWriter batches && freshBlobs.Count > 1)
 			{
-				await store.PutAsync(item.Id, item.Bytes, ct);
+				await batches.PutManyAsync(freshBlobs.Select(item => (item.Id, (ReadOnlyMemory<byte>)item.Bytes)).ToList(), ct);
 			}
+			else
+			{
+				foreach (var item in freshBlobs)
+				{
+					await store.PutAsync(item.Id, item.Bytes, ct);
+				}
+			}
+
+			await WriteTreesAsync(freshTrees, ct);
 		}
 
 		foreach (var item in encoded)
@@ -174,8 +257,19 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 		{
 			if (!cache.ContainsKey(id))
 			{
-				pending.Add((id, bytes));
+				if (value is Tree tree)
+				{
+					pending.Trees.Add((id, tree));
+				}
+				else
+				{
+					pending.Blobs.Add((id, bytes));
+				}
 			}
+		}
+		else if (value is Tree tree)
+		{
+			await WriteTreesAsync([(id, tree)], ct);
 		}
 		else
 		{
@@ -323,7 +417,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 
 		if (deferred.Value is { } pending)
 		{
-			pending.AddRange(chunks);
+			pending.Blobs.AddRange(chunks);
 			return;
 		}
 
