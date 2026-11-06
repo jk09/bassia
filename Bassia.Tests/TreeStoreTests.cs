@@ -235,7 +235,7 @@ public sealed class CloneWithoutPostgresTests : IDisposable
 	[PostgresFact]
 	public async Task ACloneWithoutALocalPostgres_ReadsAndLandsThroughTheServersTrees()
 	{
-		await using var server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0" });
+		await using var server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", NoAuth = true });
 		await server.StartAsync();
 		var saved = Environment.GetEnvironmentVariable("BASSIA_POSTGRES");
 		Environment.SetEnvironmentVariable("BASSIA_POSTGRES", null);

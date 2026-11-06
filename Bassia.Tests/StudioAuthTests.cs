@@ -25,7 +25,7 @@ public sealed class StudioAuthTests : IAsyncLifetime
 
 	public async Task InitializeAsync()
 	{
-		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384) });
+		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", NoAuth = true, Chunks = new ChunkParameters(1024, 4096, 16384) });
 		await server.StartAsync();
 		studio = new StudioApp(new StudioOptions
 		{

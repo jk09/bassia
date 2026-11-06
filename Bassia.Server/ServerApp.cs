@@ -37,6 +37,7 @@ internal sealed class ServerApp : IAsyncDisposable
 	private readonly List<Channel<Api.WatchEvent>> watchers = [];
 	private readonly Lock watchGate = new();
 	private WebApplication? app;
+	private string? accessToken;
 
 	public ServerApp(ServerOptions options)
 	{
@@ -120,6 +121,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			await Azure.CreateIfMissingAsync();
 		}
 
+		accessToken = ResolveToken();
 		await Repo.InitializeAsync("bassia-server");
 		Reconciling.Start();
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
@@ -157,30 +159,106 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	// ----- authorization -----
 
+	/// <summary>The file a generated token is kept in, when the options name none.</summary>
+	public string TokenFile => Path.Combine(options.Data, "token");
+
+	/// <summary>The token this server was given or generated; absent only with <c>-no-auth</c>. Resolved at start, so <c>gc</c> and <c>scrub</c> create none.</summary>
+	private string? ResolveToken() => options.NoAuth ? null : options.Token ?? LoadOrCreateToken(TokenFile);
+
+	/// <summary>Hex, not Base64: the command lines that take a token read a value starting with '-' as another switch.</summary>
+	private static string LoadOrCreateToken(string file)
+	{
+		if (File.Exists(file) && File.ReadAllText(file).Trim() is { Length: > 0 } existing)
+		{
+			return existing;
+		}
+
+		var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+		var create = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+		if (!OperatingSystem.IsWindows())
+		{
+			create.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+		}
+
+		using var writer = new StreamWriter(file, create);
+		writer.Write(token);
+		return token;
+	}
+
+	private bool IsToken(string? presented) => presented is not null && accessToken is not null
+		&& CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(presented)), SHA256.HashData(Encoding.UTF8.GetBytes(accessToken)));
+
 	private async Task AuthorizeAsync(HttpContext context, RequestDelegate next)
 	{
-		var path = context.Request.Path;
-		if (options.Token is null || path.StartsWithSegments("/blobs") || path == "/healthz" || Dashboard.IsAsset(path))
+		var request = context.Request;
+		var path = request.Path;
+		if (path == SignIn.Path)
+		{
+			await SignInAsync(context);
+			return;
+		}
+
+		if (accessToken is null || path.StartsWithSegments("/blobs") || path == "/healthz" || Dashboard.IsAsset(path))
 		{
 			await next(context);
 			return;
 		}
 
-		var presented = context.Request.Headers.Authorization.ToString() is { } header && header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..]
-			: context.Request.Query["token"].FirstOrDefault() ?? context.Request.Cookies["bassia_token"];
-		if (presented is not null && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(presented), Encoding.UTF8.GetBytes(options.Token)))
+		var inUrl = request.Query["token"].FirstOrDefault();
+		var presented = request.Headers.Authorization.ToString() is { } header && header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..]
+			: inUrl ?? request.Cookies[SignIn.Cookie];
+		var page = HttpMethods.IsGet(request.Method) && Dashboard.IsDashboardPath(path);
+		if (IsToken(presented))
 		{
-			if (context.Request.Query.ContainsKey("token"))
+			if (page && inUrl is not null && IsToken(inUrl))
 			{
-				context.Response.Cookies.Append("bassia_token", presented, new CookieOptions { HttpOnly = true, SameSite = SameSiteMode.Strict });
+				// A signed-in browser needs no token in its address bar and history.
+				SignIn.SetCookie(context, inUrl, PublicUrl);
+				context.Response.Redirect(SignIn.PathWithoutToken(request));
+				return;
 			}
 
 			await next(context);
 			return;
 		}
 
+		if (page && SignIn.IsBrowserPage(request))
+		{
+			context.Response.Redirect(SignIn.PathFor(SignIn.PathWithoutToken(request)));
+			return;
+		}
+
 		context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-		await context.Response.WriteAsJsonAsync(new Api.ErrorReply("A bearer token is required (or ?token=<token> once for the dashboard)."), Api.Json);
+		context.Response.Headers.WWWAuthenticate = "Bearer";
+		await context.Response.WriteAsJsonAsync(new Api.ErrorReply("A bearer token is required: 'Authorization: Bearer <token>'. A server started without -token keeps its own in the file 'token' of its data folder."), Api.Json);
+	}
+
+	private async Task SignInAsync(HttpContext context)
+	{
+		var request = context.Request;
+		var target = SignIn.SafeTarget(request.Query["next"].FirstOrDefault());
+		if (accessToken is null || IsToken(request.Cookies[SignIn.Cookie]))
+		{
+			context.Response.Redirect(target);
+			return;
+		}
+
+		if (HttpMethods.IsPost(request.Method))
+		{
+			var form = request.HasFormContentType ? await request.ReadFormAsync(context.RequestAborted) : null;
+			if (IsToken(form?["token"].FirstOrDefault()?.Trim()))
+			{
+				SignIn.SetCookie(context, accessToken, PublicUrl);
+				context.Response.Redirect(target);
+				return;
+			}
+
+			context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+			await SignIn.WritePageAsync(context, target, "That token is not this server's.");
+			return;
+		}
+
+		await SignIn.WritePageAsync(context, target, null);
 	}
 
 	// ----- signed blob URLs -----

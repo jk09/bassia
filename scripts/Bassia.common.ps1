@@ -98,7 +98,7 @@ function ConvertFrom-BassiaToml {
 # `bassia agent start` lets the agent command inherit stdout, so its output precedes the result. The result is the block
 # starting at the last marker line; anything before it is echoed as agent output.
 function Invoke-Bassia {
-	Write-Host "> bassia $($args -join ' ')" -ForegroundColor DarkGray
+	Write-Host "> bassia $(($args -join ' ') -replace '(-token|-key server\.token -value) \S+', '$1 ***')" -ForegroundColor DarkGray
 	$lines = @(& $script:BassiaExe @args)
 	if ($LASTEXITCODE -ne 0) {
 		throw "bassia $($args[0]) failed (exit code $LASTEXITCODE)."

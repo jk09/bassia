@@ -1,6 +1,6 @@
 ---
 name: bassia-cloud-server
-description: Run a lasting bassia-server on the local Azure emulators (Azurite for Blob Storage, PostgreSQL for Azure Database for PostgreSQL) and initialize it from GitHub or other git repositories - starts the emulators and the server, makes a client (a folder connected to the server by bassia clone), and imports the repositories through it. Also reports, stops and resets that server. Use when asked to set up, start, initialize or populate a local Bassia server, to import GitHub/GitLab/git repositories into a Bassia server or monorepo on Azurite/PostgreSQL, or to check, stop or wipe that server. Accepts optional arguments - repository URLs or paths, and the words `history`, `limit <n>`, `prefix <a,b>`, `clone <dir>`, `port <n>`, `token <t>`, `status`, `stop`, `reset`.
+description: Run a lasting bassia-server on the local Azure emulators (Azurite for Blob Storage, PostgreSQL for Azure Database for PostgreSQL) and initialize it from GitHub or other git repositories - starts the emulators and the server, makes a client (a folder connected to the server by bassia clone), and imports the repositories through it. Also reports, stops and resets that server. Use when asked to set up, start, initialize or populate a local Bassia server, to import GitHub/GitLab/git repositories into a Bassia server or monorepo on Azurite/PostgreSQL, or to check, stop or wipe that server. Accepts optional arguments - repository URLs or paths, and the words `history`, `limit <n>`, `prefix <a,b>`, `clone <dir>`, `port <n>`, `token <t>`, `token`, `status`, `stop`, `reset`.
 ---
 
 # bassia-cloud-server
@@ -18,9 +18,10 @@ PowerShell 7 from the root of this checkout: `pwsh -NoProfile -File scripts/bass
 | `limit <n>` | `-Limit <n>`: at most n commits per repository with `history` (default 1000) |
 | `prefix <a,b>` | `-Prefix a,b`: the top-level folder of each repository (default: its name) |
 | `clone <dir>` | `-Clone <dir>`: the client folder to import through (default `~/bassia-monorepo`) |
-| `port <n>`, `token <t>` | `serve -Port <n>` (default 8080), `-Token <t>` (a shared token the API and dashboard then require) |
+| `port <n>`, `token <t>` | `serve -Port <n>` (default 8080), `-Token <t>` (the shared token of the API and dashboard; default: one the server generates, printed by `server-token`) |
 | no repositories | `serve`: start the server only |
 | `status` / `stop` / `reset` | `server-status` / `server-stop` / `server-reset` |
+| `token` | `server-token`: print the token, for the dashboard's sign-in page and for `bassia clone -token` |
 
 ## Steps
 
@@ -42,7 +43,7 @@ PowerShell 7 from the root of this checkout: `pwsh -NoProfile -File scripts/bass
 3. **Report** what the script prints:
    - each repository's folder, commits and files, and the mainline seq,
    - the client (where `bassia workspace create <name>` and `bassia agent start` work),
-   - the dashboard URL.
+   - the dashboard URL, and that it signs in with the token from `server-token`.
    For more history, suggest `bassia -C <client> mainline log`.
 4. **status / stop / reset.**
    - `server-status` prints the URL, mainline seq, data folder, database, container and client, and exits 1 when the

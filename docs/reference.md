@@ -447,8 +447,15 @@ The state - heads, path index, leases and trees - lives in PostgreSQL only (loca
 theirs in a local PostgreSQL too); `-state postgres` is still accepted, any other `-state` is refused. The data folder holds the key that signs blob URLs
 and, with the default `-storage disk`, the blob container `objects/` - a local-disk stand-in for cloud blob storage,
 laid out by hash prefix, so a server and its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
-Authentication is out of scope for this design: `-token` sets one shared bearer token for the API and the dashboard
-(`?token=<token>` once in a browser sets a cookie).
+
+The server is closed by default: the API and the dashboard need one shared token, `-token <t>`, or without it one the
+server generates on first start and keeps in `<data>/token` (owner-only on Unix). Its log names the file, never the
+token. Clients pass it as `bassia clone -token <t>` (or `server.token`, `BASSIA_SERVER_TOKEN`), Studio as `-token`. A
+browser is sent to `/login`, a form that leaves an HttpOnly, SameSite=Strict cookie (Secure over HTTPS);
+`?token=<t>` on a page does the same and redirects to the URL without it. `-no-auth` (`BASSIA_SERVER_NO_AUTH`) serves
+everyone, with a warning in the log. `/healthz`, signed `/blobs` URLs and the dashboard's stylesheet and script need no
+token. The token travels in clear over plain HTTP: beyond one machine, put TLS in front. People's own identities and
+roles are Studio's (`-auth entra`).
 
 The RPC surface under `/api/v1` is what a client's remote stores call:
 

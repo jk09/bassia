@@ -28,13 +28,14 @@
 	./scripts/bassia-local-cloud.ps1 smoke                 # -Bassia <exe> -Server <exe> to test installed builds; -Keep
 	./scripts/bassia-local-cloud.ps1 down -Purge
 	./scripts/bassia-local-cloud.ps1 serve                 # a lasting bassia-server on both; -Port 8080 -Database bassia -Container bassia -Token <t>
+	./scripts/bassia-local-cloud.ps1 server-token          # the token to sign in, clone or start Studio with
 	./scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Limit 200
 	./scripts/bassia-local-cloud.ps1 server-status         # also server-stop, server-reset (an empty monorepo again)
 #>
 [CmdletBinding()]
 param(
 	[Parameter(Mandatory, Position = 0)]
-	[ValidateSet('check', 'up', 'status', 'env', 'test', 'smoke', 'down', 'serve', 'import', 'server-status', 'server-stop', 'server-reset')]
+	[ValidateSet('check', 'up', 'status', 'env', 'test', 'smoke', 'down', 'serve', 'import', 'server-status', 'server-token', 'server-stop', 'server-reset')]
 	[string] $Command,
 
 	# up: how to run the services.
@@ -604,21 +605,22 @@ function Invoke-Smoke {
 		$postgres = $connections.Postgres -replace 'Database=postgres', "Database=$database"
 		$port = Get-FreePort
 		$url = "http://127.0.0.1:$port"
-		$serverArgs = @('-storage', 'azure', '-azure-connection', $connections.AzureBlob, '-azure-container', $blobContainer, '-state', 'postgres', '-postgres', $postgres)
+		$token = "smoke$(Get-Random)"
+		$serverArgs = @('-token', $token, '-storage', 'azure', '-azure-connection', $connections.AzureBlob, '-azure-container', $blobContainer, '-state', 'postgres', '-postgres', $postgres)
 		$log = Join-Path $temp 'server.log'
 		$serverProcess = Start-Process -FilePath $serverExe -ArgumentList (@('-data', (Join-Path $temp 'server'), '-url', $url, '-semantic-driver', 'off') + $serverArgs | ForEach-Object { "`"$_`"" }) `
 			-RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru
 		$info = $null
 		Wait-Until {
 			if ($serverProcess.HasExited) { throw "bassia-server exited ($($serverProcess.ExitCode)):`n$((Get-Content "$log.err" -TotalCount 5) -join "`n")" }
-			try { $script:info = Invoke-RestMethod "$url/api/v1/info" -TimeoutSec 2; $true } catch { $false }
+			try { $script:info = Invoke-RestMethod "$url/api/v1/info" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 2; $true } catch { $false }
 		} 'bassia-server'
 		$info = $script:info
 		Assert-Check 'server runs on Azure Blob Storage' ($info.storage -match 'azure') "storage = $($info.storage)"
 
 		# Clone A imports both repositories with history and lands a change.
 		$a = Join-Path $temp 'a'
-		Invoke-Bassia clone -from $url -path $a | Out-Null
+		Invoke-Bassia clone -from $url -path $a -token $token | Out-Null
 		$import = Invoke-Bassia -C $a import -git "$(Join-Path $temp 'git/api'),$(Join-Path $temp 'git/web')" -history
 		Assert-Check 'import lands every git commit' ($import.seq -eq 5 -and @($import.repository).Count -eq 2) "seq $($import.seq), $(@($import.repository).Count) repositories"
 
@@ -630,7 +632,7 @@ function Invoke-Smoke {
 
 		# Clone B sees it.
 		$b = Join-Path $temp 'b'
-		Invoke-Bassia clone -from $url -path $b | Out-Null
+		Invoke-Bassia clone -from $url -path $b -token $token | Out-Null
 		$view = Invoke-Bassia -C $b workspace create view
 		Assert-Check 'a second clone checks out the landed files' (
 			(Read-Text (Join-Path $view.path 'api/SMOKE.md')) -eq "landed through Azurite and PostgreSQL`n" -and
@@ -704,9 +706,18 @@ function Get-ServerArgs($state, $srv) {
 	@('-storage', 'azure', '-azure-connection', $connections.AzureBlob, '-azure-container', $srv.Container, '-state', 'postgres', '-postgres', $postgres)
 }
 
+# The token the server was given, or the one it generated in its data folder.
+function Get-ServerToken($srv) {
+	if ($srv.Token) { return $srv.Token }
+	$file = Join-Path $srv.Data 'token'
+	if (Test-Path -LiteralPath $file) { return (Get-Content -LiteralPath $file -Raw).Trim() }
+	$null
+}
+
 function Get-ServerMain($srv) {
 	if (-not $srv) { return $null }
-	$headers = $srv.Token ? @{ Authorization = "Bearer $($srv.Token)" } : @{}
+	$token = Get-ServerToken $srv
+	$headers = $token ? @{ Authorization = "Bearer $token" } : @{}
 	try { Invoke-RestMethod "$($srv.Url)/api/v1/main" -Headers $headers -TimeoutSec 3 } catch { $null }
 }
 
@@ -767,6 +778,7 @@ function Invoke-Serve {
 		$null -ne (Get-ServerMain $new)
 	} 'bassia-server'
 	Write-Host "bassia-server: running at $($new.Url) (pid $($process.Id)); blobs in Azurite container '$($new.Container)', state in PostgreSQL database '$($new.Database)', data in $($new.Data), log in $log."
+	Write-Host "bassia-server: sign in with the token from: ./scripts/bassia-local-cloud.ps1 server-token"
 	$new
 }
 
@@ -788,7 +800,10 @@ function Invoke-Import {
 	. (Join-Path $PSScriptRoot 'Bassia.common.ps1')
 
 	$dir = $Clone ? [IO.Path]::GetFullPath($Clone) : ($srv.Clone ? $srv.Clone : (Join-Path $HOME 'bassia-monorepo'))
+	$token = Get-ServerToken $srv
 	if (Test-Path -LiteralPath (Join-Path $dir '.bassia')) {
+		# This server's own client, possibly made before the server had a token.
+		if ($dir -eq $srv.Clone -and $token) { Invoke-Bassia -C $dir config set -key server.token -value $token | Out-Null }
 		$status = Invoke-Bassia -C $dir status
 		if ($status.kind -ne 'remote' -or $status.url.TrimEnd('/') -ne $srv.Url) {
 			throw "'$dir' is a Bassia monorepo of something else ($($status.kind) $($status.url)). Pick another folder with -Clone."
@@ -799,7 +814,7 @@ function Invoke-Import {
 	}
 	else {
 		$cloneArgs = @('clone', '-from', $srv.Url, '-path', $dir)
-		if ($srv.Token) { $cloneArgs += @('-token', $srv.Token) }
+		if ($token) { $cloneArgs += @('-token', $token) }
 		Invoke-Bassia @cloneArgs | Out-Null
 	}
 
@@ -815,7 +830,7 @@ function Invoke-Import {
 	}
 	Write-Host "Imported $(@($result.repository).Count) repositor$((@($result.repository).Count -eq 1) ? 'y' : 'ies'); mainline is at seq $($result.seq)."
 	Write-Host "Clone: $dir  (bassia -C `"$dir`" workspace create <name>)"
-	Write-Host "Dashboard: $($srv.Url)"
+	Write-Host "Dashboard: $($srv.Url) (sign in with the token from: ./scripts/bassia-local-cloud.ps1 server-token)"
 }
 
 function Invoke-ServerStatus {
@@ -829,6 +844,7 @@ function Invoke-ServerStatus {
 	Write-Host "postgres   database $($srv.Database)"
 	Write-Host "azurite    container $($srv.Container)"
 	Write-Host "clone      $($srv.Clone ? $srv.Clone : '(none yet; import makes one)')"
+	Write-Host "token      $($srv.Token ? 'given with -Token' : (Join-Path $srv.Data 'token'))"
 	if (-not $running) { exit 1 }
 }
 
@@ -876,6 +892,12 @@ switch ($Command) {
 	'serve' { $null = Invoke-Serve }
 	'import' { Invoke-Import }
 	'server-status' { Invoke-ServerStatus }
+	'server-token' {
+		$srv = Read-Server
+		$token = $srv ? (Get-ServerToken $srv) : $null
+		if (-not $token) { throw 'No token yet: start the server first with serve.' }
+		$token
+	}
 	'server-stop' { $srv = Read-Server; if ($srv) { Stop-Server $srv } else { Write-Host 'No server set up.' } }
 	'server-reset' { Invoke-ServerReset }
 }
