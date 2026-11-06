@@ -28,7 +28,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 
 	public async Task InitializeAsync()
 	{
-		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Url = "http://127.0.0.1:0", Token = Token, Chunks = new ChunkParameters(1024, 4096, 16384) });
+		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", Token = Token, Chunks = new ChunkParameters(1024, 4096, 16384) });
 		await server.StartAsync();
 		var options = new StudioOptions
 		{
@@ -81,7 +81,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		return await server.Repo.Trees.GetAsync(main.Tree, path) is { } leaf ? Encoding.UTF8.GetString(await server.Repo.Objects.ReadContentAsync(leaf)).TrimEnd() : null;
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Run_ExecutesAsAJob_StreamsOutput_AndLands()
 	{
 		var run = await Runs.StartAsync(new RunSpec(Command: "echo made by the job> made.txt && echo line one && echo line two", Name: "job-run", Land: true), Ann);
@@ -101,7 +101,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		Assert.Equal("job-run", view.WorkspaceName);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Stop_AsksTheJobToStop_AndKeepsWhatItChanged()
 	{
 		var command = (OperatingSystem.IsWindows() ? "echo partial> partial.txt && " : "echo partial> partial.txt && ") + LongCommand;
@@ -117,7 +117,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		Assert.NotNull(await server.Repo.Trees.GetAsync(tree, "partial.txt"));
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Replay_RerunsTheRecordedTaskOnTheNewMainline_KeepingTheChange()
 	{
 		var first = await Runs.StartAsync(new RunSpec(Command: "echo from the task> src/hello.txt", Name: "task"), Ann);
@@ -143,7 +143,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		Assert.Equal(WorkspaceStatus.Replaced, (await server.Repo.ResolveWorkspaceAsync(first.WorkspaceId!)).Record.Status);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task FailedTask_IsReportedAsFailed()
 	{
 		var run = await Runs.StartAsync(new RunSpec(Command: "echo trying && exit 3", Name: "fails"), Ann);
@@ -152,7 +152,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		Assert.Contains("trying", run.Output);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Reports_NeedTheRunsToken()
 	{
 		var run = await Runs.StartAsync(new RunSpec(Command: LongCommand, Name: "guarded"), Ann);
@@ -164,7 +164,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		await FinishedAsync(run);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Starting_NeedsAContributorAndAValidTask()
 	{
 		await Assert.ThrowsAsync<StudioForbiddenException>(() => Runs.StartAsync(new RunSpec(Command: "echo x"), new StudioUser("rita", StudioRole.Reader)));
@@ -177,7 +177,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		await Assert.ThrowsAsync<VersionException>(() => disabled.StartAsync(new RunSpec(Command: "echo x"), Ann));
 	}
 
-	[Fact]
+	[PostgresFact]
 	public void Arguments_PutTheCommandLast()
 	{
 		var start = RunService.Arguments(new RunSpec(Command: "make test -j 4", On: "base", Name: "n", Land: true, Leases: ["src", "docs"], Load: ["src/"]), "run-1");
@@ -186,7 +186,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		Assert.Equal(["agent", "replay", "w123", "-run-id", "run-2", "-land"], replay);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public void ContainerAppsJob_TemplateCarriesTheRunAndTheJobsSecrets()
 	{
 		var options = new ContainerAppsJobOptions("/subscriptions/s/resourceGroups/g/providers/Microsoft.App/jobs/agents", "registry.example/bassia-worker:1",
@@ -201,7 +201,7 @@ public sealed class StudioRunTests : IAsyncLifetime
 		Assert.Contains(container.Env, env => env.Name == "ANTHROPIC_API_KEY" && env.SecretRef == "anthropic-api-key");
 	}
 
-	[Fact]
+	[PostgresFact]
 	public void Options_ParseRunHostSwitches()
 	{
 		var options = StudioOptions.Parse(["-server", "http://s", "-run-host", "aca", "-aca-job", "/jobs/j", "-aca-image", "img", "-aca-secrets", "A=a, B=b"]);

@@ -14,7 +14,7 @@ using Xunit.Abstractions;
 
 /// <summary>
 /// Bassia Studio on the Azure backend (bassia-681e8902): a <c>bassia-server</c> with its objects in Azure Blob Storage on
-/// Azurite and its state in PostgreSQL, and Studio in front of it with the local run host. Through Studio a person
+/// Azurite and its state in PostgreSQL (<c>BASSIA_TEST_POSTGRES</c>; skipped without it), and Studio in front of it with the local run host. Through Studio a person
 /// creates and edits workspaces, lands, meets a conflict, syncs, resolves it and lands; holds a lease; starts an agentic
 /// run as a job that clones the server, reports its output live and lands; and replays a run that needs it. The pages
 /// show what happened, the watch stream tells Studio about each landing, and the blob container and the database hold
@@ -45,7 +45,7 @@ public sealed class StudioAzuriteIntegrationTests(ITestOutputHelper output) : IA
 		return Task.CompletedTask;
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Studio_OnAzuriteAndPostgres_ManagesWorkspacesConflictsLeasesAndCloudRuns()
 	{
 		if (Backends.AzureBlob is not { } azure)
@@ -59,7 +59,7 @@ public sealed class StudioAzuriteIntegrationTests(ITestOutputHelper output) : IA
 		// ----- the server on Azurite (and PostgreSQL), Studio in front of it -----
 
 		var container = "studio" + Guid.NewGuid().ToString("N")[..12];
-		var postgres = Backends.FreshPostgres();
+		var postgres = Backends.RequiredPostgres();
 		await using var server = new ServerApp(new ServerOptions
 		{
 			Data = temp.Combine("server"),
@@ -68,7 +68,6 @@ public sealed class StudioAzuriteIntegrationTests(ITestOutputHelper output) : IA
 			Storage = "azure",
 			AzureConnection = azure,
 			AzureContainer = container,
-			State = postgres is null ? "sqlite" : "postgres",
 			Postgres = postgres
 		});
 		await server.StartAsync();
@@ -84,7 +83,7 @@ public sealed class StudioAzuriteIntegrationTests(ITestOutputHelper output) : IA
 		};
 		await using var studio = new StudioApp(options);
 		await studio.StartAsync();
-		output.WriteLine($"Server {server.Address} on Azurite container '{container}' and {(postgres is null ? "SQLite" : "PostgreSQL")}; Studio {studio.Address}.");
+		output.WriteLine($"Server {server.Address} on Azurite container '{container}' and PostgreSQL; Studio {studio.Address}.");
 		using var http = new HttpClient { BaseAddress = new Uri(studio.Address!) };
 		var landings = new List<long>();
 		studio.Watch.Changed += change =>
@@ -211,9 +210,8 @@ public sealed class StudioAzuriteIntegrationTests(ITestOutputHelper output) : IA
 		}
 
 		Assert.True(count > 10, $"the objects are in Azurite (found {count} blobs)");
-		if (postgres is not null)
+		await using (var db = new NpgsqlConnection(postgres))
 		{
-			await using var db = new NpgsqlConnection(postgres);
 			await db.OpenAsync();
 			await using var heads = new NpgsqlCommand("select count(*) from bassia_heads", db);
 			Assert.True((long)(await heads.ExecuteScalarAsync())! > 5, "workspace and mainline heads are in PostgreSQL");

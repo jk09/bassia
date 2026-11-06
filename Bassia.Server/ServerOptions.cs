@@ -3,12 +3,13 @@ namespace Bassia.Server;
 using Bassia.Core.Model;
 
 /// <summary>
-/// How a <c>bassia-server</c> runs: where its state lives (a data folder holding the SQLite database, and the blob
-/// container unless S3 holds the blobs), what it listens on, its shared token, and the landing hooks.
+/// How a <c>bassia-server</c> runs: where its state lives (PostgreSQL for heads, the path index and leases; a data folder
+/// for the signing key, and for the blobs unless S3 or Azure holds them), what it listens on, its shared token, and the
+/// landing hooks.
 /// </summary>
 internal sealed record ServerOptions
 {
-	/// <summary>The data folder: <c>state.db</c>, the signing key, and <c>objects/</c> for the local-disk blob store.</summary>
+	/// <summary>The data folder: the signing key, and <c>objects/</c> for the local-disk blob store.</summary>
 	public required string Data { get; init; }
 
 	public string Url { get; init; } = "http://127.0.0.1:8080";
@@ -37,10 +38,10 @@ internal sealed record ServerOptions
 	/// <summary>The container, with a connection string (default <c>bassia</c>).</summary>
 	public string AzureContainer { get; init; } = "bassia";
 
-	/// <summary>Where heads, the path index and leases live: <c>sqlite</c> (the data folder, one node) or <c>postgres</c>.</summary>
-	public string State { get; init; } = "sqlite";
-
-	/// <summary>The PostgreSQL connection string (Azure Database for PostgreSQL: add <c>SSL Mode=Require</c>).</summary>
+	/// <summary>
+	/// The PostgreSQL connection string: heads, the path index and leases (Azure Database for PostgreSQL: add
+	/// <c>SSL Mode=Require</c>). Required; the server has no other state backend.
+	/// </summary>
 	public string? Postgres { get; init; }
 
 	public ChunkParameters Chunks { get; init; } = ChunkParameters.Default;
@@ -71,6 +72,13 @@ internal sealed record ServerOptions
 		string? Get(string name) => values.TryGetValue(name, out var value) ? value
 			: Environment.GetEnvironmentVariable("BASSIA_SERVER_" + name.ToUpperInvariant().Replace('-', '_')) is { Length: > 0 } fromEnvironment ? fromEnvironment : null;
 
+		// PostgreSQL is the server's only state backend; -state postgres stays accepted for existing deployments.
+		if (Get("state") is { } state && !state.Equals("postgres", StringComparison.OrdinalIgnoreCase))
+		{
+			throw new ArgumentException($"-state '{state}' is not supported: bassia-server keeps its state in PostgreSQL only " +
+				"(SQLite was removed from the server; local monorepos made by 'bassia init' still use it). Pass -postgres <connection string>.");
+		}
+
 		return new ServerOptions
 		{
 			Data = Path.GetFullPath(Get("data") ?? throw new ArgumentException("-data <folder> is required (or BASSIA_SERVER_DATA).")),
@@ -84,7 +92,6 @@ internal sealed record ServerOptions
 			AzureConnection = Get("azure-connection"),
 			AzureUrl = Get("azure-url"),
 			AzureContainer = Get("azure-container") ?? "bassia",
-			State = Get("state") ?? "sqlite",
 			Postgres = Get("postgres"),
 			SemanticDriver = Get("semantic-driver") ?? "weave-driver",
 			Validate = Get("validate")

@@ -10,7 +10,7 @@ using Microsoft.Data.Sqlite;
 /// The reference SQL implementation of the mutable state: one row per head (advanced with
 /// <c>UPDATE ... WHERE head = @expected</c>), the path index as rows keyed by (path, seq), and leases with a monotonic
 /// fencing counter and a FIFO queue of waiters. One SQLite file serves a local monorepo (shared by every process on the
-/// machine) and a single-node server.
+/// machine); bassia-server keeps its state in PostgreSQL (<see cref="PostgresState"/>).
 /// </summary>
 public sealed class SqliteState : IServerState
 {

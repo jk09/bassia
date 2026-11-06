@@ -11,7 +11,49 @@ using Bassia.Stores;
 using Tomlyn.Model;
 using static Bassia.Tests.TestEnvironment;
 
-/// <summary>A bassia-server in-process over the local-disk mock blob storage, and clients talking to it over HTTP.</summary>
+/// <summary>How bassia-server picks its state backend: PostgreSQL only; none of these needs a database.</summary>
+public sealed class ServerStateOptionTests : IDisposable
+{
+	private readonly TempDirectory temp = new();
+
+	public void Dispose() => temp.Dispose();
+
+	[Theory]
+	[InlineData("sqlite")]
+	[InlineData("memory")]
+	public void AStateOtherThanPostgres_IsRefused(string state)
+	{
+		var error = Assert.Throws<ArgumentException>(() => ServerOptions.Parse(["-data", temp.Path, "-state", state, "-postgres", "Host=unused"]));
+		Assert.Contains("PostgreSQL only", error.Message);
+	}
+
+	[Fact]
+	public void StatePostgres_IsStillAccepted()
+	{
+		var options = ServerOptions.Parse(["-data", temp.Path, "-state", "Postgres", "-postgres", "Host=db"]);
+		Assert.Equal("Host=db", options.Postgres);
+	}
+
+	[Fact]
+	public void AServerWithoutAPostgresConnectionString_DoesNotStart()
+	{
+		var error = Assert.Throws<ArgumentException>(() => new ServerApp(new ServerOptions { Data = temp.Combine("server") }));
+		Assert.Contains("-postgres", error.Message);
+	}
+
+	[Fact]
+	public void ADataFolderWithAnSqliteStateDb_DoesNotStart_AndKeepsTheFile()
+	{
+		var data = temp.Combine("server");
+		Directory.CreateDirectory(data);
+		File.WriteAllText(Path.Combine(data, "state.db"), "an earlier server's state");
+		var error = Assert.Throws<ArgumentException>(() => new ServerApp(new ServerOptions { Data = data, Postgres = "Host=unused" }));
+		Assert.Contains("state.db", error.Message);
+		Assert.Equal("an earlier server's state", File.ReadAllText(Path.Combine(data, "state.db")));
+	}
+}
+
+/// <summary>A bassia-server in-process over the local-disk mock blob storage and PostgreSQL, and clients talking to it over HTTP.</summary>
 public sealed class ServerTests : IAsyncLifetime
 {
 	private readonly TempDirectory temp = new();
@@ -22,7 +64,7 @@ public sealed class ServerTests : IAsyncLifetime
 
 	public async Task InitializeAsync()
 	{
-		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Url = "http://127.0.0.1:0", Token = Token, Chunks = new ChunkParameters(1024, 4096, 16384) });
+		server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0", Token = Token, Chunks = new ChunkParameters(1024, 4096, 16384) });
 		await server.StartAsync();
 	}
 
@@ -42,7 +84,7 @@ public sealed class ServerTests : IAsyncLifetime
 		return (repo, new RemoteLanding(connection), connection);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task ClonesWorkTogether_ThroughTheCommandLine()
 	{
 		await OkAsync(temp.Path, "clone", "-from", Url, "-path", "one", "-token", Token);
@@ -67,7 +109,7 @@ public sealed class ServerTests : IAsyncLifetime
 		Assert.NotNull(leased["token"]);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task ASwarmOfAgentsLandingOverlappingTrees_LosesNoUpdate()
 	{
 		var (setupRepo, setupLanding, setupConnection) = Client();
@@ -121,7 +163,7 @@ public sealed class ServerTests : IAsyncLifetime
 		}
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task StatusOfALargeTree_ReadsNoFileBytesFromTheServer()
 	{
 		var (repo, landing, connection) = Client();
@@ -154,7 +196,7 @@ public sealed class ServerTests : IAsyncLifetime
 		Assert.True(counting.BytesRead - bytesBefore < 3000, $"status read {counting.BytesRead - bytesBefore} bytes");
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task TheServer_ValidatesObjects_GuardsMainline_AndSignsBlobUrls()
 	{
 		using var http = new HttpClient { BaseAddress = new Uri(Url) };
@@ -185,7 +227,7 @@ public sealed class ServerTests : IAsyncLifetime
 		Assert.Equal(HttpStatusCode.Forbidden, (await new HttpClient().GetAsync($"{Url}/blobs/{id.Hex}?op=get&exp=9999999999&sig=00")).StatusCode);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task Watch_StreamsLandingsWithTheirPrefixes()
 	{
 		using var http = new HttpClient { BaseAddress = new Uri(Url), Timeout = TimeSpan.FromSeconds(30) };
@@ -217,7 +259,7 @@ public sealed class ServerTests : IAsyncLifetime
 		Assert.Contains("\"docs\"", landed);
 	}
 
-	[Fact]
+	[PostgresFact]
 	public async Task TheDashboard_ServesEveryPage()
 	{
 		await OkAsync(temp.Path, "clone", "-from", Url, "-path", "c", "-token", Token);

@@ -44,6 +44,10 @@ internal static class Backends
 		return new NpgsqlConnectionStringBuilder(connection) { SearchPath = schema }.ToString();
 	}
 
+	/// <summary>A fresh schema for a test that cannot run without PostgreSQL (one marked <see cref="PostgresFactAttribute"/>).</summary>
+	public static string RequiredPostgres() =>
+		FreshPostgres() ?? throw new InvalidOperationException("BASSIA_TEST_POSTGRES is not set; this test should have been skipped.");
+
 	/// <summary>An object store in a new container.</summary>
 	public static AzureBlobObjectStore? FreshAzure(out string container)
 	{
@@ -259,25 +263,21 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 
 	private ServerOptions? Options(string backend)
 	{
-		var options = new ServerOptions { Data = temp.Combine("server-" + backend), Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384) };
+		var options = new ServerOptions
+		{
+			Data = temp.Combine("server-" + backend), Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384), Postgres = Backends.RequiredPostgres()
+		};
 		if (backend == "disk")
 		{
 			return options;
 		}
 
-		if (Backends.FreshPostgres() is not { } postgres || Backends.AzureBlob is not { } azure)
+		if (Backends.AzureBlob is not { } azure)
 		{
 			return null;
 		}
 
-		return options with
-		{
-			Storage = "azure",
-			AzureConnection = azure,
-			AzureContainer = "t" + Guid.NewGuid().ToString("N")[..12],
-			State = "postgres",
-			Postgres = postgres
-		};
+		return options with { Storage = "azure", AzureConnection = azure, AzureContainer = "t" + Guid.NewGuid().ToString("N")[..12] };
 	}
 
 	private static (Repository Repo, ILanding Landing, ServerConnection Connection) Client(string url, string cache, CountingHandler? handler = null)
@@ -288,7 +288,7 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 		return (repo, new RemoteLanding(connection), connection);
 	}
 
-	[Theory]
+	[PostgresTheory]
 	[MemberData(nameof(Backend))]
 	public async Task ACheckout_CostsAFewRoundTripsPerTreeLevel_AndASecondOneNone(string backend)
 	{
@@ -371,7 +371,7 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 	private static HttpContent JsonContent(object value) =>
 		new StringContent(System.Text.Json.JsonSerializer.Serialize(value, Api.Json), Encoding.UTF8, "application/json");
 
-	[Fact]
+	[PostgresFact]
 	public async Task AServerOnAzureAndPostgres_ServesTwoClonesEndToEnd()
 	{
 		if (Options("azure") is not { } options)
@@ -403,4 +403,36 @@ public sealed class SyncEfficiencyTests : IAsyncLifetime
 		Assert.True(gc.Live > 0);
 		Assert.Empty((await new GarbageCollector(server.Repo, server.Maintenance).ScrubAsync()).Corrupt);
 	}
+}
+
+/// <summary>
+/// A test that needs PostgreSQL (bassia-server keeps its state there): skipped, and reported as such, when
+/// <c>BASSIA_TEST_POSTGRES</c> is not set. xUnit 2 has no skipping at run time, so the check runs at discovery.
+/// </summary>
+public sealed class PostgresFactAttribute : FactAttribute
+{
+	public PostgresFactAttribute()
+	{
+		if (Backends.Postgres is null)
+		{
+			Skip = PostgresSkip.Reason;
+		}
+	}
+}
+
+/// <summary>A theory that needs PostgreSQL; see <see cref="PostgresFactAttribute"/>.</summary>
+public sealed class PostgresTheoryAttribute : TheoryAttribute
+{
+	public PostgresTheoryAttribute()
+	{
+		if (Backends.Postgres is null)
+		{
+			Skip = PostgresSkip.Reason;
+		}
+	}
+}
+
+internal static class PostgresSkip
+{
+	public const string Reason = "Needs PostgreSQL: set BASSIA_TEST_POSTGRES to a connection string.";
 }
