@@ -98,6 +98,32 @@ internal sealed class TestRepo
 	}
 }
 
+/// <summary>
+/// A view store that runs <paramref name="race"/> once, right before the first compare-and-swap of <c>main</c>
+/// through it, and then forwards it: when the race moves <c>main</c>, that compare-and-swap loses as it would to
+/// another server node.
+/// </summary>
+internal sealed class RacingViewStore(IViewStore inner, Func<Task> race) : IViewStore
+{
+	private int raced;
+
+	public ValueTask<ObjectId?> GetHeadAsync(HeadName name, CancellationToken ct = default) => inner.GetHeadAsync(name, ct);
+
+	public async ValueTask<HeadUpdate> AdvanceHeadAsync(HeadName name, ObjectId? expected, ObjectId next, CancellationToken ct = default)
+	{
+		if (name == HeadName.Main && Interlocked.Exchange(ref raced, 1) == 0)
+		{
+			await race();
+		}
+
+		return await inner.AdvanceHeadAsync(name, expected, next, ct);
+	}
+
+	public IAsyncEnumerable<(HeadName Name, ObjectId Head)> ListHeadsAsync(string prefix = "", CancellationToken ct = default) => inner.ListHeadsAsync(prefix, ct);
+
+	public ValueTask<bool> DeleteHeadAsync(HeadName name, ObjectId expected, CancellationToken ct = default) => inner.DeleteHeadAsync(name, expected, ct);
+}
+
 /// <summary>A temporary directory, deleted on dispose.</summary>
 internal sealed class TempDir : IDisposable
 {

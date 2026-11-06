@@ -57,6 +57,55 @@ public class LeaseTests
 		Assert.Equal(LandOutcome.Landed, landed.Outcome);
 	}
 
+	/// <summary>
+	/// A second landing service over <paramref name="repo"/>'s stores, as on another server node, whose first
+	/// compare-and-swap of <c>main</c> runs <paramref name="race"/> first: it lands something else, so that attempt loses.
+	/// </summary>
+	private static LandingService RacingLanding(TestRepo repo, Func<Task> race)
+	{
+		var views = new RacingViewStore(repo.Views, race);
+		return new LandingService(new Repository(repo.Objects, views, repo.Paths, repo.Leases, TestRepo.SmallChunks));
+	}
+
+	[Fact]
+	public async Task ALeaseThatExpiresWhileTheLandingRetries_RefusesIt()
+	{
+		var clock = DateTimeOffset.UtcNow;
+		var repo = await TestRepo.CreateAsync();
+		repo.Leases.Clock = () => clock;
+		await repo.CommitAsync(new Dictionary<string, string?> { [RepoPolicy.FileName] = "[leases]\nrequired = [\"src/Billing\"]\n" });
+		var ws = await repo.WorkspaceAsync("billing", new Dictionary<string, string?> { ["src/Billing/a.cs"] = "a\n" });
+		var other = await repo.WorkspaceAsync("docs", new Dictionary<string, string?> { ["docs/a.md"] = "a\n" });
+		var lease = (await repo.Leases.AcquireAsync(Request("src/Billing", LeaseMode.Exclusive, ws.Id, ttlSeconds: 10))).Lease!;
+
+		var landing = RacingLanding(repo, async () =>
+		{
+			clock += TimeSpan.FromSeconds(11);
+			Assert.True((await repo.Leases.AcquireAsync(Request("src/Billing", LeaseMode.Exclusive, "successor"))).Granted);
+			Assert.Equal(LandOutcome.Landed, (await repo.LandAsync(other)).Outcome);
+		});
+		var result = await landing.LandAsync(new LandRequest(ws.Id, Leases: [new LeaseToken(lease.Id, lease.Token)]));
+
+		Assert.Equal(LandOutcome.Rejected, result.Outcome);
+		Assert.Equal("lease", result.Conflicts.First().Case);
+		Assert.False((await repo.MainFilesAsync()).ContainsKey("src/Billing/a.cs"));
+	}
+
+	[Fact]
+	public async Task ARequiredPrefixLandedWhileTheLandingRetries_RefusesItWithoutALease()
+	{
+		var repo = await TestRepo.CreateAsync();
+		var ws = await repo.WorkspaceAsync("billing", new Dictionary<string, string?> { ["src/Billing/a.cs"] = "a\n" });
+		var policy = await repo.WorkspaceAsync("policy", new Dictionary<string, string?> { [RepoPolicy.FileName] = "[leases]\nrequired = [\"src/Billing\"]\n" });
+
+		var landing = RacingLanding(repo, async () => Assert.Equal(LandOutcome.Landed, (await repo.LandAsync(policy)).Outcome));
+		var result = await landing.LandAsync(new LandRequest(ws.Id));
+
+		Assert.Equal(LandOutcome.Rejected, result.Outcome);
+		Assert.Equal("lease", result.Conflicts.Single().Case);
+		Assert.False((await repo.MainFilesAsync()).ContainsKey("src/Billing/a.cs"));
+	}
+
 	[Fact]
 	public async Task Waiters_AreServedFirstInFirstOut()
 	{
