@@ -367,7 +367,7 @@ command instead. Bassia:
    the log with the run, and records how it ended (`succeeded`, `failed`, `stopped`);
 4. with `-land`, lands the workspace when the agent succeeded.
 
-`-detach` runs it in the background and returns at once; `agent list|show|logs|wait|stop` follow it from any shell.
+`-detach` runs it in the background and returns at once; `agent list|show|logs|wait|stop` follow it from any shell. `agent wait` returns once a `-land` run has also landed, because a run is recorded as done before it lands.
 A run whose process is gone without a result shows as `lost`. When the landing reports `needs-replay`,
 `bassia agent replay <workspace> [-land]` runs the same recipe on mainline's head in a new workspace with the same
 change id, and marks the old workspace `replaced`. Text is never merged behind an agent's back.

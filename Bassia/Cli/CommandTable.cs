@@ -194,7 +194,7 @@ internal static class CommandTable
 		new("agent", "show", "One run and its workspace.", [RunId], ["bassia agent show brave-otter"], AgentCommands.ShowAsync, Positional: "id"),
 		new("agent", "logs", "A run's output (live while it runs).", [RunId, new("tail", "n", "Only the last n lines.")], ["bassia agent logs brave-otter -tail 20"],
 			AgentCommands.LogsAsync, Positional: "id"),
-		new("agent", "wait", "Wait until a run ends; ok when it succeeded.", [RunId, new("timeout", "seconds", "Give up after this long (default 3600).")],
+		new("agent", "wait", "Wait until a run ends, and has landed when started with -land; ok when it succeeded.", [RunId, new("timeout", "seconds", "Give up after this long (default 3600).")],
 			["bassia agent wait brave-otter -timeout 1800"], AgentCommands.WaitAsync, Positional: "id"),
 		new("agent", "stop", "Stop a run on this machine; what its agent changed so far is snapshotted.", [RunId], ["bassia agent stop brave-otter"],
 			AgentCommands.StopAsync, Positional: "id"),

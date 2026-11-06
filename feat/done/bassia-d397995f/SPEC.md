@@ -39,6 +39,9 @@ passes each of the agent command's arguments to the shell unchanged.
   - Mainline ends at the expected seq with a linear log. Every run that landed appears in that log. A fresh workspace
     holds every agent's edit.
   - One run's command passes arguments with quotes, `$` and a backslash (checked on Linux and macOS only).
+- [x] `agent wait` on a run started with `-land` returns only after the landing. A run is recorded as done before
+      it lands, so `wait` also waits while the run's own process on this machine is alive. A run on another host is
+      taken as finished.
 - [x] `docs/reference.md` describes how `-run` quotes its words and lists the new test.
 
 ## Approach
@@ -68,6 +71,8 @@ passes each of the agent command's arguments to the shell unchanged.
       needs a replay, and its replay keeps the change id and lands `nothing`, because its `sed` no longer matches the
       new head.
 - [x] Docs.
+- [x] CI found an `agent wait` race: it returned before a detached `-land` run had landed, so `last_land` was
+      missing. Fixed in `agent wait` (`AgentRunner.IsFinishing`), with a deterministic unit test.
 
 ## Validation
 

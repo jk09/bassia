@@ -164,7 +164,8 @@ internal static class AgentCommands
 		var timeout = TimeSpan.FromSeconds(invocation.Int("timeout", 3600, 1));
 		var clock = Stopwatch.StartNew();
 		var state = await runner.FindAsync(invocation.Require("id"));
-		while (AgentRunner.IsAlive(state.Record.Run!) && clock.Elapsed < timeout)
+		// Until the run's process exits: it records the run as done before it lands (-land).
+		while ((AgentRunner.IsAlive(state.Record.Run!) || AgentRunner.IsFinishing(state.Record.Run!)) && clock.Elapsed < timeout)
 		{
 			await Task.Delay(500);
 			state = (await monorepo.Repo.FindWorkspaceAsync(state.Id))!;
