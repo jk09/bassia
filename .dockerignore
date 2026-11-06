@@ -1,6 +1,5 @@
-**/bin
-**/obj
-**/node_modules
-**/cdk.out
-.git
-.workspace
+**/bin/
+**/obj/
+dist/
+.git/
+deploy/azure/**/.terraform/

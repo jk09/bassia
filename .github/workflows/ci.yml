@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, main-client-server]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -32,6 +32,20 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The cloud backends' contract and server tests run against PostgreSQL and Azurite (Azure Blob Storage's emulator).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      BASSIA_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Username=postgres;Password=postgres;Database=postgres
+      BASSIA_TEST_AZURE_BLOB: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
+      # AzuriteIntegrationTests fails instead of checking nothing when Azurite is missing.
+      BASSIA_TEST_REQUIRE_AZURITE: '1'
     steps:
       - uses: actions/checkout@v5
 
@@ -56,53 +70,185 @@ jobs:
           ./packaging/Get-Weave.ps1 -Rid linux-x64 -Destination "$env:RUNNER_TEMP/weave"
           "$env:RUNNER_TEMP/weave" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-      # The end-to-end tests clone their components from BASSIA_E2E_COMPONENT_URL; a local upstream keeps them
-      # independent of the network and of the (private) default one.
-      - name: Create the end-to-end upstream
+      - name: Start Azurite
         run: |
-          upstream="$RUNNER_TEMP/e2e-upstream"
-          git init -q -b main "$upstream"
-          printf '# example\n' > "$upstream/README.md"
-          printf '*.o\n*.out\n' > "$upstream/.gitignore"
-          git -C "$upstream" add .
-          git -C "$upstream" -c user.name='Bassia CI' -c user.email=ci@bassia.invalid commit -q -m 'Initial commit'
-          echo "BASSIA_E2E_COMPONENT_URL=$upstream" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/azurite"
+          nohup npx --yes azurite@3.37.0 --silent --blobHost 127.0.0.1 --blobPort 10000 --location "$RUNNER_TEMP/azurite" \
+            --skipApiVersionCheck --loose > "$RUNNER_TEMP/azurite.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -s -o /dev/null "http://127.0.0.1:10000/devstoreaccount1?comp=list" && break
+            sleep 1
+          done
+          curl -s -o /dev/null -w "Azurite answers %{http_code}\n" "http://127.0.0.1:10000/devstoreaccount1?comp=list"
 
       - name: Build
         run: dotnet build --configuration Release
 
-      - name: Test
-        run: dotnet test --configuration Release --no-build --logger "console;verbosity=normal"
+      # The git repository AzuriteIntegrationTests imports: jk09/example from GitHub with the secret, else a stand-in.
+      - name: Choose the repository to import
+        shell: pwsh
+        env:
+          BASSIA_EXAMPLE_REPO_TOKEN: ${{ secrets.BASSIA_EXAMPLE_REPO_TOKEN }}
+        run: ./scripts/Use-ExampleRepository.ps1
 
-  infrastructure:
-    name: Infrastructure
-    runs-on: ubuntu-latest
+      - name: Azurite integration test
+        run: dotnet test --configuration Release --no-build --filter Category=Azurite --logger "console;verbosity=normal"
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build --filter "Category!=Azurite" --logger "console;verbosity=normal"
+
+  devdrive:
+    name: Dev Drive (Windows)
+    # Block cloning of workspace files on a real ReFS volume: a VHD formatted as a Dev Drive (plain ReFS where this
+    # Windows cannot format a Dev Drive), whose folder the DevDrive tests get in BASSIA_TEST_DEVDRIVE_DIR.
+    runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: deploy/aws/package-lock.json
-
-      # The CDK app of bassia-b9581afe: its assertion tests, and both environments synthesized.
-      - name: Test and synthesize the AWS deployment
-        working-directory: deploy/aws
+      - name: Install the .NET SDK (Windows)
+        shell: pwsh
         run: |
-          npm ci --no-audit --no-fund
-          npm test
-          npx cdk synth --quiet -c env=production
-          npx cdk synth --quiet -c env=staging -o cdk.out.staging
+          $ErrorActionPreference = 'Stop'
+          $version = ((Invoke-RestMethod "$env:DOTNET_FEED/Sdk/$env:DOTNET_CHANNEL/latest.version" -MaximumRetryCount 3) -split "`n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+          $zip = Join-Path $env:RUNNER_TEMP 'dotnet-sdk.zip'
+          Invoke-WebRequest "$env:DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-win-x64.zip" -OutFile $zip -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          & (Join-Path $dir 'dotnet.exe') --version
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-      # The images are built on every change, so a release never finds a broken Dockerfile; they are published by
-      # .github/workflows/deploy.yml.
-      - name: Build the server and worker images
+      - name: Create a Dev Drive
+        shell: pwsh
         run: |
-          docker build --file deploy/docker/server.Dockerfile --tag bassia-server:ci .
-          docker build --file deploy/docker/worker.Dockerfile --tag bassia-worker:ci .
-          docker run --rm bassia-server:ci help
+          $ErrorActionPreference = 'Stop'
+          $vhd = Join-Path $env:RUNNER_TEMP 'devdrive.vhdx'
+          $script = Join-Path $env:RUNNER_TEMP 'devdrive.txt'
+          @("create vdisk file=`"$vhd`" maximum=51200 type=expandable", "select vdisk file=`"$vhd`"", 'attach vdisk',
+            'create partition primary', 'assign letter=R') | Set-Content -Encoding ascii $script
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed ($LASTEXITCODE)" }
+          try {
+            Format-Volume -DriveLetter R -DevDrive -NewFileSystemLabel BassiaDev -Confirm:$false -Force | Out-Null
+            Write-Host 'Formatted R: as a Dev Drive.'
+          }
+          catch {
+            Write-Host "No Dev Drive here ($($_.Exception.Message)); formatting R: as ReFS."
+            Format-Volume -DriveLetter R -FileSystem ReFS -NewFileSystemLabel BassiaDev -Confirm:$false -Force | Out-Null
+          }
+          fsutil fsinfo volumeinfo R:
+          fsutil devdrv query R:
+          New-Item -ItemType Directory -Path 'R:\bassia-tests' | Out-Null
+          'BASSIA_TEST_DEVDRIVE_DIR=R:\bassia-tests' | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Start a local PostgreSQL
+        shell: pwsh
+        run: ./scripts/Start-CiPostgres.ps1
+
+      - name: Build
+        run: dotnet build --configuration Release
+
+      - name: Test block cloning
+        run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName~DevDrive|FullyQualifiedName~CloneCache" --logger "console;verbosity=normal"
+
+  local-cloud:
+    name: Local cloud (${{ matrix.mode }}, ${{ matrix.os }})
+    # scripts/bassia-local-cloud.ps1, behind the /bassia-local-cloud skill: Azurite and PostgreSQL in Docker (Linux) or as
+    # local processes (Windows, whose runner has PostgreSQL and Node.js installed), the cloud tests against them, and
+    # the end-to-end smoke test (a server on both, two clones, git import, a landing, git export).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            mode: docker
+          - os: windows-2025
+            mode: native
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the .NET SDK
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$DOTNET_CHANNEL/latest.version" | tr -d '\r' | sed '/^$/d' | tail -n 1)
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-linux-x64.tar.gz" | tar -xz -C "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+
+      - name: Install the .NET SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = ((Invoke-RestMethod "$env:DOTNET_FEED/Sdk/$env:DOTNET_CHANNEL/latest.version" -MaximumRetryCount 3) -split "`n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+          $zip = Join-Path $env:RUNNER_TEMP 'dotnet-sdk.zip'
+          Invoke-WebRequest "$env:DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-win-x64.zip" -OutFile $zip -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Check
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 check
+
+      - name: Up
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          ./scripts/bassia-local-cloud.ps1 up -Mode ${{ matrix.mode }}
+          ./scripts/bassia-local-cloud.ps1 up
+          ./scripts/bassia-local-cloud.ps1 status
+
+      - name: Smoke test
+        timeout-minutes: 12
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 smoke
+
+      - name: Choose the repository to import
+        shell: pwsh
+        env:
+          BASSIA_EXAMPLE_REPO_TOKEN: ${{ secrets.BASSIA_EXAMPLE_REPO_TOKEN }}
+        run: ./scripts/Use-ExampleRepository.ps1
+
+      - name: Cloud tests
+        timeout-minutes: 12
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 test -Filter cloud
+
+      - name: Server and import
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          $repo = Join-Path $env:RUNNER_TEMP 'tools'
+          git init -q -b main $repo
+          foreach ($i in 1..3) {
+            Set-Content -Path (Join-Path $repo "f$i.txt") -Value "v$i"
+            git -C $repo add -A
+            git -C $repo -c user.name=ci -c user.email=ci@example.com commit -q -m "c$i"
+          }
+          ./scripts/bassia-local-cloud.ps1 serve
+          ./scripts/bassia-local-cloud.ps1 serve
+          ./scripts/bassia-local-cloud.ps1 import -Git $repo -History -NoBuild -Clone (Join-Path $env:RUNNER_TEMP 'monorepo')
+          ./scripts/bassia-local-cloud.ps1 server-status
+          ./scripts/bassia-local-cloud.ps1 server-stop
+          ./scripts/bassia-local-cloud.ps1 import -Git $repo -Prefix tools2 -NoBuild
+          ./scripts/bassia-local-cloud.ps1 server-reset
+          ./scripts/bassia-local-cloud.ps1 server-status
+          if ($LASTEXITCODE -ne 1) { throw 'server-status should report the stopped server (exit 1) after server-reset' }
+          $global:LASTEXITCODE = 0
+
+      - name: Down
+        if: always()
+        shell: pwsh
+        run: ./scripts/bassia-local-cloud.ps1 down -Purge
 
   package:
     name: Package (${{ matrix.rid }})
@@ -170,6 +316,10 @@ jobs:
           PACKAGE_REF: ${{ github.ref_type == 'tag' && github.ref_name || github.head_ref || github.ref_name }}
         run: ./packaging/New-BassiaPackage.ps1 -Rid ${{ matrix.rid }} -Ref $env:PACKAGE_REF -OutputDirectory dist
 
+      - name: Start a local PostgreSQL
+        shell: pwsh
+        run: ./scripts/Start-CiPostgres.ps1
+
       - name: Install and check the package
         shell: pwsh
         run: |
@@ -182,10 +332,37 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  azure:
+    name: Azure deployment (Terraform, images)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Validate the Terraform
+        working-directory: deploy/azure/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Build the images
+        run: |
+          for image in server studio worker; do
+            docker build -f "deploy/docker/$image.Dockerfile" -t "bassia-$image:test" .
+          done
+
+      - name: Smoke-test the images
+        run: TAG=test deploy/docker/smoke.sh
+
   release:
     name: Release
     if: github.ref_type == 'tag'
-    needs: [test, package]
+    needs: [test, devdrive, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write

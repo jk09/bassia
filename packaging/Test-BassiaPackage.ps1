@@ -8,7 +8,8 @@
 
 	1. the installer refuses to install when the .NET runtimes are missing (a stand-in dotnet that lists none);
 	2. the installer installs the package, and bassia version reports the packaged version;
-	3. the bundled weave-driver runs, and a monorepo's integration triage picks it up with nothing else on PATH;
+	3. the bundled weave-driver runs, a local monorepo imports a git repository and lands an agentic run, and syncing a
+	   workspace merges a semantic conflict with the bundled driver with nothing else on PATH;
 	4. the version manager lists the installed version, and the installer (or the version manager) uninstalls it.
 
 .EXAMPLE
@@ -99,7 +100,7 @@ try {
 	$null = New-Item -ItemType Directory -Path $mono, $upstream
 	$git = @('-c', 'user.name=Bassia CI', '-c', 'user.email=ci@bassia.invalid')
 	$null = & git -C $upstream init -q -b main
-	Set-Content -LiteralPath (Join-Path $upstream 'lib.py') -Value "def a():`n    return 1`n"
+	Set-Content -LiteralPath (Join-Path $upstream 'lib.py') -Value "def a():`n    return 1`n`n`ndef b():`n    return 2`n"
 	$null = & git -C $upstream add .
 	$null = & git -C $upstream @git commit -q -m 'Initial commit'
 	Push-Location $mono
@@ -107,11 +108,21 @@ try {
 		$env:GIT_AUTHOR_NAME = $env:GIT_COMMITTER_NAME = 'Bassia CI'
 		$env:GIT_AUTHOR_EMAIL = $env:GIT_COMMITTER_EMAIL = 'ci@bassia.invalid'
 		Assert-That ((Invoke-Logged $bassia @('init')).ExitCode -eq 0) 'bassia init creates a monorepo'
-		Assert-That ((Invoke-Logged $bassia @('component', 'add', '-url', $upstream, '-name', 'lib')).ExitCode -eq 0) 'bassia component add registers a component'
-		$run = Invoke-Logged $bassia @('agent', 'start', '-select', 'lib', '-run', 'cd lib && git --version > VERSION.txt')
-		Assert-That ($run.ExitCode -eq 0 -and $run.Text -match 'result_status = "pushed"') 'bassia agent start records a run that pushes a result'
-		$plan = Invoke-Logged $bassia @('integration', 'plan', '-runs', 'all')
-		Assert-That ($plan.ExitCode -eq 0 -and $plan.Text -match 'structural_merge = ".*weave-driver') 'the integration triage uses the bundled weave-driver'
+		Assert-That ((Invoke-Logged $bassia @('import', '-git', $upstream, '-prefix', 'lib')).ExitCode -eq 0) 'bassia import brings a git repository in'
+		$run = Invoke-Logged $bassia @('agent', 'start', '-name', 'version', '-land', '-run', 'git --version > VERSION.txt')
+		Assert-That ($run.ExitCode -eq 0 -and $run.Text -match 'outcome = "landed"') 'bassia agent start runs in a workspace and lands it'
+
+		# Two workspaces edit different functions of one file: the second syncs onto the first with the bundled weave-driver.
+		Assert-That ((Invoke-Logged $bassia @('workspace', 'create', 'policy')).ExitCode -eq 0) 'bassia workspace create opens a workspace'
+		Set-Content -LiteralPath (Join-Path $mono 'workspaces/policy/.bassia.toml') -Value "[conflicts]`ndefault = `"semantic`"`n"
+		Assert-That ((Invoke-Logged $bassia @('workspace', 'land', 'policy')).ExitCode -eq 0) 'bassia workspace land lands the policy'
+		$null = Invoke-Logged $bassia @('workspace', 'create', 'one')
+		$null = Invoke-Logged $bassia @('workspace', 'create', 'two')
+		Set-Content -LiteralPath (Join-Path $mono 'workspaces/one/lib/lib.py') -Value "def a():`n    return 10`n`n`ndef b():`n    return 2`n"
+		Set-Content -LiteralPath (Join-Path $mono 'workspaces/two/lib/lib.py') -Value "def a():`n    return 1`n`n`ndef b():`n    return 20`n"
+		Assert-That ((Invoke-Logged $bassia @('workspace', 'land', 'one')).ExitCode -eq 0) 'the first workspace lands'
+		$sync = Invoke-Logged $bassia @('workspace', 'sync', 'two')
+		Assert-That ($sync.ExitCode -eq 0 -and $sync.Text -match 'weave-driver') 'workspace sync merges a semantic conflict with the bundled weave-driver'
 	}
 	finally {
 		Pop-Location

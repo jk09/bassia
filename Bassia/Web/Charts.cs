@@ -2,13 +2,9 @@ namespace Bassia.Web;
 
 using System.Globalization;
 using System.Text;
-using Bassia.Graph;
 using static Bassia.Web.Html;
 
-/// <summary>What the component map shows on a component's node besides its name.</summary>
-internal sealed record ComponentActivity(string Name, int Live = 0, int Queued = 0, int Attention = 0, string? LatestTag = null, int Runs = 0, int Locked = 0);
-
-/// <summary>A node of a left-to-right flow (a tag's lineage, a run's or an integration's path): its column decides where it is drawn.</summary>
+/// <summary>A node of a left-to-right flow (a stack of workspaces, a run's path to mainline): its column decides where it is drawn.</summary>
 internal sealed record FlowNode(string Id, int Column, string Label, string? Sub, string? Href, string Kind);
 
 /// <summary>One part of a stacked bar or a donut: a count, its label and the CSS class that colours it.</summary>
@@ -26,161 +22,13 @@ internal static class Charts
 {
 	private static string N(double value) => value.ToString("0.#", CultureInfo.InvariantCulture);
 
-	// ----- component map -----
-
-	/// <summary>
-	/// The components in layers (a component sits below everything that references it) with their references as
-	/// arrows, each node showing its activity: live runs, results waiting to be integrated, merges needing a human and
-	/// the latest tag. Every node links to its component page and carries the names of the components related to it
-	/// (what it needs and what needs it), which the script highlights on hover.
-	/// </summary>
-	public static string ComponentMap(IReadOnlyList<ComponentDefinition> components, IReadOnlyDictionary<string, ComponentActivity> activity, string? focus = null)
-	{
-		if (components.Count == 0)
-		{
-			return Notice("components.toml is empty; register one with 'bassia component add -url <url>'.");
-		}
-
-		const int width = 176, height = 60, gapX = 34, gapY = 64, margin = 18;
-		var graph = new ComponentGraph(components);
-		var levels = graph.Levels();
-		var rows = levels.GroupBy(pair => pair.Value).OrderBy(group => group.Key)
-			.Select(group => group.Select(pair => pair.Key).OrderBy(name => name, StringComparer.Ordinal).ToList()).ToList();
-
-		// One barycentre pass: order each row by where the components referencing it sit, which untangles most edges.
-		var x = new Dictionary<string, double>(StringComparer.Ordinal);
-		for (var row = 0; row < rows.Count; row++)
-		{
-			if (row > 0)
-			{
-				rows[row] = rows[row].OrderBy(name =>
-				{
-					var parents = graph.ReferrersOf(name).Where(parent => x.ContainsKey(parent.Name)).Select(parent => x[parent.Name]).ToList();
-					return parents.Count == 0 ? double.MaxValue : parents.Average();
-				}).ThenBy(name => name, StringComparer.Ordinal).ToList();
-			}
-
-			for (var column = 0; column < rows[row].Count; column++)
-			{
-				x[rows[row][column]] = column;
-			}
-		}
-
-		var widest = rows.Max(row => row.Count);
-		var totalWidth = margin * 2 + widest * (width + gapX) - gapX;
-		var totalHeight = margin * 2 + rows.Count * (height + gapY) - gapY;
-		var position = new Dictionary<string, (double X, double Y)>(StringComparer.Ordinal);
-		for (var row = 0; row < rows.Count; row++)
-		{
-			// Rows are centred, so a narrow layer sits under the middle of a wide one.
-			var offset = (widest - rows[row].Count) * (width + gapX) / 2.0;
-			for (var column = 0; column < rows[row].Count; column++)
-			{
-				position[rows[row][column]] = (margin + offset + column * (width + gapX), margin + row * (height + gapY));
-			}
-		}
-
-		var related = components.ToDictionary(component => component.Name, component => Related(components, graph, component.Name), StringComparer.Ordinal);
-		var svg = new StringBuilder();
-		svg.Append($"<svg class=\"chart map\" viewBox=\"0 0 {totalWidth} {totalHeight}\" width=\"{totalWidth}\" role=\"img\" aria-label=\"Component dependency map\">");
-		svg.Append("<defs><marker id=\"m-arrow\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M0 0L10 5L0 10z\" class=\"arrowhead\"/></marker></defs>");
-
-		foreach (var component in components)
-		{
-			foreach (var reference in component.References.Where(reference => position.ContainsKey(reference.Name)))
-			{
-				var (fx, fy) = position[component.Name];
-				var (tx, ty) = position[reference.Name];
-				var (x1, y1, x2, y2) = (fx + width / 2.0, fy + height, tx + width / 2.0, ty);
-				var bend = Math.Max(24, (y2 - y1) / 2);
-				svg.Append($"<path class=\"edge\" data-from=\"{E(component.Name)}\" data-to=\"{E(reference.Name)}\" d=\"M{N(x1)} {N(y1)} C{N(x1)} {N(y1 + bend)} {N(x2)} {N(y2 - bend)} {N(x2)} {N(y2 - 2)}\" marker-end=\"url(#m-arrow)\">");
-				svg.Append($"<title>{E(component.Name)} needs {E(reference.Name)}{(reference.Path != reference.Name ? $" at {E(reference.Path)}" : "")}</title></path>");
-			}
-		}
-
-		foreach (var component in components)
-		{
-			var (nx, ny) = position[component.Name];
-			var info = activity.GetValueOrDefault(component.Name) ?? new ComponentActivity(component.Name);
-			var classes = "node" + (focus == component.Name ? " focus" : "") + (info.Attention > 0 ? " attention" : "") + (info.Live > 0 ? " busy" : "");
-			svg.Append($"<a href=\"/components/{Url(component.Name)}\" class=\"{classes}\" data-node=\"{E(component.Name)}\" data-related=\"{E(string.Join(' ', related[component.Name]))}\">");
-			svg.Append($"<title>{E(component.Name)}: {info.Live} live run(s), {info.Queued} result(s) in the merge queue, {info.Attention} needing attention, {info.Locked} path(s) held by live runs, {info.Runs} run(s) in all</title>");
-			svg.Append($"<rect x=\"{N(nx)}\" y=\"{N(ny)}\" width=\"{width}\" height=\"{height}\" rx=\"9\"/>");
-			svg.Append($"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 24)}\" class=\"name\">{E(Clip(component.Name, 18))}</text>");
-			svg.Append(info.LatestTag is null
-				? $"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{info.Runs} run(s)</text>"
-				: $"<text x=\"{N(nx + 12)}\" y=\"{N(ny + 44)}\" class=\"sub\">{TagLabel(info.LatestTag)}<title>latest tag: {E(info.LatestTag)}</title></text>");
-
-			// Badges, right to left: attention (red), queued results (amber), live runs (blue, pulsing), held paths (violet).
-			var bx = nx + width - 14;
-			foreach (var (count, kind, label) in new[] { (info.Attention, "b-attention", "!"), (info.Queued, "b-queued", ""), (info.Live, "b-live", ""), (info.Locked, "b-lock", "") })
-			{
-				if (count <= 0)
-				{
-					continue;
-				}
-
-				svg.Append($"<g class=\"badge {kind}\"><circle cx=\"{N(bx)}\" cy=\"{N(ny + 15)}\" r=\"9\"/><text x=\"{N(bx)}\" y=\"{N(ny + 19)}\">{(label.Length > 0 && count == 1 ? label : count.ToString(CultureInfo.InvariantCulture))}</text></g>");
-				bx -= 22;
-			}
-
-			svg.Append("</a>");
-		}
-
-		svg.Append("</svg>");
-		return $"<div class=\"chart-box\">{svg}</div>" + Legend(
-			("b-live", "live runs"), ("b-lock", "paths held by live runs"), ("b-queued", "results in the merge queue"), ("b-attention", "merges needing attention"), ("arrowhead", "needs (references)"));
-	}
-
-	/// <summary>
-	/// A tag in a component box, short enough to read: an integration's tag by its key (<c>integration/&lt;key&gt;/0</c>
-	/// shows as "⇄ &lt;key&gt;"), anything else as itself; the mark is coloured by kind.
-	/// </summary>
-	private static string TagLabel(string tag)
-	{
-		var integration = tag.StartsWith(Integration.IntegrationRecord.RefPrefix, StringComparison.Ordinal);
-		var text = integration ? tag[Integration.IntegrationRecord.RefPrefix.Length..].Split('/')[0] : tag;
-		return $"<tspan class=\"{(integration ? "mk-integration" : "mk-baseline")}\">{(integration ? "⇄" : "◆")}</tspan> {E(Clip(text, 22))}";
-	}
-
-	/// <summary>Everything a component needs (transitively) and everything that needs it.</summary>
-	private static IReadOnlyList<string> Related(IReadOnlyList<ComponentDefinition> components, ComponentGraph graph, string name)
-	{
-		var seen = new HashSet<string>(StringComparer.Ordinal) { name };
-		var stack = new Stack<string>([name]);
-		while (stack.Count > 0)
-		{
-			var popped = stack.Pop();
-			var current = components.FirstOrDefault(component => component.Name == popped);
-			foreach (var reference in current?.References ?? [])
-			{
-				if (seen.Add(reference.Name))
-				{
-					stack.Push(reference.Name);
-				}
-			}
-		}
-
-		stack.Push(name);
-		while (stack.Count > 0)
-		{
-			foreach (var referrer in graph.ReferrersOf(stack.Pop()))
-			{
-				if (seen.Add(referrer.Name))
-				{
-					stack.Push(referrer.Name);
-				}
-			}
-		}
-
-		return seen.ToList();
-	}
+	private static string Clip(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "\u2026";
 
 	// ----- flows -----
 
 	/// <summary>
-	/// Nodes in columns, left to right, joined by curves: a tag's lineage (baseline, runs, result tags, integrations,
-	/// integration tags) or a run's path through the merge.
+	/// Nodes in columns, left to right, joined by curves: workspaces stacked on
+	/// mainline and on each other, or a run's path from its base to its landing.
 	/// </summary>
 	public static string Flow(IReadOnlyList<FlowNode> nodes, IReadOnlyList<(string From, string To)> edges, IReadOnlyList<string> columnTitles)
 	{
@@ -253,7 +101,7 @@ internal static class Charts
 	{
 		if (bars.Count == 0)
 		{
-			return Notice("No agentic run yet. Start one with 'bassia agent start -select <component[@tag],...> -prompt <text>'.");
+			return Notice("No agentic run yet. Start one with 'bassia agent start -prompt <text>'.");
 		}
 
 		const int labelWidth = 190, plotWidth = 760, rowHeight = 24, top = 26, margin = 8;
@@ -460,62 +308,4 @@ internal static class Charts
 		return $"<div class=\"chart-box\">{svg}</svg></div>";
 	}
 
-	// ----- tags -----
-
-	/// <summary>A tag as a column of the tag chart.</summary>
-	internal sealed record TagColumn(string Name, string Kind, IReadOnlySet<string> Components, string Date);
-
-	/// <summary>
-	/// The tags across components: one column per tag in time order, one row per component, a mark where the tag is in
-	/// the component, coloured by kind. A tag that spans several components joins its marks with a bar, which is what
-	/// makes it a unit of progress of the monorepo rather than of one repository.
-	/// </summary>
-	public static string TagMatrix(IReadOnlyList<string> components, IReadOnlyList<TagColumn> tags)
-	{
-		if (tags.Count == 0 || components.Count == 0)
-		{
-			return Notice("No tags yet. 'bassia tag create -tag <name> -select <component,...>' makes a baseline across components.");
-		}
-
-		const int labelWidth = 150, columnWidth = 26, rowHeight = 26, headerHeight = 132, margin = 10;
-		var width = labelWidth + tags.Count * columnWidth + margin * 2;
-		var height = headerHeight + components.Count * rowHeight + margin;
-		var row = components.Select((name, index) => (name, index)).ToDictionary(pair => pair.name, pair => pair.index, StringComparer.Ordinal);
-
-		var svg = new StringBuilder($"<svg class=\"chart tags\" viewBox=\"0 0 {width} {height}\" width=\"{width}\" role=\"img\" aria-label=\"Tags across components\">");
-		for (var i = 0; i < components.Count; i++)
-		{
-			var y = headerHeight + i * rowHeight;
-			svg.Append($"<rect class=\"stripe{(i % 2 == 0 ? "" : " odd")}\" x=\"0\" y=\"{y}\" width=\"{width}\" height=\"{rowHeight}\"/>");
-			svg.Append($"<a href=\"/components/{Url(components[i])}\"><text class=\"rowname\" x=\"{margin}\" y=\"{y + 17}\">{E(Clip(components[i], 19))}</text></a>");
-		}
-
-		for (var i = 0; i < tags.Count; i++)
-		{
-			var tag = tags[i];
-			var cx = labelWidth + i * columnWidth + columnWidth / 2;
-			var href = $"/tag?name={Url(tag.Name)}";
-			svg.Append($"<a href=\"{href}\" class=\"tagcol k-{E(tag.Kind)}\"><title>{E(tag.Name)} ({E(tag.Kind)}) in {tag.Components.Count} component(s), {E(tag.Date)}</title>");
-			svg.Append($"<rect class=\"hit\" x=\"{cx - columnWidth / 2}\" y=\"0\" width=\"{columnWidth}\" height=\"{height}\"/>");
-			svg.Append($"<text class=\"colname\" transform=\"translate({cx + 4} {headerHeight - 8}) rotate(-60)\">{E(Clip(tag.Name, 22))}</text>");
-			var rows = tag.Components.Where(row.ContainsKey).Select(component => row[component]).Order().ToList();
-			if (rows.Count > 1)
-			{
-				svg.Append($"<line class=\"span\" x1=\"{cx}\" y1=\"{headerHeight + rows[0] * rowHeight + rowHeight / 2}\" x2=\"{cx}\" y2=\"{headerHeight + rows[^1] * rowHeight + rowHeight / 2}\"/>");
-			}
-
-			foreach (var r in rows)
-			{
-				svg.Append($"<circle class=\"mark\" cx=\"{cx}\" cy=\"{headerHeight + r * rowHeight + rowHeight / 2}\" r=\"7\"/>");
-			}
-
-			svg.Append("</a>");
-		}
-
-		svg.Append("</svg>");
-		return $"<div class=\"chart-box\">{svg}</div>" + Legend(
-			("k-baseline", "baseline"), ("k-run", "run result"), ("k-integration", "integration"), ("k-unwind", "unwound submodules"), ("k-split", "split"));
-	}
-
-	private static string Clip(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
 }

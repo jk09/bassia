@@ -1,0 +1,18 @@
+<table class="list log">
+	<tr><th>Seq</th><th>Time</th><th>Author</th><th>Workspace</th><th>Change</th><th>Intent</th></tr>
+	@foreach (var entry in Entries)
+	{
+		<tr>
+			<td><a href="/log/@entry.Seq">@entry.Seq</a></td>
+			<td>@Format.Time(entry.Commit.Time)</td>
+			<td>@entry.Commit.Author</td>
+			<td class="id">@(entry.Operation.Workspace ?? "-")</td>
+			<td class="id">@entry.Commit.ChangeId.Short</td>
+			<td>@Format.FirstLine(entry.Commit.Intent)@if (entry.Commit.MachineMerged){<span class="pill">machine-merged</span>}</td>
+		</tr>
+	}
+</table>
+
+@code {
+	[Parameter, EditorRequired] public IReadOnlyList<LogEntry> Entries { get; set; } = [];
+}

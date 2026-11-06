@@ -2,9 +2,6 @@ namespace Bassia.Web;
 
 using System.Globalization;
 using System.Net;
-using Bassia.CliCommands.Agent;
-using Bassia.Core;
-using Bassia.Integration;
 
 /// <summary>
 /// The dashboard's HTML: the page frame (header and menu, as in Fossil's web UI), the stylesheet, the progressive
@@ -16,13 +13,12 @@ internal static class Html
 	public static readonly (string Path, string Label)[] Menu =
 	[
 		("/", "Overview"),
-		("/components", "Components"),
-		("/tags", "Tags"),
+		("/workspaces", "Workspaces"),
 		("/runs", "Runs"),
-		("/locks", "Locks"),
-		("/queue", "Merge queue"),
-		("/integrations", "Integrations"),
-		("/timeline", "Timeline"),
+		("/mainline", "Mainline"),
+		("/conflicts", "Conflicts"),
+		("/leases", "Leases"),
+		("/files", "Files"),
 		("/config", "Config")
 	];
 
@@ -68,44 +64,11 @@ internal static class Html
 
 	public static string Status(string status) => $"<span class=\"status {E(status)}\">{E(status)}</span>";
 
-	public static string RunLink(string runId) => $"<a class=\"id\" href=\"/runs/{Url(runId)}\">{E(RunMetadata.Key(runId))}</a>";
+	public static string WorkspaceLink(string id, string name) => $"<a class=\"id\" href=\"/workspaces/{Url(id)}\">{E(name)}</a>";
 
-	public static string IntegrationLink(string id) => $"<a class=\"id\" href=\"/integrations/{Url(id)}\">{E(IntegrationRecord.Key(id))}</a>";
+	public static string RunLink(string runId) => $"<a class=\"id\" href=\"/runs/{Url(runId)}\">{E(runId)}</a>";
 
-	/// <summary>
-	/// A ref as a chip. Agent and integration refs link to the run or integration that made them, which is what ties a
-	/// timeline back to the agentic work behind it.
-	/// </summary>
-	public static string Ref(string name)
-	{
-		var target = RefTarget(name);
-		var kind = name.StartsWith(RunMetadata.RefPrefix, StringComparison.Ordinal) ? "agent"
-			: name.StartsWith(IntegrationRecord.RefPrefix, StringComparison.Ordinal) ? "integration"
-			: "plain";
-		return target is null
-			? $"<span class=\"ref {kind}\">{E(name)}</span>"
-			: $"<a class=\"ref {kind}\" href=\"{target}\">{E(name)}</a>";
-	}
-
-	private static string? RefTarget(string name)
-	{
-		foreach (var (prefix, idPrefix, path) in new[]
-		{
-			(RunMetadata.RefPrefix, RunMetadata.RunIdPrefix, "/runs/"),
-			(IntegrationRecord.RefPrefix, IntegrationRecord.IdPrefix, "/integrations/")
-		})
-		{
-			if (name.StartsWith(prefix, StringComparison.Ordinal))
-			{
-				var key = name[prefix.Length..].Split('/')[0];
-				return RecordName.IsKey(key) ? path + Url(idPrefix + key) : null;
-			}
-		}
-
-		return null;
-	}
-
-	public static string Rationale(string command) => E(AgentCommand.SummarizeCommand(command));
+	public static string SeqLink(long seq) => $"<a class=\"id\" href=\"/mainline/{seq}\">seq {seq}</a>";
 
 	/// <summary>
 	/// A command to run in a terminal (or to hand to an agent): the dashboard shows what to do instead of

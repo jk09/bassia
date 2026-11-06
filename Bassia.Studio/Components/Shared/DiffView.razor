@@ -1,0 +1,124 @@
+@inject MonorepoClient Client
+
+@* The changed files of a diff, each with its review: unified hunks or side by side. *@
+<div class="diffbar">
+	<span class="muted">@Diff.Records.Count changed @(Diff.Records.Count == 1 ? "file" : "files")</span>
+	<span class="spacer"></span>
+	<a class="@(Split ? "" : "on")" href="@ModeLink(false)">Unified</a>
+	<a class="@(Split ? "on" : "")" href="@ModeLink(true)">Side by side</a>
+</div>
+@if (Diff.Records.Count == 0)
+{
+	<p class="notice">No changes.</p>
+}
+else
+{
+	<table class="list changes">
+		<tr><th>Status</th><th>Path</th><th>Size</th></tr>
+		@foreach (var record in Diff.Records)
+		{
+			<tr>
+				<td><span class="st st-@Status(record)">@Status(record)</span></td>
+				<td class="id"><a href="#f-@Anchor(record.Path)">@(record.OldPath is { } from ? $"{from} → {record.Path}" : record.Path)</a></td>
+				<td>@(record.SizeDelta >= 0 ? "+" : "−")@Format.Size(Math.Abs(record.SizeDelta))</td>
+			</tr>
+		}
+	</table>
+	@foreach (var file in files)
+	{
+		<section class="file" id="f-@Anchor(file.Record.Path)">
+			<h3 class="id"><span class="st st-@Status(file.Record)">@Status(file.Record)</span> @file.Record.Path
+				<span class="muted">+@file.Added −@file.Deleted</span></h3>
+			@if (file.Summary is { } summary)
+			{
+				<div class="attn">@summary</div>
+			}
+			else if (Split && file.Rows is { } rows)
+			{
+				<table class="split">
+					@foreach (var row in rows)
+					{
+						if (row.Kind == SplitDiff.Fold)
+						{
+							<tr class="fold"><td colspan="4">⋯ @row.Folded unchanged lines</td></tr>
+						}
+						else
+						{
+							<tr class="@row.Kind">
+								<td class="no">@row.OldNumber</td><td class="old">@row.OldText</td>
+								<td class="no">@row.NewNumber</td><td class="new">@row.NewText</td>
+							</tr>
+						}
+					}
+				</table>
+			}
+			else if (file.Hunks is { } hunks)
+			{
+				<pre class="unified">@foreach (var line in hunks.Split('\n')){<span class="@LineClass(line)">@line
+</span>}</pre>
+			}
+		</section>
+	}
+	@if (Diff.Records.Count > files.Count)
+	{
+		<p class="notice">Showing the first @files.Count of @Diff.Records.Count files.</p>
+	}
+}
+
+@code {
+	/// <summary>The most files whose content is reviewed on one page.</summary>
+	public const int MaxFiles = 60;
+
+	[Parameter, EditorRequired] public DiffSet Diff { get; set; } = default!;
+
+	[Parameter] public bool Split { get; set; }
+
+	/// <summary>The page's address without the view switch (the switch is appended).</summary>
+	[Parameter, EditorRequired] public string BaseLink { get; set; } = "";
+
+	private List<FileReview> files = [];
+
+	private sealed record FileReview(DiffRecord Record, int Added, int Deleted, string? Hunks, IReadOnlyList<SplitRow>? Rows, string? Summary);
+
+	protected override async Task OnParametersSetAsync()
+	{
+		var reviews = new List<FileReview>();
+		foreach (var record in Diff.Records.Take(MaxFiles))
+		{
+			if (record.New?.Kind == EntryKind.Conflict)
+			{
+				reviews.Add(new FileReview(record, 0, 0, null, null, "unresolved conflict: keep a side or write the merged text"));
+				continue;
+			}
+
+			var patch = await Client.Repo.Diffs.PatchAsync(record);
+			IReadOnlyList<SplitRow>? rows = null;
+			if (Split && patch.Hunks is not null && !patch.Binary)
+			{
+				var oldText = await Client.TextAsync(record.Old) ?? "";
+				var newText = await Client.TextAsync(record.New) ?? "";
+				rows = SplitDiff.Build(oldText, newText);
+			}
+
+			var summary = patch.Hunks is null ? patch.Summary ?? (patch.Binary ? "binary content" : "no line changes") : null;
+			reviews.Add(new FileReview(record, patch.Added, patch.Deleted, patch.Hunks, rows, summary));
+		}
+
+		files = reviews;
+	}
+
+	private static string Status(DiffRecord record) => record.New?.Kind == EntryKind.Conflict ? "conflict" : record.Status;
+
+	private string ModeLink(bool split) => BaseLink + (BaseLink.Contains('?') ? "&" : "?") + "view=" + (split ? "split" : "unified");
+
+	private static string Anchor(string path) => Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(path)).ToLowerInvariant();
+
+	private static string LineClass(string line) => line switch
+	{
+		_ when line.StartsWith("+++") || line.StartsWith("---") => "hdr",
+		_ when line.StartsWith("@@") => "hunk",
+		_ when line.StartsWith('+') => "add",
+		_ when line.StartsWith('-') => "del",
+		_ => ""
+	};
+}

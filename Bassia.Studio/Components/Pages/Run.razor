@@ -1,0 +1,142 @@
+@page "/runs/{RunId}"
+@inherits StudioPage
+@inject Bassia.Studio.Runs.RunService RunService
+
+<PageTitle>@RunId · Bassia Studio</PageTitle>
+<h1>Run @RunId <span class="st st-@status">@status</span></h1>
+<Banner Notice="@Notice" Error="@Error" />
+@{
+	var live = Bassia.Studio.Runs.StudioRunStatus.IsLive(status);
+	var mine = User.IsAdmin || (studio?.User ?? workspace?.Record.Owner) == User.Name;
+	var act = User.CanChange && mine && !Busy;
+	var canLand = act && !live && workspace is { IsOpen: true };
+	var canReplay = act && !live && workspace is not null && workspace.Record.Status is WorkspaceStatus.Open or WorkspaceStatus.NeedsReplay && recipe;
+}
+<div class="actions">
+	@if (studio is not null && live)
+	{
+		<ConfirmButton Label="@(studio.StopRequested ? "Stopping…" : "Stop")" Class="danger" Question="Stop the run? What the agent changed so far is kept." Disabled="@(!act || studio.StopRequested)" OnConfirm="StopAsync" />
+	}
+	<ConfirmButton Label="Land" Class="primary" Question="Land the run's workspace?" Disabled="@(!canLand)" OnConfirm="LandAsync" />
+	<ConfirmButton Label="Replay on mainline" Question="Run the same task again on the newest mainline (same change)?" Disabled="@(!canReplay || !RunService.Enabled)" OnConfirm="ReplayAsync" />
+	@if (workspace is not null)
+	{
+		<a class="btn" href="/workspaces/@Format.Q(workspace.Id)">Workspace</a>
+	}
+	<span class="spacer"></span>
+	<ConfirmButton Label="Discard" Class="danger" Question="Abandon the run's workspace?" Disabled="@(!act || live || workspace is not { IsOpen: true })" OnConfirm="DiscardAsync" />
+</div>
+@if (land is not null)
+{
+	<div class="outcome o-@land.Outcome"><strong>@land.Outcome</strong> @land.Message @if (land.Seq is { } seq) { <a href="/log/@seq">seq @seq</a> }</div>
+	@if (land.Conflicts.Count > 0) { <ConflictTable Conflicts="land.Conflicts" /> }
+}
+<table class="list facts">
+	<tr><td>task</td><td><pre class="brief">@task</pre></td></tr>
+	<tr><td>by</td><td>@agent</td></tr>
+	<tr><td>started</td><td>@(started is { } s ? Format.Time(s) : "")</td></tr>
+	@if (finished is { } f) { <tr><td>finished</td><td>@Format.Time(f)</td></tr> }
+	@if (studio?.Execution is { } execution) { <tr><td>job</td><td class="id">@RunService.HostName · @execution</td></tr> }
+	@if ((studio?.Message ?? record?.LastLine) is { } message) { <tr><td>message</td><td>@message</td></tr> }
+	@if (record?.ExitCode is { } exit) { <tr><td>exit code</td><td>@exit</td></tr> }
+</table>
+<h2>Output @if (live) { <span class="pill">live</span> }</h2>
+<pre class="source output">@(output.Length == 0 ? (live ? "(waiting for the first output)" : "(no output)") : output)</pre>
+@if (diff is not null)
+{
+	<h2>Changes</h2>
+	<DiffView Diff="diff" Split="false" BaseLink="@($"/runs/{RunId}")" />
+}
+
+@code {
+	[Parameter] public string RunId { get; set; } = "";
+
+	private Bassia.Studio.Runs.StudioRun? studio;
+	private RunRecord? record;
+	private WorkspaceState? workspace;
+	private DiffSet? diff;
+	private LandResult? land;
+	private bool recipe;
+	private string status = "";
+	private string task = "";
+	private string agent = "";
+	private DateTimeOffset? started;
+	private DateTimeOffset? finished;
+	private string output = "";
+
+	protected override void OnInitialized()
+	{
+		base.OnInitialized();
+		RunService.Changed += OnChanged;
+	}
+
+	public override void Dispose()
+	{
+		base.Dispose();
+		RunService.Changed -= OnChanged;
+	}
+
+	private void OnChanged(Bassia.Studio.Runs.StudioRun run)
+	{
+		if (run.RunId == RunId)
+		{
+			_ = InvokeAsync(async () =>
+			{
+				try
+				{
+					await LoadAsync();
+				}
+				catch (Exception ex) when (ErrorNotice.For(ex) is { } message)
+				{
+					Error = message;
+				}
+
+				StateHasChanged();
+			});
+		}
+	}
+
+	protected override async Task LoadAsync()
+	{
+		studio = RunService.Find(RunId);
+		var view = (await RunService.ListAsync()).FirstOrDefault(item => item.RunId == RunId)
+			?? throw new VersionException($"No run '{RunId}'.");
+		record = view.Record;
+		status = view.Status;
+		task = view.Task ?? "";
+		agent = view.Agent;
+		started = view.Started;
+		finished = view.Finished;
+		workspace = view.WorkspaceId is { } id ? await Client.Repo.FindWorkspaceAsync(id) : null;
+		recipe = workspace is not null && (await Client.Repo.Objects.ReadCommitAsync(workspace.Record.Working)).Recipe is { } r && (r.Prompt ?? r.Command) is not null;
+		output = studio is not null ? string.Join('\n', studio.Output)
+			: record?.Log is { } log && await Client.Repo.Store.ReadAsync(log) is { } bytes ? System.Text.Encoding.UTF8.GetString(bytes.Span)
+			: record?.LastLine ?? "";
+		diff = workspace is not null && !Bassia.Studio.Runs.StudioRunStatus.IsLive(status) ? (await Client.WorkspaceAsync(workspace.Id)).Diff : null;
+	}
+
+	private Task StopAsync() => RunAsync(async () =>
+	{
+		await RunService.StopAsync(RunId, User);
+		return "Asked the run to stop; what the agent changed so far is snapshotted.";
+	});
+
+	private Task LandAsync() => RunAsync(async () =>
+	{
+		land = await Actions.LandAsync(workspace!.Id);
+		return null;
+	});
+
+	private Task ReplayAsync() => RunAsync(async () =>
+	{
+		var run = await RunService.StartAsync(new Bassia.Studio.Runs.RunSpec(ReplayOf: workspace!.Id, Land: true), User);
+		Navigation.NavigateTo("/runs/" + run.RunId);
+		return null;
+	}, reload: false);
+
+	private Task DiscardAsync() => RunAsync(async () =>
+	{
+		await Actions.CloseAsync(workspace!.Id, abandon: true);
+		return "Discarded: the run's workspace is abandoned.";
+	});
+}

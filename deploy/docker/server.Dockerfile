@@ -1,19 +1,16 @@
-# The Bassia server (bassia-server), configured by BASSIA_* environment variables (see Bassia.Server/ServerConfig.cs).
+# bassia-server: the monorepo's API, landing service and dashboard.
 # Build from the repository root: docker build -f deploy/docker/server.Dockerfile -t bassia-server .
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
-RUN dotnet publish Bassia.Server/Bassia.Server.csproj --configuration Release --output /out
+RUN dotnet publish Bassia.Server/Bassia.Server.csproj -c Release -o /app
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
-RUN apt-get update \
-	&& apt-get install --yes --no-install-recommends git ca-certificates \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& useradd --create-home --uid 10001 bassia \
-	&& mkdir -p /scratch && chown bassia /scratch
-COPY --from=build /out /app
-USER bassia
-# The git cache and scratch repositories live in the task's ephemeral storage.
-ENV BASSIA_URL=http://0.0.0.0:8080 BASSIA_STATE=/scratch DOTNET_gcServer=1
+WORKDIR /app
+COPY --from=build /app .
+# Every switch can come from BASSIA_SERVER_* (storage, state, token: see docs/reference.md).
+ENV BASSIA_SERVER_URL=http://0.0.0.0:8080 \
+    BASSIA_SERVER_DATA=/data
 EXPOSE 8080
-ENTRYPOINT ["/app/bassia-server"]
+USER app
+ENTRYPOINT ["dotnet", "/app/bassia-server.dll"]

@@ -1,0 +1,41 @@
+@inherits LayoutComponentBase
+@inject MonorepoClient Client
+@inject StudioUser User
+@inject StudioOptions Options
+
+<div class="studio">
+	<header class="toolbar">
+		<a class="brand" href="/">Bassia Studio</a>
+		<span class="server" title="bassia-server">@Client.Label</span>
+		<span class="spacer"></span>
+		<span class="user" title="role: @User.Role.ToString().ToLowerInvariant()">@User.Name · @User.Role.ToString().ToLowerInvariant()</span>
+		@if (Options.UsesEntra)
+		{
+			<a class="user" href="/signout" data-enhance-nav="false">Sign out</a>
+		}
+		<a class="tool" href="/depot">Depot</a>
+		<a class="tool" href="/log">Log</a>
+		<a class="tool" href="/workspaces">Workspaces</a>
+		<a class="tool" href="/runs">Runs</a>
+	</header>
+	<nav class="sidebar">
+		<div class="group">Version</div>
+		<NavLink href="/" Match="NavLinkMatch.All">Overview</NavLink>
+		<NavLink href="/depot">Depot browser</NavLink>
+		<NavLink href="/log">Mainline log</NavLink>
+		<NavLink href="/workspaces" Match="NavLinkMatch.All">Workspaces</NavLink>
+		<NavLink href="/workspaces/new">New workspace</NavLink>
+		<NavLink href="/conflicts">Conflicts</NavLink>
+		<NavLink href="/leases">Leases</NavLink>
+		<div class="group">Agentic runs</div>
+		<NavLink href="/runs" Match="NavLinkMatch.All">Runs</NavLink>
+		<NavLink href="/runs/new">New run</NavLink>
+	</nav>
+	<main class="content">
+		@Body
+	</main>
+</div>
+
+<div id="blazor-error-ui">
+	The connection to Studio was interrupted. <a href="" class="reload">Reload</a>
+</div>

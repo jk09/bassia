@@ -1,4 +1,4 @@
-namespace Bassia;
+namespace Bassia.CliCommands;
 
 using Bassia.Cli;
 using Bassia.Feedback;

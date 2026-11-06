@@ -101,8 +101,8 @@ public class HumanOutputTests
 	[InlineData("-help", "-human")]
 	[InlineData("-human", "-help")]
 	[InlineData("help", "-human")]
-	[InlineData("component", "-help", "-human")]
-	[InlineData("component", "add", "--HUMAN", "-help")]
+	[InlineData("workspace", "-help", "-human")]
+	[InlineData("workspace", "create", "--HUMAN", "-help")]
 	public async Task Human_WithHelp_PrintsReadableHelp(params string[] args)
 	{
 		var (exitCode, output, error) = await TestEnvironment.RunAsync(args);
@@ -117,13 +117,13 @@ public class HumanOutputTests
 	[Fact]
 	public async Task Human_ForAMissingSwitchOrUnknownCommand_IsAnErrorOnStderrWithExitCode2()
 	{
-		var (missingExit, missingOut, missingError) = await TestEnvironment.RunAsync("component", "add", "-human");
+		var (missingExit, missingOut, missingError) = await TestEnvironment.RunAsync("lease", "acquire", "-human");
 		var (unknownExit, _, unknownError) = await TestEnvironment.RunAsync("nosuch", "-human");
 
 		Assert.Equal(2, missingExit);
 		Assert.Empty(missingOut);
-		Assert.StartsWith("**error:** -url is required.", missingError);
-		Assert.Contains("Usage: bassia component add", missingError);
+		Assert.StartsWith("**error:** -prefix is required.", missingError);
+		Assert.Contains("Usage: bassia lease acquire", missingError);
 		Assert.Equal(2, unknownExit);
 		Assert.StartsWith("**error:** Unknown command 'nosuch'", unknownError);
 	}
