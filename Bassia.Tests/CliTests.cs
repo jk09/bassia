@@ -252,6 +252,39 @@ public sealed class CliTests : IDisposable
 	}
 
 	[Fact]
+	public void AgentWait_WaitsForAFinishedRunsProcess_WhichMayStillBeLanding()
+	{
+		// A run is recorded as done before it lands; while its process lives on this machine it is still finishing.
+		using var self = System.Diagnostics.Process.GetCurrentProcess();
+		var run = new RunRecord("run-test", "true", null, "agent", null, RunStatus.Succeeded, DateTimeOffset.UtcNow,
+			Host: Environment.MachineName, Pid: Environment.ProcessId);
+		Assert.False(Agents.AgentRunner.IsAlive(run));
+		Assert.True(Agents.AgentRunner.IsFinishing(run));
+
+		// Not when the process is gone, runs elsewhere, started after the run (a reused id), or the run is still running.
+		using var exited = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("dotnet", "--version") { RedirectStandardOutput = true })!;
+		exited.WaitForExit();
+		Assert.False(Agents.AgentRunner.IsFinishing(run with { Pid = exited.Id }));
+		Assert.False(Agents.AgentRunner.IsFinishing(run with { Host = "elsewhere" }));
+		Assert.False(Agents.AgentRunner.IsFinishing(run with { Started = self.StartTime.ToUniversalTime().AddHours(-1) }));
+		Assert.False(Agents.AgentRunner.IsFinishing(run with { Status = RunStatus.Running }));
+	}
+
+	[Fact]
+	public void RunWords_AreQuotedBackIntoOneShellLine_KeepingShellSyntax()
+	{
+		Assert.Equal("echo hi > a.txt", Bassia.Cli.Invocation.JoinRest(["echo hi > a.txt"]));
+		if (OperatingSystem.IsWindows())
+		{
+			Assert.Equal("echo \"a b\" && dir", Bassia.Cli.Invocation.JoinRest(["echo", "a b", "&&", "dir"]));
+			return;
+		}
+
+		Assert.Equal("npm test && echo $HOME > *.log", Bassia.Cli.Invocation.JoinRest(["npm", "test", "&&", "echo", "$HOME", ">", "*.log"]));
+		Assert.Equal("printf '%s\\n' 'it'\\''s \"$USER\"' '' '`x`'", Bassia.Cli.Invocation.JoinRest(["printf", "%s\\n", "it's \"$USER\"", "", "`x`"]));
+	}
+
+	[Fact]
 	public async Task Status_Help_AndReplacedCommands()
 	{
 		var outside = await OkAsync(temp.Path, "status");

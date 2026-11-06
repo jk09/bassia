@@ -348,6 +348,30 @@ internal sealed class AgentRunner(Monorepo monorepo)
 		}
 	}
 
+	/// <summary>
+	/// Whether the process that ran a finished run is still finishing it on this machine: a run is recorded as done
+	/// before it lands (<c>-land</c>) and releases its leases. A run elsewhere is taken as finished.
+	/// </summary>
+	public static bool IsFinishing(RunRecord run)
+	{
+		if (run.Status == RunStatus.Running || run.Host != Environment.MachineName || run.Pid is not { } pid)
+		{
+			return false;
+		}
+
+		try
+		{
+			using var process = Process.GetProcessById(pid);
+			// A process started after the run is another one that reused the id (with a minute's slack for clocks
+			// and the run's start time as stored).
+			return !process.HasExited && process.StartTime.ToUniversalTime() <= run.Started.UtcDateTime.AddMinutes(1);
+		}
+		catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+		{
+			return false;
+		}
+	}
+
 	/// <summary>The run's output: the local log while it exists, else the log stored with the run.</summary>
 	public async Task<string> ReadLogAsync(RunRecord run, CancellationToken ct = default)
 	{

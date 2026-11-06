@@ -96,6 +96,10 @@ bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
 - A command's main argument may be given without its switch: `bassia workspace land fix-login` is
   `bassia workspace land -workspace fix-login`.
 - A rest-of-line switch (`-run`, the message of `feedback send`) takes everything after it verbatim, so it comes last.
+  Given as one string, `-run` is one shell line. Given as several words, as a shell hands them over, they are
+  joined back into one line. On Linux and macOS, a word that holds whitespace, a quote, a backslash or a backtick is
+  single-quoted, so it reaches the agent's shell exactly as given. Other words (`&&`, `|`, `>`, globs, `$VAR`) stay
+  shell syntax. On Windows, a word with whitespace is put in double quotes.
 - `-C <path>`, before the command, runs `bassia` as if it had been started in `<path>`, same as `git -C <path>`.
 - A workspace is named by its name, its id (`w3f9a1c2b0d`), or a unique prefix of either of at least four characters.
   Inside a workspace's folder the workspace switch can be left out.
@@ -363,7 +367,7 @@ command instead. Bassia:
    the log with the run, and records how it ended (`succeeded`, `failed`, `stopped`);
 4. with `-land`, lands the workspace when the agent succeeded.
 
-`-detach` runs it in the background and returns at once; `agent list|show|logs|wait|stop` follow it from any shell.
+`-detach` runs it in the background and returns at once; `agent list|show|logs|wait|stop` follow it from any shell. `agent wait` returns once a `-land` run has also landed, because a run is recorded as done before it lands.
 A run whose process is gone without a result shows as `lost`. When the landing reports `needs-replay`,
 `bassia agent replay <workspace> [-land]` runs the same recipe on mainline's head in a new workspace with the same
 change id, and marks the old workspace `replaced`. Text is never merged behind an agent's back.
@@ -769,6 +773,12 @@ fresh workspace, the blobs in the container and a scrub. Without Azurite it chec
 `jk09/example` is private, so CI imports it from GitHub only with the repository secret `BASSIA_EXAMPLE_REPO_TOKEN`
 (a token that can read it). Without the secret, `scripts/Use-ExampleRepository.ps1` imports a local stand-in with the
 same files and adds a warning to the run.
+`NewMonorepoTests` (needs PostgreSQL) is a developer's first session on a local monorepo. It runs `bassia init`, then
+one landing lays out three projects with a load profile each, `textmerge` for Markdown and `replay` for code. Seven
+agents then start at once with `agent start -land -detach`, each its own process and workspace, and `agent wait`
+follows them. A barrier proves the runs overlap. The project agents load only their project and land; two edits to the
+same source file end in a landing and a replay with the original change id; two edits to the README are text-merged.
+The agent's arguments carry quotes, `$` and a backslash, which must reach it unchanged.
 `GitInteropTests` imports several repositories with interleaved history and exports mainline back, incrementally.
 `CloneCacheTests` covers the clone cache with a stand-in cloner on every platform (clones, fallbacks, the setting,
 pruning, status); `DevDriveTests` clone for real on the volume named by `BASSIA_TEST_DEVDRIVE_DIR` - the
