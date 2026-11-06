@@ -85,7 +85,8 @@ trees, each with all siblings re-listed); two sources of truth to keep consisten
   assumed to be installed locally (`-postgres` / `BASSIA_POSTGRES` / `postgres.connection`). Earlier SQLite monorepos are
   refused, not migrated (as for the server).
 - Clones keep the subtrees their work touched in a schema of the local PostgreSQL, filled by the server's `/trees/*`
-  calls; they never query the server's database.
+  calls; they never query the server's database. A clone with no PostgreSQL configured (the worker image's job
+  container) caches in memory per process instead, so cloud runs need no database in the container.
 - Scrub re-encodes rows and re-hashes; GC deletes tree rows by reachability.
 - No child-id index on `bassia_tree_entries` (reachability only walks forward): saves space on tens of millions of rows.
 

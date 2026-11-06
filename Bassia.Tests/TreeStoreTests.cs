@@ -302,3 +302,33 @@ public sealed class ServerTreeStoreTests : IDisposable
 		Assert.Equal("hello\n", Encoding.UTF8.GetString(await migrated.Repo.Objects.ReadContentAsync(files[0].Leaf)));
 	}
 }
+
+/// <summary>A clone needs no database of its own: a job container clones a server and runs with trees cached in memory.</summary>
+public sealed class CloneWithoutPostgresTests : IDisposable
+{
+	private readonly TempDirectory temp = new();
+
+	public void Dispose() => temp.Dispose();
+
+	[PostgresFact]
+	public async Task ACloneWithoutALocalPostgres_ReadsAndLandsThroughTheServersTrees()
+	{
+		await using var server = new ServerApp(new ServerOptions { Data = temp.Combine("server"), Postgres = Backends.RequiredPostgres(), Url = "http://127.0.0.1:0" });
+		await server.StartAsync();
+		var saved = Environment.GetEnvironmentVariable("BASSIA_POSTGRES");
+		Environment.SetEnvironmentVariable("BASSIA_POSTGRES", null);
+		try
+		{
+			var clone = temp.Combine("clone");
+			await TestEnvironment.OkAsync(temp.Path, "clone", "-from", server.Address!, "-path", clone);
+			await TestEnvironment.OkAsync(clone, "workspace", "create", "w");
+			await File.WriteAllTextAsync(Path.Combine(clone, "workspaces", "w", "a.txt"), "a\n");
+			Assert.Equal("landed", (string)(await TestEnvironment.OkAsync(clone, "workspace", "land", "w"))["outcome"]);
+			Assert.Equal("a\n", (string)(await TestEnvironment.OkAsync(clone, "mainline", "cat", "a.txt"))["content"]);
+		}
+		finally
+		{
+			Environment.SetEnvironmentVariable("BASSIA_POSTGRES", saved);
+		}
+	}
+}

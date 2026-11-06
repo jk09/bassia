@@ -42,9 +42,20 @@ internal sealed class Monorepo : IDisposable
 			server = new ServerConnection(Url, Config.GetOrNull("server.token"));
 			Objects = new CachingObjectStore(new DiskObjectStore(Path.Combine(BassiaDir, "cache")), new RemoteObjectStore(server));
 
-			// The trees a clone's work touches are kept in its own schema of the local PostgreSQL; the rest stays on the server.
-			var localTrees = new PostgresTreeStore(LocalPostgres.Connect(Config, settings));
-			postgres.Add(localTrees);
+			// The trees a clone's work touches are kept in its own schema of the local PostgreSQL when one is configured; a
+			// clone without one (a job container) keeps them for the length of the process. The rest stays on the server.
+			ITreeStore localTrees;
+			if (Config.GetOrNull(LocalPostgres.ConfigKey) is not null)
+			{
+				var persistent = new PostgresTreeStore(LocalPostgres.Connect(Config, settings));
+				postgres.Add(persistent);
+				localTrees = persistent;
+			}
+			else
+			{
+				localTrees = new MemoryTreeStore();
+			}
+
 			Repo = new Repository(Objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks,
 				new CachingTreeStore(localTrees, new RemoteTreeStore(server)));
 			Landing = new RemoteLanding(server);
@@ -188,7 +199,6 @@ internal sealed class Monorepo : IDisposable
 	public static async Task<Monorepo> CloneAsync(string url, string path, string? token, string? postgres = null, CancellationToken ct = default)
 	{
 		var root = Path.GetFullPath(path);
-		LocalPostgres.Require(postgres);
 		using (var probe = new ServerConnection(url, token ?? Environment.GetEnvironmentVariable("BASSIA_SERVER_TOKEN")))
 		{
 			var info = await probe.GetAsync<Api.Info>("info", ct);

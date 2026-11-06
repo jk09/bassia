@@ -51,7 +51,7 @@ internal static class CommandTable
 		new("clone", null, "Make this machine a client of a bassia-server's monorepo. Nothing is downloaded until something reads it.",
 			[new("from", "url", "The server's URL.", Required: true), new("path", "dir", "The folder (new or empty). Default: named after the server."),
 				new("token", "token", "The server's shared token, when it requires one (else BASSIA_SERVER_TOKEN)."),
-				new("postgres", "connection", "The local PostgreSQL connection string (else BASSIA_POSTGRES): the clone keeps the trees its work touches there.")],
+				new("postgres", "connection", "The local PostgreSQL connection string (else BASSIA_POSTGRES): the clone keeps the trees its work touches there; without one it keeps them in memory for each command.")],
 			["bassia clone -from http://bassia.example.com:8080 -path acme"], MonorepoCommands.CloneAsync, Positional: "from"),
 		new("status", null, "Whether the current folder is in a monorepo: mainline's seq, the open workspaces, live runs and what needs a replay.",
 			[], ["bassia status", "bassia -C R:\\acme status -human"], MonorepoCommands.StatusAsync),

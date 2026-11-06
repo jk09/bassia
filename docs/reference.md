@@ -691,7 +691,7 @@ history are unaffected. What this buys is traversal without a blob `GET` per dir
 | Diff of two trees | one query per level for the levels that differ (equal subtrees pruned by id) |
 | Garbage collection | trees are marked by one recursive query over all roots (`ReachAsync`); unreachable rows older than the grace period are deleted |
 
-A clone keeps its own trees in its schema of the local PostgreSQL (`CachingTreeStore` over `RemoteTreeStore`): the
+A clone keeps its own trees in its schema of the local PostgreSQL when one is configured (`-postgres`, `BASSIA_POSTGRES`), else in memory for the length of each command - what a job container does (`CachingTreeStore` over `RemoteTreeStore`): the
 `/trees/{have,fetch,subtree,path,put}` calls return whole subtrees as canonical encodings, each verified against its id,
 and only the subtrees the clone's work touched are kept - never the whole monorepo.
 
