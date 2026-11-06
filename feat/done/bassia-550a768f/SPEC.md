@@ -32,8 +32,8 @@ object.
       re-encodes and re-hashes), so git import/export and clones stay compatible.
 - [x] Tree objects are no longer written to blob storage (a test asserts no stored blob is a tree); chunks, file objects,
       conflicts, commits, operations and views stay in blobs.
-- [x] An explicit `bassia-server rebuild-trees -tree-store blob [-delete-blobs]` moves an existing server's trees into
-      PostgreSQL; until it ran, the server refuses to start on the relational store (`-tree-store blob` keeps the old path).
+- [x] No migration: trees are PostgreSQL-only; earlier SQLite monorepos and servers are refused (a later decision dropped
+      the planned `rebuild-trees`).
 - [x] A path lookup at depth *d* is one query (recursive CTE), a subtree walk is one query, and diff costs one batched
       read per differing level; a test shows zero blob reads for lookup, walk and diff on a relational store.
 - [x] Garbage collection marks trees with one recursive query over all roots and sweeps unreachable tree rows.
@@ -80,7 +80,10 @@ trees, each with all siblings re-listed); two sources of truth to keep consisten
 - Design: trees live **only** in PostgreSQL (no tree blobs). Rejected: relational mirror next to blobs, and a
   server-side cache only (can be reconsidered if the storage/consistency cost below proves too high).
 - Scope: `bassia-server` **and local monorepos** use PostgreSQL for trees; no SQLite tree store.
-- Migration: explicit rebuild only (no lazy backfill); a flag keeps the blob path until the rebuild ran.
+- Migration: none. Superseded the earlier "explicit rebuild only" decision: Bassia is only for new monorepos, so the
+  blob-to-PostgreSQL rebuild (`rebuild-trees`, `-tree-store blob`, the ready guard) was built and then removed again. Earlier
+  SQLite monorepos and servers are refused, not migrated. The blob-backed tree store remains only as the in-memory
+  reference of Core tests.
 - Local monorepos: PostgreSQL replaces SQLite for all local state (heads, path index, leases, trees); PostgreSQL is
   assumed to be installed locally (`-postgres` / `BASSIA_POSTGRES` / `postgres.connection`). Earlier SQLite monorepos are
   refused, not migrated (as for the server).

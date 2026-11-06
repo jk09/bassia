@@ -10,9 +10,6 @@ public sealed record GcReport(int Roots, int Live, int Blobs, int Swept, long Sw
 /// <remarks><see cref="Checked"/> counts blobs; <see cref="TreesChecked"/> the trees checked in the tree store.</remarks>
 public sealed record ScrubReport(int Checked, IReadOnlyList<ObjectId> Corrupt, IReadOnlyList<ObjectId> Unreadable, int TreesChecked = 0);
 
-/// <summary>What moving trees into a tree store did.</summary>
-public sealed record TreeMigrationReport(int Trees, int BlobsDeleted);
-
 /// <summary>
 /// Mark and sweep over the object store. Roots are every head - mainline (its operation log is the audit trail and is
 /// kept), the workspaces, and pins (heads named <c>pin/...</c>). A closed workspace's head is pruned
@@ -21,9 +18,6 @@ public sealed record TreeMigrationReport(int Trees, int BlobsDeleted);
 /// </summary>
 public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance maintenance)
 {
-	/// <summary>Called for every tree a walk reaches (migrating trees out of blobs).</summary>
-	public Action<ObjectId>? OnTree { get; set; }
-
 	public async Task<GcReport> CollectAsync(TimeSpan grace, TimeSpan retention, bool dryRun = false, CancellationToken ct = default)
 	{
 		var now = repo.Clock();
@@ -239,7 +233,6 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 
 					break;
 				case "tree":
-					OnTree?.Invoke(item.Id);
 					if (treeMaintenance is not null)
 					{
 						// The tree store walks the whole subtree itself (MarkTreesAsync); the id counts as live there.
@@ -337,69 +330,5 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 		}
 
 		return new ScrubReport(chosen.Count, corrupt, unreadable, chosenTrees.Count);
-	}
-
-	/// <summary>
-	/// Moves every tree reachable from the heads out of blobs into <paramref name="destination"/> (the explicit step of
-	/// switching a store to a relational tree store); with <paramref name="deleteBlobs"/>, the tree blobs are then removed.
-	/// Run it on a repository that still reads trees from blobs.
-	/// </summary>
-	public async Task<TreeMigrationReport> MigrateTreesAsync(ITreeStore destination, bool deleteBlobs, CancellationToken ct = default)
-	{
-		var trees = new HashSet<ObjectId>();
-		var previous = OnTree;
-		OnTree = id => trees.Add(id);
-		try
-		{
-			var live = new HashSet<ObjectId>();
-			var ignored = new List<ObjectId>();
-			var roots = new List<ObjectId>();
-			await foreach (var (name, head) in repo.Views.ListHeadsAsync("", ct))
-			{
-				if (name.IsCandidate)
-				{
-					await MarkCandidateAsync(head, live, ignored, ct);
-				}
-				else
-				{
-					roots.Add(head);
-				}
-			}
-
-			await WalkAsync(roots.Select(op => (op, "op")), live, ignored, ct);
-		}
-		finally
-		{
-			OnTree = previous;
-		}
-
-		foreach (var part in trees.Chunk(500))
-		{
-			var batch = new List<(ObjectId Id, Tree Tree)>();
-			foreach (var id in part)
-			{
-				var tree = await repo.Objects.ReadTreeAsync(id, ct);
-				if (ObjectId.Of(ObjectCodec.Encode(tree)) != id)
-				{
-					throw new VersionException($"Tree {id.Short} does not match its id; run a scrub before moving trees.");
-				}
-
-				batch.Add((id, tree));
-			}
-
-			await destination.PutManyAsync(batch, ct);
-		}
-
-		var deleted = 0;
-		if (deleteBlobs)
-		{
-			foreach (var id in trees)
-			{
-				await maintenance.DeleteAsync(id, ct);
-				deleted++;
-			}
-		}
-
-		return new TreeMigrationReport(trees.Count, deleted);
 	}
 }

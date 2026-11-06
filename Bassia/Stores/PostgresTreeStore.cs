@@ -27,27 +27,8 @@ public sealed class PostgresTreeStore : ITreeStore, ITreeStoreMaintenance, IAsyn
 			CREATE TABLE IF NOT EXISTS bassia_trees (id bytea PRIMARY KEY, written timestamptz NOT NULL DEFAULT now());
 			CREATE TABLE IF NOT EXISTS bassia_tree_entries (tree_id bytea NOT NULL, name text COLLATE "C" NOT NULL, ord integer NOT NULL, kind smallint NOT NULL,
 				child_id bytea NOT NULL, size bigint NOT NULL, exec boolean NOT NULL, PRIMARY KEY (tree_id, name));
-			CREATE TABLE IF NOT EXISTS bassia_meta (key text PRIMARY KEY, value bigint NOT NULL);
 			""", connection);
 		command.ExecuteNonQuery();
-	}
-
-	/// <summary>The meta key that says trees of this database live in these tables (set on a new store, or after a migration).</summary>
-	private const string ReadyKey = "trees_relational";
-
-	/// <summary>Whether this database has been declared to hold its trees here.</summary>
-	public async Task<bool> IsReadyAsync(CancellationToken ct = default)
-	{
-		await using var command = source.CreateCommand("SELECT 1 FROM bassia_meta WHERE key = $1");
-		command.Parameters.AddWithValue(ReadyKey);
-		return await command.ExecuteScalarAsync(ct) is not null;
-	}
-
-	public async Task MarkReadyAsync(CancellationToken ct = default)
-	{
-		await using var command = source.CreateCommand("INSERT INTO bassia_meta (key, value) VALUES ($1, 1) ON CONFLICT (key) DO NOTHING");
-		command.Parameters.AddWithValue(ReadyKey);
-		await command.ExecuteNonQueryAsync(ct);
 	}
 
 	public async ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)

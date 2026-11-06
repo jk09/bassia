@@ -206,39 +206,6 @@ public sealed class TreeStoreTests
 		Assert.Empty((await gc.ScrubAsync()).Unreadable);
 	}
 
-	[Theory]
-	[MemberData(nameof(Relational))]
-	public async Task MovingTreesOutOfBlobs_KeepsEveryCommitReadable(string kind)
-	{
-		if (Create(kind) is not { } destination)
-		{
-			return;
-		}
-
-		var blobs = new MemoryObjectStore();
-		var old = new TestRepo(blobs, new ObjectBackedTreeStore(blobs));
-		await old.Repo.InitializeAsync("test");
-		await old.CommitAsync(new Dictionary<string, string?> { ["src/a.txt"] = "a\n", ["src/lib/b.txt"] = "b\n" });
-		await old.CommitAsync(new Dictionary<string, string?> { ["src/a.txt"] = "a2\n", ["docs/c.md"] = "c\n" }, "second");
-		var expected = await old.MainFilesAsync();
-
-		var report = await new GarbageCollector(old.Repo, blobs).MigrateTreesAsync(destination, deleteBlobs: true);
-		Assert.True(report.Trees >= 6);
-		Assert.Equal(report.Trees, report.BlobsDeleted);
-
-		// The same views and blobs, trees now in the store.
-		var moved = new Repository(blobs, old.Views, old.Paths, old.Leases, TestRepo.SmallChunks, destination);
-		var main = await moved.GetMainAsync();
-		var files = new Dictionary<string, string>();
-		await foreach (var (path, leaf) in moved.Trees.WalkAsync(main.Tree))
-		{
-			files[path] = Encoding.UTF8.GetString(await moved.Objects.ReadContentAsync(leaf));
-		}
-
-		Assert.Equal(expected, files);
-		Assert.Empty((await new GarbageCollector(moved, blobs).ScrubAsync()).Corrupt);
-	}
-
 	[Fact]
 	public async Task AClone_KeepsWhatItFetched_AndAsksTheServerOnlyForTheRest()
 	{
@@ -255,51 +222,6 @@ public sealed class TreeStoreTests
 		Assert.Single(await clone.GetManyAsync([leaf.Id]));
 		Assert.Equal(2, (await clone.GetPathAsync(root.Id, ["d"])).Count);
 		Assert.Equal(0, server.Calls);
-	}
-}
-
-/// <summary>A server that kept its trees as blobs moves them into PostgreSQL by one explicit step, and refuses to start before it.</summary>
-public sealed class ServerTreeStoreTests : IDisposable
-{
-	private readonly TempDirectory temp = new();
-
-	public void Dispose() => temp.Dispose();
-
-	[PostgresFact]
-	public async Task AServerWithBlobTrees_NeedsRebuildTrees_BeforeItStartsOnPostgresTrees()
-	{
-		var postgres = Backends.RequiredPostgres();
-		var data = temp.Combine("data");
-		ServerApp Start(string trees) => new(new ServerOptions { Data = data, Postgres = postgres, TreeStore = trees, Url = "http://127.0.0.1:0", Chunks = new ChunkParameters(1024, 4096, 16384) });
-
-		// The earlier server: trees as blobs.
-		await using (var old = Start("blob"))
-		{
-			var service = new WorkspaceService(old.Repo);
-			await old.Repo.InitializeAsync("test");
-			var workspace = await service.CreateAsync("w", "tester");
-			var file = await old.Repo.Objects.WriteContentAsync(Encoding.UTF8.GetBytes("hello\n"));
-			var tree = await old.Repo.Trees.EditAsync((await old.Repo.Objects.ReadCommitAsync(workspace.Record.Working)).Tree, [new PathChange("dir/hello.txt", file)]);
-			await service.SetTreeAsync(workspace.Id, tree, "add", null, null);
-			Assert.Equal(LandOutcome.Landed, (await old.Landing.LandAsync(new LandRequest(workspace.Id))).Outcome);
-		}
-
-		var refused = Assert.Throws<ArgumentException>(() => Start("postgres"));
-		Assert.Contains("rebuild-trees", refused.Message);
-
-		await using (var rebuilding = Start("blob"))
-		{
-			await using var destination = new PostgresTreeStore(postgres);
-			var report = await new GarbageCollector(rebuilding.Repo, rebuilding.Maintenance).MigrateTreesAsync(destination, deleteBlobs: true);
-			Assert.True(report.Trees >= 2);
-			await destination.MarkReadyAsync();
-		}
-
-		await using var migrated = Start("postgres");
-		var main = await migrated.Repo.GetMainAsync();
-		var files = await migrated.Repo.Trees.WalkAsync(main.Tree).ToListAsync();
-		Assert.Equal(["dir/hello.txt"], files.Select(item => item.Path));
-		Assert.Equal("hello\n", Encoding.UTF8.GetString(await migrated.Repo.Objects.ReadContentAsync(files[0].Leaf)));
 	}
 }
 

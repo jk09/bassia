@@ -44,12 +44,6 @@ internal sealed record ServerOptions
 	/// </summary>
 	public string? Postgres { get; init; }
 
-	/// <summary>
-	/// Where trees (directories) are kept: <c>postgres</c> (relational, one query per path or subtree; the default) or
-	/// <c>blob</c> (as objects in blob storage, how earlier servers kept them; also what <c>rebuild-trees</c> reads from).
-	/// </summary>
-	public string TreeStore { get; init; } = "postgres";
-
 	public ChunkParameters Chunks { get; init; } = ChunkParameters.Default;
 
 	/// <summary>The semantic merge driver (weave-driver by default, when installed; "off" disables it).</summary>
@@ -82,7 +76,7 @@ internal sealed record ServerOptions
 		if (Get("state") is { } state && !state.Equals("postgres", StringComparison.OrdinalIgnoreCase))
 		{
 			throw new ArgumentException($"-state '{state}' is not supported: bassia-server keeps its state in PostgreSQL only " +
-				"(SQLite was removed from Bassia). Pass -postgres <connection string>.");
+				"Pass -postgres <connection string>.");
 		}
 
 		return new ServerOptions
@@ -99,7 +93,6 @@ internal sealed record ServerOptions
 			AzureUrl = Get("azure-url"),
 			AzureContainer = Get("azure-container") ?? "bassia",
 			Postgres = Get("postgres"),
-			TreeStore = Get("tree-store") ?? "postgres",
 			SemanticDriver = Get("semantic-driver") ?? "weave-driver",
 			Validate = Get("validate")
 		};

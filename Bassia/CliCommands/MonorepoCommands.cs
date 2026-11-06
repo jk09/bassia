@@ -16,7 +16,7 @@ internal static class MonorepoCommands
 		using var monorepo = await Monorepo.InitAsync(path, postgres: invocation.Get("postgres"));
 		var main = await monorepo.Repo.GetMainAsync();
 		return Ok(invocation, $"Created a local monorepo in '{monorepo.Root}': blobs in .bassia/objects (local-disk stand-in for cloud storage), " +
-			"heads, path index and leases in .bassia/state.db. Next: 'bassia import -git <url>' or 'bassia workspace create <name>'.",
+			"heads, path index, leases and trees in a PostgreSQL schema of its own. Next: 'bassia import -git <url>' or 'bassia workspace create <name>'.",
 			new Dictionary<string, object?>
 			{
 				["root"] = monorepo.Root,
