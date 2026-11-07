@@ -16,6 +16,8 @@
     <ProjectReference Include="..\Bassia.Core\Bassia.Core.csproj" />
   </ItemGroup>
 
+  <!-- No ASP.NET Core code is left in the CLI, but Bassia.dll is also started from Studio's (and the tests') folders, where
+       Microsoft.Extensions.* (Npgsql's and Azure's dependencies) come from the ASP.NET Core shared framework. -->
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>

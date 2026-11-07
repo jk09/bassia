@@ -830,7 +830,7 @@ function Invoke-Import {
 	}
 	Write-Host "Imported $(@($result.repository).Count) repositor$((@($result.repository).Count -eq 1) ? 'y' : 'ies'); mainline is at seq $($result.seq)."
 	Write-Host "Clone: $dir  (bassia -C `"$dir`" workspace create <name>)"
-	Write-Host "Server API: $($srv.Url) (token from: ./scripts/bassia-local-cloud.ps1 server-token; a web UI: Bassia Studio, or bassia -C `"$dir`" web)"
+	Write-Host "Server API: $($srv.Url) (token from: ./scripts/bassia-local-cloud.ps1 server-token; its web UI: Bassia Studio)"
 }
 
 function Invoke-ServerStatus {

@@ -35,7 +35,8 @@ internal static class CommandTable
 		["skill"] = "Skills lived in the old meta-repo; keep them in the tree and read them in a workspace.",
 		["user"] = "Who acts comes from BASSIA_USER or 'bassia config set -key user.id -value <id>'.",
 		["whoami"] = "Run 'bassia config get -key user.id' (or BASSIA_USER).",
-		["ui"] = "Use 'bassia web' for the dashboard.",
+		["ui"] = "The web UI is Bassia Studio: 'bassia-studio -server <url> -token <t>' over a bassia-server.",
+		["web"] = "'bassia web' was removed: the web UI is Bassia Studio ('bassia-studio -server <url> -token <t>' over a bassia-server).",
 		["prompt"] = "bassia has no LLM of its own: drive it from your agent, which learns it from 'bassia help -all'."
 	};
 
@@ -256,9 +257,6 @@ internal static class CommandTable
 					"turns it off. Files under 8 KiB are written directly. Creating a Dev Drive needs an administrator: Settings > System > Storage > Disks & " +
 					"volumes > Create dev drive, or Format-Volume -DevDrive."),
 		]),
-		Cmd("web", "Serve the dashboard: workspaces and whether they can land, live runs, mainline, conflicts and leases.",
-			[Value("port", "n", "The port (default 8080, or the next free one)."), Flag("no-open", "Do not open the browser.")],
-			["bassia web", "bassia web -port 9000 -no-open"], WebCommand.RunAsync),
 
 		// ----- feedback -----
 		Group("feedback", "Send feedback to the Bassia project and choose what happens when bassia crashes.",

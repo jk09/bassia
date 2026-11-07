@@ -1,7 +1,7 @@
 # Bassia reference
 
 The complete guide to the client-server `bassia`: the command line, workspaces and landing, conflict policies, leases,
-agentic runs, git import and export, the server's Web API and the local web dashboard. For what Bassia is and why, start with the
+agentic runs, git import and export, the server's Web API and Bassia Studio, its web UI. For what Bassia is and why, start with the
 [README](../README.md); for the design it implements, see
 [Design: Cloud-Backed Version Control for Agentic Development](https://claude.ai/artifact/V2nkDzNs8XAsx1E9PpgwM7).
 
@@ -79,12 +79,12 @@ bassia workspace list                                           # which can land
 bassia workspace land paginate-the-list-endpoint-4f2a91
 bassia workspace check add-request-logging-9c1e07               # needs-replay? it touched what the first one rewrote
 bassia agent replay add-request-logging-9c1e07 -land            # the same task on the new head, the same change id
-bassia web                                                      # watch all of it
+bassia agent list                                               # watch all of it (or in Bassia Studio)
 ```
 
 ## Command line
 
-`bassia` is operated mainly by AI agents, so the command line is its primary interface: everything the dashboard shows
+`bassia` is operated mainly by AI agents, so the command line is its primary interface: everything Studio shows
 has a command, and every command answers in TOML.
 
 ```
@@ -162,7 +162,6 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | Git | `import -git <url\|path>,... [-prefix <folder>,...] [-history] [-limit <n>]`, `export -git <dir> [-branch <b>]` |
 | Dev Drive | `devdrive status [-path <dir>]` |
 | Maintenance | `gc [-dry-run] [-grace-hours <n>] [-retention-days <n>]`, `scrub [-sample <n>]` |
-| Dashboard | `web [-port <n>] [-no-open]` |
 | Feedback | `feedback send [-kind bug\|idea\|question] [-yes] <message...>`, `feedback reports [-mode off\|ask\|auto]`, `feedback pending [-send]` |
 
 ## Workspaces
@@ -179,7 +178,7 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
 - **Ignore rules.** Version control and build folders (`.git/`, `bin/`, `obj/`, `node_modules/`, caches) are never
   snapshotted unless already tracked; `.bassia.toml`'s `[ignore] paths` adds more. Two paths that differ only by case
   are refused, because Windows cannot hold both.
-- **Changes.** `workspace status`, `workspace diff` and the dashboard list each changed path as `added`, `deleted`,
+- **Changes.** `workspace status`, `workspace diff` and Studio list each changed path as `added`, `deleted`,
   `modified`, `renamed`, or `mode` - the same content with only the executable bit changed (git's `100755`/`100644`).
   On Windows, which has no executable bit, a file keeps the mode its tree recorded, so imported executables never show
   as changed.
@@ -278,7 +277,7 @@ monorepo, the landing service in-process) is the only writer of mainline:
 
 Outcomes: `landed` (with the new seq), `would-land` (check), `nothing` (no changes), `needs-replay`, `conflict`
 (the workspace holds unresolved conflicts, which mainline refuses), and `rejected` (stacked on an open workspace,
-or leases missing). A refused landing is recorded on the workspace (`last_land`), which the dashboard shows.
+or leases missing). A refused landing is recorded on the workspace (`last_land`), which `workspace show` and Studio show.
 
 `-strict -reads <prefix>,...` also refuses the landing when anything under the declared read set changed since the
 workspace's base - for a coherent rewrite that relied on an API elsewhere. `-keep` keeps the workspace open after it
@@ -310,7 +309,7 @@ done ahead of time, as the workspace changes, so that landing it costs little mo
   landing metric) says the fast path was taken.
 - **The conflict overview** (`GET /api/v1/conflicts`) reads the candidates: every open workspace with what a landing
   would do now, whether its candidate is current, the **overlaps** - paths two or more open workspaces change, so
-  whichever lands second will meet the first - and the **hot paths**. Studio's and the dashboard's conflict pages show
+  whichever lands second will meet the first - and the **hot paths**. Studio's conflict page shows
   it and refresh on the `reconciled` watch event. A local monorepo runs nothing in the background: it reconciles stale
   candidates when the overview is read.
 
@@ -497,33 +496,6 @@ never asks again. Chunks of 256 KiB and more go between the client and the blob 
 proxies file bytes. When `OTEL_EXPORTER_OTLP_ENDPOINT` is set the server exports OpenTelemetry metrics (landings by
 outcome, objects stored, bytes served, redirected reads).
 
-## Web dashboard
-
-```sh
-bassia web                       # http://127.0.0.1:8080/, opened in the browser
-bassia web -port 9000 -no-open
-```
-
-`web` serves a read-only dashboard over the monorepo (a local monorepo or a client), on 127.0.0.1 only. `bassia-server`
-serves no pages (its web UI is Bassia Studio). Pages and pictures are drawn on the server and work without JavaScript; the script refreshes the
-live parts (on the server, when it pushes a change). Every page shows the `bassia` commands for what it describes;
-click one to copy it.
-
-- **Overview**: mainline's seq, open workspaces, live runs, how many can land now and how many are blocked, leases;
-  the live runs as cards; every open workspace with whether it can land; a donut of where workspaces stand; the
-  latest landings.
-- **Workspaces**: the stacks drawn left to right from mainline, each workspace coloured by whether it can land, and
-  every workspace with its base, what it is stacked on, its run and intent. A workspace's page shows its record, the
-  result of landing it now (with the conflicting paths and their policies), its changes and its operation log.
-- **Runs**: live runs as animated cards, every run over time, runs by status; a run's page streams its output.
-- **Mainline**: the landings by seq; a landing's page shows its commit, change id, intent, recipe and changes, and on
-  request the hunks (rewritten files as a summary).
-- **Conflicts**: from the live conflict overview, every workspace blocked from landing with its conflicting paths,
-  policies and the commands that deal with it, the open workspaces that overlap on a path, and the **hot paths** that
-  keep colliding - candidates for an exclusive lease.
-- **Leases**, **Files** (mainline's tree at any seq, from tree metadata) and **Config** (the policy in `.bassia.toml`
-  and the folder's settings).
-
 ## Bassia Studio (web client)
 
 ```sh
@@ -693,7 +665,7 @@ Bassia has four projects; each depends only on the ones before it.
    may use (`Stores`: `PostgresState` (`bassia-server` and local monorepos) for heads, path index and leases and `PostgresTreeStore` for trees; `S3ObjectStore` and
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
-   (`Platform`), and the dashboard (`Web`).
+   (`Platform`).
 3. **`Bassia.Server`** - `bassia-server`: the same core over the server's stores, the Web API (the RPC surface),
    signed blob URLs and the watch stream.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
