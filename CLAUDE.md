@@ -23,7 +23,7 @@ remote implementations of the traits. See "Architecture" in `docs/reference.md`.
 
 ## Tech stack
 
-.NET 10 / C#: the `bassia` command-line frontend (TOML results, `-human` Markdown), `bassia-server` (ASP.NET Core,
+.NET 10 / C#: the `bassia` command-line frontend (parsed with `System.CommandLine`; TOML results, `-human` Markdown), `bassia-server` (ASP.NET Core,
 PostgreSQL, the local-disk blob store or S3 via the AWS SDK, OpenTelemetry metrics), a local PostgreSQL for local monorepos, and a server-rendered web dashboard.
 BLAKE3 (`Blake3` package) and canonical CBOR (`System.Formats.Cbor`) define object ids. A separately installed `git` is
 needed only for `bassia import` and `bassia export`; weave's `weave-driver` is the default semantic merge driver.

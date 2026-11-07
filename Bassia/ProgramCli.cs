@@ -1,5 +1,7 @@
 namespace Bassia;
 
+using System.CommandLine;
+using System.CommandLine.Parsing;
 using Bassia.Cli;
 
 internal static class ProgramCli
@@ -11,81 +13,67 @@ internal static class ProgramCli
 	internal static Func<bool> Interactive { get; set; } = () => !Console.IsInputRedirected && !Console.IsOutputRedirected && !Console.IsErrorRedirected;
 
 	/// <summary>
-	/// Runs one command line: <c>bassia [-C &lt;path&gt;] &lt;command&gt; [&lt;subcommand&gt;] [-switch [value]]...</c>. The command
-	/// and its subcommand are looked up in <see cref="CommandTable"/>, the rest is parsed against that command's
-	/// switches, and the handler prints a TOML result. Exit codes: 0 success, 1 failure, 2 a command line that does
-	/// not parse (an unknown command, subcommand or switch, or a missing value).
+	/// What the library may not do on its own: bassia takes <c>@profile</c> as a value (not a response file) and its
+	/// switches are never bundled.
+	/// </summary>
+	private static readonly ParserConfiguration Parser = new() { ResponseFileTokenReplacer = null, EnablePosixBundling = false };
+
+	/// <summary>
+	/// Runs one command line: <c>bassia [-C &lt;path&gt;] &lt;command&gt; [&lt;subcommand&gt;] [-switch [value]]...</c>. The
+	/// line is parsed by <c>System.CommandLine</c> against <see cref="CommandTable.Root"/>, which declares every command,
+	/// switch and argument; the handler of the command it names prints a TOML result. Exit codes: 0 success, 1 failure,
+	/// 2 a command line that does not parse (an unknown command, subcommand or switch, or a missing value).
 	/// </summary>
 	public static async Task<int> RunAsync(string[] args)
 	{
 		HumanOutput.Enabled = false;
-		var (remainingArgs, workingDirectoryError) = ConsumeWorkingDirectoryOption(args);
-		if (workingDirectoryError is not null)
+		var root = CommandTable.Root;
+		var line = CommandLineNormalizer.Normalize(root, args);
+		var parse = root.Parse(line.Tokens, Parser);
+		HumanOutput.Enabled = parse.GetValue(CommandTable.Human);
+		if (ChangeWorkingDirectory(parse.GetValue(CommandTable.WorkingDirectory) ?? []) is { } workingDirectoryError)
 		{
 			return UsageError("bassia", workingDirectoryError);
 		}
 
-		args = ExtractHuman(remainingArgs);
-		if (args.Length == 0 && !HumanOutput.Enabled && Interactive())
+		var helpRequested = parse.GetValue(CommandTable.HelpRequested);
+		var unmatched = parse.UnmatchedTokens;
+		if (parse.CommandResult.Command is not BassiaCommand command)
 		{
-			Console.WriteLine(Help.ShortText);
-			return 0;
-		}
-
-		if (args.Length == 0 || IsHelp(args[0]))
-		{
-			return Help.Show(args.Skip(1).ToList());
-		}
-
-		var name = args[0];
-		if (CommandTable.Replaced.TryGetValue(name, out var replacement))
-		{
-			return UsageError(name.ToLowerInvariant(), $"{replacement} Run 'bassia help' for every command.");
-		}
-
-		var group = CommandTable.Group(name);
-		if (group.Count == 0)
-		{
-			return UsageError(name.ToLowerInvariant(), $"Unknown command '{name.ToLowerInvariant()}'. Run 'bassia help' for every command.");
-		}
-
-		CommandSpec spec;
-		var rest = args[1..];
-		if (group.Count == 1 && group[0].Sub is null)
-		{
-			spec = group[0];
-		}
-		else
-		{
-			var subcommands = string.Join(", ", group.Select(command => command.Sub));
-			if (rest.Length == 0 || IsHelp(rest[0]))
+			if (unmatched.Count == 0 || IsHelp(unmatched[0]))
 			{
-				return Help.Show([group[0].Name]);
+				return unmatched.Count == 0 && !helpRequested && !HumanOutput.Enabled && Interactive()
+					? Print(Help.ShortText)
+					: Help.Show([]);
 			}
 
-			spec = group.FirstOrDefault(command => string.Equals(command.Sub, rest[0], StringComparison.OrdinalIgnoreCase))!;
-			if (spec is null)
-			{
-				return UsageError(group[0].Name, $"'bassia {group[0].Name}' has no subcommand '{rest[0]}'; it has {subcommands}. Run 'bassia help {group[0].Name}'.");
-			}
-
-			rest = rest[1..];
+			var name = unmatched[0];
+			return UsageError(name.ToLowerInvariant(), CommandTable.Replaced.TryGetValue(name, out var replacement)
+				? $"{replacement} Run 'bassia help' for every command."
+				: $"Unknown command '{name.ToLowerInvariant()}'. Run 'bassia help' for every command.");
 		}
 
-		if (spec.Name == "help")
+		if (command.IsGroup)
 		{
-			return Help.Show(rest.Where(word => !IsHelp(word) && word != "-command" && word != "--command").ToList());
+			var path = command.Lineage.Select(part => part.Name).ToList();
+			return unmatched.Count == 0 || IsHelp(unmatched[0]) || helpRequested
+				? Help.Show(path)
+				: UsageError(command.FullName, $"'bassia {command.FullName}' has no subcommand '{unmatched[0]}'; it has {string.Join(", ", command.Nested.Select(child => child.Name))}. Run 'bassia help {command.FullName}'.");
+		}
+
+		if (helpRequested && command.Name != "help")
+		{
+			return Help.Show(command.Lineage.Select(part => part.Name).ToList());
 		}
 
 		try
 		{
-			var invocation = Invocation.Parse(spec, rest);
-			if (invocation.HelpRequested)
+			if (UsageProblem(command, parse, line) is { } problem)
 			{
-				return Help.Show(spec.Sub is null ? [spec.Name] : [spec.Name, spec.Sub]);
+				return UsageError(problem.Command, problem.Message);
 			}
 
-			return await spec.Handler(invocation);
+			return await command.Handler!(new Invocation(command, parse, line.Rest));
 		}
 		catch (CliUsageException ex)
 		{
@@ -93,15 +81,55 @@ internal static class ProgramCli
 		}
 		catch (Exception ex) when (IsReportable(ex))
 		{
-			return WriteResult(false, spec.FullName, ex.Message);
+			return WriteResult(false, command.FullName, ex.Message);
 		}
 		catch (Exception ex) when (ex is not OperationCanceledException)
 		{
 			// An exception no command expects is a crash: say so, and file it as an issue if the user agreed to that.
-			var report = await Feedback.CrashReporter.HandleAsync(spec.FullName, ex);
-			return WriteResult(false, spec.FullName, $"Bassia stopped unexpectedly ({ex.GetType().Name}: {ex.Message}).",
+			var report = await Feedback.CrashReporter.HandleAsync(command.FullName, ex);
+			return WriteResult(false, command.FullName, $"Bassia stopped unexpectedly ({ex.GetType().Name}: {ex.Message}).",
 				report is null ? null : new Dictionary<string, object?> { ["report"] = report });
 		}
+	}
+
+	/// <summary>Why the command line does not fit its command, if it does not: what the library found, and the rest-of-line switch it never saw.</summary>
+	private static CliUsageException? UsageProblem(BassiaCommand command, ParseResult parse, Normalized line)
+	{
+		var rest = line.Rest;
+		if (line.UnknownSwitches.Count > 0)
+		{
+			return Invocation.Usage(command, $"Unknown switch '{line.UnknownSwitches[0]}'.");
+		}
+
+		if (rest is { Text.Length: 0 } && command.FindSwitch(rest.Switch) is { } restOption)
+		{
+			var noun = restOption.ValueName() ?? "value";
+			return Invocation.Usage(command, $"-{rest.Switch} requires {("aeiou".Contains(char.ToLowerInvariant(noun[0])) ? "an" : "a")} {noun}.");
+		}
+
+		// A problem with a token ("-path" without a value) comes before a command-level one ("-name is required").
+		if (parse.Errors.OrderBy(error => error.SymbolResult is CommandResult).FirstOrDefault() is { } first)
+		{
+			return Invocation.Usage(command, first.Message);
+		}
+
+		// What the library cannot check: a needed switch may be given as the command's bare argument, or be rest-of-line text.
+		var invocation = new Invocation(command, parse, rest);
+		foreach (var option in command.Options)
+		{
+			if (!invocation.Has(option.SwitchName()) && option.IsRequired())
+			{
+				return Invocation.Usage(command, $"-{option.SwitchName()} is required.");
+			}
+		}
+
+		return null;
+	}
+
+	private static int Print(string text)
+	{
+		Console.WriteLine(text);
+		return 0;
 	}
 
 	/// <summary>The failures a command reports as its TOML error rather than as a crash.</summary>
@@ -153,89 +181,27 @@ internal static class ProgramCli
 
 	// Mirrors "git -C <path>": run as if bassia had started in <path>. May repeat; each occurrence resolves
 	// relative to the directory left by the previous one, matching git's chaining behavior.
-	private static (string[] Args, string? Error) ConsumeWorkingDirectoryOption(string[] args)
+	private static string? ChangeWorkingDirectory(IEnumerable<string> paths)
 	{
-		var index = 0;
-		while (index < args.Length && args[index] == "-C")
+		foreach (var path in paths)
 		{
-			if (index + 1 >= args.Length)
-			{
-				return (args, "-C requires a path. Usage: bassia -C <path> <command> ...");
-			}
-
-			var path = args[index + 1];
 			try
 			{
 				var target = Path.GetFullPath(path);
 				if (!Directory.Exists(target))
 				{
-					return (args, $"Cannot change to '{path}': No such directory.");
+					return $"Cannot change to '{path}': No such directory.";
 				}
 
 				Environment.CurrentDirectory = target;
 			}
 			catch (Exception ex) when (ex is ArgumentException or PathTooLongException or NotSupportedException)
 			{
-				return (args, $"Cannot change to '{path}': {ex.Message}");
-			}
-
-			index += 2;
-		}
-
-		return (args[index..], null);
-	}
-
-	/// <summary>
-	/// Takes <c>-human</c>/<c>--human</c> (print for a person, not as TOML) out of the command line and records it for
-	/// this run. It may appear anywhere except inside a rest-of-line switch's text (the agent command of <c>-run</c>,
-	/// the message of <c>feedback send</c>), which is the command's own and stays verbatim.
-	/// </summary>
-	private static string[] ExtractHuman(string[] args)
-	{
-		var rest = FirstRestOfLineIndex(args);
-		var kept = new List<string>();
-		HumanOutput.Enabled = false;
-		for (var i = 0; i < args.Length; i++)
-		{
-			if (i < rest && args[i].TrimStart('-').Equals("human", StringComparison.OrdinalIgnoreCase) && args[i].StartsWith('-'))
-			{
-				HumanOutput.Enabled = true;
-			}
-			else
-			{
-				kept.Add(args[i]);
+				return $"Cannot change to '{path}': {ex.Message}";
 			}
 		}
 
-		return [.. kept];
-	}
-
-	/// <summary>The index from which the command line is a rest-of-line switch's text, or the length when there is none.</summary>
-	private static int FirstRestOfLineIndex(string[] args)
-	{
-		if (args.Length == 0)
-		{
-			return 0;
-		}
-
-		var group = CommandTable.Group(args[0]);
-		var firstArgument = group.Any(command => command.Sub is not null) ? 2 : 1;
-		for (var i = 1; i < args.Length; i++)
-		{
-			var token = args[i];
-			if (token.StartsWith('-') && group.Any(command => command.FindSwitch(token.TrimStart('-')) is { Rest: true }))
-			{
-				return i + 1;
-			}
-
-			// 'bassia feedback send <message...>': everything from the first bare word on is the message.
-			if (i >= firstArgument && !token.StartsWith('-') && group.Any(command => command.Positional is not null && command.FindSwitch(command.Positional) is { Rest: true }))
-			{
-				return i;
-			}
-		}
-
-		return args.Length;
+		return null;
 	}
 
 	private static bool IsHelp(string argument) => argument is "-h" or "--help" or "-help" or "help";
