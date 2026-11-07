@@ -8,7 +8,7 @@ runs on, its work is
 snapshotted implicitly, and you watch whether each workspace can **land** on the single trunk. When two agents rewrote
 the same file, Bassia does not merge text nobody reviewed: it re-runs the later task on the new trunk.
 
-![The Bassia overview: live runs, which workspaces can land, where they stand, and the latest landings](docs/images/overview.png)
+![Bassia Studio's overview: mainline's seq, open workspaces and the latest landings](docs/images/studio-overview.png)
 
 - **[Workspaces instead of branches](#workspaces-instead-of-branches)**: one per run, stacked or cloned when work
   builds on work; commits are implicit.
@@ -21,7 +21,7 @@ the same file, Bassia does not merge text nobody reviewed: it re-runs the later 
 - **[Client-server, testable on a laptop](#client-server-testable-on-a-laptop)**: the same core runs in a local
   monorepo and in `bassia-server`; a local-disk blob store, or Azurite and PostgreSQL, stand in for the cloud
   ([the local workflow](#the-local-workflow-a-server-on-emulated-cloud-storage-agents-on-several-clients)).
-- **[A dashboard you look at](#a-dashboard-you-look-at)** and **[a CLI made for agents](#a-cli-made-for-agents)**.
+- **[A web client in the cloud](#a-web-client-in-the-cloud)** and **[a CLI made for agents](#a-cli-made-for-agents)**.
 - **[Bring your git repositories](#bring-your-git-repositories)**: import several at once, export the trunk back.
 
 The design behind it: [Design: Cloud-Backed Version Control for Agentic Development](https://claude.ai/artifact/V2nkDzNs8XAsx1E9PpgwM7).
@@ -118,7 +118,7 @@ Every mutation is an operation in the workspace's own log, so `workspace undo` a
 any earlier state, and an abandoned run is never lost. Workspaces never contend with each other, however many agents
 snapshot at once.
 
-![Workspaces: stacks drawn from the trunk, each coloured by whether it can land](docs/images/workspaces.png)
+![Workspaces in Bassia Studio: open ones, with their base and intent](docs/images/studio-workspaces.png)
 
 ## Landing is the only contention
 
@@ -147,7 +147,7 @@ keeps the change id. Per path glob, `.bassia.toml` can choose `textmerge` (line-
 `semantic` (weave's language-aware merge, landed only after your validation command passes) or `conflict` (stored
 with markers in the workspace to resolve by hand).
 
-![Conflicts: what keeps workspaces from landing, and the paths that keep colliding](docs/images/conflicts.png)
+![Conflicts in Bassia Studio: workspaces that cannot land now, overlapping paths and hot paths](docs/images/studio-conflicts.png)
 
 ## Cheap rewrites, lazy reads
 
@@ -172,14 +172,6 @@ the same core runs in a local monorepo (`bassia init`: a local-disk blob contain
 (the local-disk blob container, S3 or Azure Blob Storage; its state always in PostgreSQL, such as Azure Database for PostgreSQL). A client talks to the server and
 caches every object it reads, in batches, for all its workspaces. Large chunks travel between
 clients and blob storage on signed URLs; the server never proxies file bytes. Every test runs without a cloud account; the server's tests need a local PostgreSQL (`BASSIA_TEST_POSTGRES`).
-
-## A dashboard you look at
-
-`bassia web` shows the live runs, every workspace with whether it can land right now,
-the stacks, the trunk's landings with their diffs, what blocks landings and which paths keep colliding, leases, the
-files at any seq, and the policy. It is read-only: every page shows the commands that act on what it shows.
-
-![Runs: live runs as cards, and every run over time](docs/images/runs.png)
 
 ## A web client in the cloud
 

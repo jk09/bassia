@@ -304,6 +304,12 @@ public sealed class CliTests : IDisposable
 		Assert.Contains("bassia import", error);
 		var (unknown, _, _) = await RunInDirectoryAsync(Root, "workspace", "frobnicate");
 		Assert.Equal(2, unknown);
+
+		// bassia-04acae8b: the dashboard is gone; Studio is the web UI.
+		var (web, _, webError) = await RunInDirectoryAsync(Root, "web");
+		Assert.Equal(2, web);
+		Assert.Contains("Bassia Studio", webError);
+		Assert.DoesNotContain("web", ((TomlTableArray)help["commands"]).Select(command => (string)command["name"]));
 	}
 
 	[Fact]

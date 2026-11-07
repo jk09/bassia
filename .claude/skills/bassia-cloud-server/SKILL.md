@@ -43,8 +43,7 @@ PowerShell 7 from the root of this checkout: `pwsh -NoProfile -File scripts/bass
 3. **Report** what the script prints:
    - each repository's folder, commits and files, and the mainline seq,
    - the client (where `bassia workspace create <name>` and `bassia agent start` work),
-   - the server's API URL and that clients and Studio take the token from `server-token`; for a web UI, Bassia Studio
-     or `bassia -C <client> web` (the local dashboard).
+   - the server's API URL and that clients and Studio take the token from `server-token`; its web UI is Bassia Studio.
    For more history, suggest `bassia -C <client> mainline log`.
 4. **status / stop / reset.**
    - `server-status` prints the URL, mainline seq, data folder, database, container and client, and exits 1 when the

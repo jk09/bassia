@@ -16,13 +16,13 @@ internal static class CommandCatalog
 		"status", "version", "help", "config list", "config get",
 		"workspace list", "workspace show", "workspace status", "workspace diff", "workspace check", "workspace log",
 		"mainline log", "mainline show", "mainline ls", "mainline cat", "mainline changed",
-		"lease list", "devdrive status", "agent list", "agent show", "agent logs", "agent wait", "scrub", "web"
+		"lease list", "devdrive status", "agent list", "agent show", "agent logs", "agent wait", "scrub"
 	};
 
-	/// <summary>Commands meant for a person: feedback asks before anything leaves the machine, the dashboard serves until Ctrl-C.</summary>
+	/// <summary>Commands meant for a person: feedback asks before anything leaves the machine.</summary>
 	public static readonly IReadOnlySet<string> InteractiveCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
 	{
-		"feedback send", "web"
+		"feedback send"
 	};
 
 	/// <summary>The command line as a person would type it, quoting words with spaces.</summary>
