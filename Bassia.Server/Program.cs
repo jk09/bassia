@@ -4,9 +4,9 @@ using Bassia.Core.Version;
 using Bassia.Stores;
 
 /// <summary>
-/// <c>bassia-server</c>: runs the server, or a maintenance job over its data.
+/// <c>bassia-server</c>: runs the server (a Web API for Bassia Studio, <c>bassia</c> clients and other clients), or a maintenance job over its data.
 /// <code>
-/// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t> | -no-auth]
+/// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t> | -no-auth] [-cors-origin <origins>]
 ///             -postgres <connection string> [-storage disk|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
 /// bassia-server gc -data <folder> -postgres <connection string> [-grace-hours 24] [-retention-days 14] [-dry-run]
 /// bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]
@@ -19,11 +19,12 @@ internal static class Program
 		Usage:
 		  bassia-server -data <folder> -postgres <connection string> [-url <url>] [-public-url <url>] [-token <token> | -no-auth]
 		                [-storage disk | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
-		                [-semantic-driver <command>|off] [-validate <command>]        run the server
+		                [-cors-origin <origin>[,<origin>...]] [-semantic-driver <command>|off] [-validate <command>]        run the server
 		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs and trees
 		The state (heads, path index, leases) lives in PostgreSQL; -data holds the signing key and the local-disk blobs.
-		The API and the dashboard need a token: -token, or without it one generated into <data>/token. -no-auth serves everyone.
+		The server is a Web API under /api/v1 (Bassia Studio is its web UI). It needs a bearer token: -token, or without it
+		one generated into <data>/token. -no-auth serves everyone. -cors-origin lets browser apps on those origins call it.
 		Switches may also come from BASSIA_SERVER_<NAME> environment variables (BASSIA_SERVER_DATA, BASSIA_SERVER_TOKEN, ...).
 		""";
 
@@ -52,7 +53,7 @@ internal static class Program
 					}
 					else if (options.Token is null)
 					{
-						Console.Error.WriteLine($"bassia-server: no -token given; the token is in '{server.TokenFile}'. Sign in at {server.Address}, or: bassia clone -from {server.Address} -token <token>");
+						Console.Error.WriteLine($"bassia-server: no -token given; the token is in '{server.TokenFile}'. Clients: bassia clone -from {server.Address} -token <token>, or Studio's -token.");
 					}
 
 					await server.WaitForShutdownAsync();

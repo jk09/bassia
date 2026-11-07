@@ -1,4 +1,4 @@
-# bassia-server: the monorepo's API, landing service and dashboard.
+# bassia-server: the monorepo's Web API and landing service (Bassia Studio is its web UI).
 # Build from the repository root: docker build -f deploy/docker/server.Dockerfile -t bassia-server .
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

@@ -18,7 +18,7 @@ versioned Terraform in one command.
 | Resource | Purpose |
 |---|---|
 | Container Apps environment + Log Analytics | Hosts the apps and the job; logs |
-| `bassia-server` container app | The monorepo's API, landing service and dashboard; Blob Storage and PostgreSQL behind it |
+| `bassia-server` container app | The monorepo's Web API and landing service; Blob Storage and PostgreSQL behind it |
 | `bassia-studio` container app | The web client; starts runs as job executions with its managed identity |
 | `bassia-runs` container app job | One execution per agentic run (image `bassia-worker`: bassia + git + Claude Code) |
 | Storage account (ZRS, Entra ID only) | Objects: chunks, trees, commits, operations, views |

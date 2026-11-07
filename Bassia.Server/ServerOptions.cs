@@ -17,11 +17,14 @@ internal sealed record ServerOptions
 	/// <summary>The URL clients reach the server at, for signed blob URLs; default: the listening URL.</summary>
 	public string? PublicUrl { get; init; }
 
-	/// <summary>The shared bearer token for the API and the dashboard; none: one the server generates and keeps in the data folder.</summary>
+	/// <summary>The shared bearer token for the API; none: one the server generates and keeps in the data folder.</summary>
 	public string? Token { get; init; }
 
 	/// <summary>Serve everyone, with no token at all. Only ever on request: a server is closed by default.</summary>
 	public bool NoAuth { get; init; }
+
+	/// <summary>Browser origins (scheme, host and port) allowed to call the API across origins (CORS); none: no CORS headers at all.</summary>
+	public IReadOnlyList<string> CorsOrigins { get; init; } = [];
 
 	/// <summary><c>disk</c> (the local-disk stand-in for cloud blobs), <c>s3</c> or <c>azure</c>.</summary>
 	public string Storage { get; init; } = "disk";
@@ -95,6 +98,7 @@ internal sealed record ServerOptions
 			Url = Get("url") ?? "http://127.0.0.1:8080",
 			PublicUrl = Get("public-url"),
 			Token = Get("token"),
+			CorsOrigins = Get("cors-origin") is { } origins ? CorsList(origins) : [],
 			Storage = Get("storage") ?? "disk",
 			Bucket = Get("bucket"),
 			Region = Get("region"),
@@ -106,5 +110,27 @@ internal sealed record ServerOptions
 			SemanticDriver = Get("semantic-driver") ?? "weave-driver",
 			Validate = Get("validate")
 		};
+	}
+
+	/// <summary>Comma-separated origins, each an absolute http(s) URL without a path; a wildcard is refused (the API takes a token that changes the monorepo).</summary>
+	private static IReadOnlyList<string> CorsList(string text)
+	{
+		var origins = new List<string>();
+		foreach (var item in text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			if (item == "*")
+			{
+				throw new ArgumentException("-cors-origin '*' is not allowed: name each origin, e.g. https://studio.example.com.");
+			}
+
+			if (!Uri.TryCreate(item, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https") || uri.PathAndQuery != "/")
+			{
+				throw new ArgumentException($"-cors-origin '{item}' is not an origin: give scheme, host and optional port, e.g. https://studio.example.com.");
+			}
+
+			origins.Add(uri.GetLeftPart(UriPartial.Authority));
+		}
+
+		return origins;
 	}
 }

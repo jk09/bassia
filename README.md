@@ -52,9 +52,9 @@ Each step has a Claude Code skill that does the same.
    ```
 
 3. **Start the server and import repositories**: `/bassia-cloud-server <urls> history`. The server runs at
-   http://127.0.0.1:8080 (also its dashboard) and keeps running after the terminal closes. The import goes through a
+   http://127.0.0.1:8080 (a Web API; Bassia Studio is its web UI) and keeps running after the terminal closes. The import goes through a
    first client. The server needs a token: it generates one, which
-   `pwsh scripts/bassia-local-cloud.ps1 server-token` prints, for the dashboard's sign-in page and for clients.
+   `pwsh scripts/bassia-local-cloud.ps1 server-token` prints, for clients and Studio.
 
    ```powershell
    pwsh scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Clone D:\clients\setup
@@ -175,7 +175,7 @@ clients and blob storage on signed URLs; the server never proxies file bytes. Ev
 
 ## A dashboard you look at
 
-`bassia web` (and the server's front page) shows the live runs, every workspace with whether it can land right now,
+`bassia web` shows the live runs, every workspace with whether it can land right now,
 the stacks, the trunk's landings with their diffs, what blocks landings and which paths keep colliding, leases, the
 files at any seq, and the policy. It is read-only: every page shows the commands that act on what it shows.
 
