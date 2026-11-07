@@ -305,31 +305,20 @@ public sealed class ServerTests : IAsyncLifetime
 		Assert.Contains("\"docs\"", landed);
 	}
 
+	/// <summary>The conflict overview the removed dashboard drew is the API's, for Studio and other clients (bassia-de3319ff).</summary>
 	[PostgresFact]
-	public async Task TheDashboard_ServesEveryPage()
+	public async Task TheConflictOverview_IsServedByTheApi()
 	{
 		await OkAsync(temp.Path, "clone", "-from", Url, "-path", "c", "-token", Token);
 		var root = temp.Combine("c");
 		await OkAsync(root, "agent", "start", "-name", "seed", "-land", "-run", WriteFileCommand("a.txt", "seed"));
 		await OkAsync(root, "agent", "start", "-name", "late", "-run", WriteFileCommand("a.txt", "late"));
 		await OkAsync(root, "agent", "start", "-name", "early", "-land", "-run", WriteFileCommand("a.txt", "early"));
-		var workspace = ((TomlTableArray)(await OkAsync(root, "workspace", "list"))["workspace"])[0];
-		var run = ((TomlTableArray)(await OkAsync(root, "agent", "list"))["run"])[0];
 
 		using var http = new HttpClient { BaseAddress = new Uri(Url) };
 		http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", Token);
-		foreach (var path in new[] { "/", "/workspaces", "/workspaces?all", $"/workspaces/{workspace["id"]}", "/runs", $"/runs/{run["run_id"]}", "/mainline", "/mainline/1",
-			"/mainline/2?patch", "/conflicts", "/leases", "/files", "/files?path=a.txt", "/config", "/fragment/live", "/style.css", "/app.js" })
-		{
-			var response = await http.GetAsync(path);
-			var text = await response.Content.ReadAsStringAsync();
-			Assert.True(response.StatusCode == HttpStatusCode.OK, $"{path}: {response.StatusCode} {text}");
-			Assert.DoesNotContain("class=\"error\"", text);
-		}
-
-		var conflicts = await http.GetStringAsync("/conflicts");
+		var conflicts = await http.GetStringAsync("api/v1/conflicts");
 		Assert.Contains("late", conflicts);
-		Assert.Contains("needs replay", conflicts);
-		Assert.Contains("a.txt", conflicts);
+		Assert.Equal(HttpStatusCode.NotFound, (await http.GetAsync("/conflicts")).StatusCode);
 	}
 }

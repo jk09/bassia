@@ -18,10 +18,10 @@ PowerShell 7 from the root of this checkout: `pwsh -NoProfile -File scripts/bass
 | `limit <n>` | `-Limit <n>`: at most n commits per repository with `history` (default 1000) |
 | `prefix <a,b>` | `-Prefix a,b`: the top-level folder of each repository (default: its name) |
 | `clone <dir>` | `-Clone <dir>`: the client folder to import through (default `~/bassia-monorepo`) |
-| `port <n>`, `token <t>` | `serve -Port <n>` (default 8080), `-Token <t>` (the shared token of the API and dashboard; default: one the server generates, printed by `server-token`) |
+| `port <n>`, `token <t>` | `serve -Port <n>` (default 8080), `-Token <t>` (the shared bearer token of the server's API; default: one the server generates, printed by `server-token`) |
 | no repositories | `serve`: start the server only |
 | `status` / `stop` / `reset` | `server-status` / `server-stop` / `server-reset` |
-| `token` | `server-token`: print the token, for the dashboard's sign-in page and for `bassia clone -token` |
+| `token` | `server-token`: print the token, for `bassia clone -token` and Studio's `-token` |
 
 ## Steps
 
@@ -43,7 +43,8 @@ PowerShell 7 from the root of this checkout: `pwsh -NoProfile -File scripts/bass
 3. **Report** what the script prints:
    - each repository's folder, commits and files, and the mainline seq,
    - the client (where `bassia workspace create <name>` and `bassia agent start` work),
-   - the dashboard URL, and that it signs in with the token from `server-token`.
+   - the server's API URL and that clients and Studio take the token from `server-token`; for a web UI, Bassia Studio
+     or `bassia -C <client> web` (the local dashboard).
    For more history, suggest `bassia -C <client> mainline log`.
 4. **status / stop / reset.**
    - `server-status` prints the URL, mainline seq, data folder, database, container and client, and exits 1 when the

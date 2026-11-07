@@ -30,6 +30,9 @@ public static class Api
 
 	public sealed record Info(string Server, string Version, int ChunkMin, int ChunkAverage, int ChunkMax, string Storage);
 
+	/// <summary>What <c>GET /</c> tells anyone, token or not: which service this is and where its API lives.</summary>
+	public sealed record ServiceReply(string Service, string Version, string Api, string Health);
+
 	public sealed record HeadReply(ObjectId? Head);
 
 	public sealed record HeadEntry(string Name, ObjectId Head);

@@ -1,7 +1,7 @@
 # Bassia reference
 
 The complete guide to the client-server `bassia`: the command line, workspaces and landing, conflict policies, leases,
-agentic runs, git import and export, the server and the web dashboard. For what Bassia is and why, start with the
+agentic runs, git import and export, the server's Web API and the local web dashboard. For what Bassia is and why, start with the
 [README](../README.md); for the design it implements, see
 [Design: Cloud-Backed Version Control for Agentic Development](https://claude.ai/artifact/V2nkDzNs8XAsx1E9PpgwM7).
 
@@ -456,21 +456,29 @@ theirs in a local PostgreSQL too); `-state postgres` is still accepted, any othe
 and, with the default `-storage disk`, the blob container `objects/` - a local-disk stand-in for cloud blob storage,
 laid out by hash prefix, so a server and its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
 
-The server is closed by default: the API and the dashboard need one shared token, `-token <t>`, or without it one the
-server generates on first start and keeps in `<data>/token` (owner-only on Unix). Its log names the file, never the
-token. Clients pass it as `bassia clone -token <t>` (or `server.token`, `BASSIA_SERVER_TOKEN`), Studio as `-token`. A
-browser is sent to `/login`, a form that leaves an HttpOnly, SameSite=Strict cookie (Secure over HTTPS);
-`?token=<t>` on a page does the same and redirects to the URL without it. `-no-auth` (`BASSIA_SERVER_NO_AUTH`) serves
-everyone, with a warning in the log. `/healthz`, signed `/blobs` URLs and the dashboard's stylesheet and script need no
-token. The token travels in clear over plain HTTP: beyond one machine, put TLS in front. People's own identities and
-roles are Studio's (`-auth entra`).
+`bassia-server` is a Web API only: it serves no pages. Its web UI is Bassia Studio; the API is for Studio, `bassia`
+clients and any other client, in the cloud or local. `GET /` answers a short JSON description (`service`, `version`,
+`api`, `health`); any other path outside the API is a JSON 404.
+
+The server is closed by default: the API needs one shared bearer token, `Authorization: Bearer <t>` - `-token <t>`, or
+without it one the server generates on first start and keeps in `<data>/token` (owner-only on Unix). Its log names the
+file, never the token. Clients pass it as `bassia clone -token <t>` (or `server.token`, `BASSIA_SERVER_TOKEN`), Studio
+as `-token`. Neither a cookie nor a `?token=` query parameter authenticates. A call without the token is a JSON 401
+with `WWW-Authenticate: Bearer`. `-no-auth` (`BASSIA_SERVER_NO_AUTH`) serves everyone, with a warning in the log.
+`/healthz`, `/` and signed `/blobs` URLs need no token. The token travels in clear over plain HTTP: beyond one machine,
+put TLS in front. People's own identities and roles are Studio's (`-auth entra`).
+
+A browser application on another origin can call the API once the server lists its origin:
+`-cors-origin https://app.example.com,http://localhost:5173` (`BASSIA_SERVER_CORS_ORIGIN`). Preflight requests then
+pass without the token and replies carry `Access-Control-Allow-Origin` for those origins only; `*` is refused. Without
+the switch the server sends no CORS headers (Studio calls it from its own process and needs none).
 
 The RPC surface under `/api/v1` is what a client's remote stores call:
 
 | Call | Purpose |
 | --- | --- |
 | `GET /main` | GetHead: mainline's head operation, seq, commit and tree. |
-| `GET /watch` (and `/events`) | A stream (server-sent events) of landings with the prefixes they touched, of workspaces that moved, and of workspaces reconciled (`reconciled`). |
+| `GET /watch` | A stream (server-sent events) of landings with the prefixes they touched, of workspaces that moved, and of workspaces reconciled (`reconciled`). |
 | `GET /conflicts` | The live conflict overview: every open workspace reconciled with mainline, overlaps between open workspaces, hot paths. |
 | `POST /objects/fetch` | GetObjects: many objects in one binary reply (structural objects and chunks under 256 KiB); what it leaves out is read on its direct URL. |
 | `POST /objects/put` | Many small objects in one binary request, each checked like a single put. |
@@ -496,8 +504,8 @@ bassia web                       # http://127.0.0.1:8080/, opened in the browser
 bassia web -port 9000 -no-open
 ```
 
-`web` serves a read-only dashboard over the monorepo (a local monorepo or a client), on 127.0.0.1 only; `bassia-server` serves the
-same pages at its root. Pages and pictures are drawn on the server and work without JavaScript; the script refreshes the
+`web` serves a read-only dashboard over the monorepo (a local monorepo or a client), on 127.0.0.1 only. `bassia-server`
+serves no pages (its web UI is Bassia Studio). Pages and pictures are drawn on the server and work without JavaScript; the script refreshes the
 live parts (on the server, when it pushes a change). Every page shows the `bassia` commands for what it describes;
 click one to copy it.
 
@@ -686,8 +694,8 @@ Bassia has four projects; each depends only on the ones before it.
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive
    (`Platform`), and the dashboard (`Web`).
-3. **`Bassia.Server`** - `bassia-server`: the same core over the server's stores, the RPC surface, signed blob URLs,
-   the watch stream and the dashboard.
+3. **`Bassia.Server`** - `bassia-server`: the same core over the server's stores, the Web API (the RPC surface),
+   signed blob URLs and the watch stream.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
    disk, garbage collection), the store contract over memory and PostgreSQL, the CLI in-process on local monorepos, the
    server in-process with clients over HTTP (on PostgreSQL), and git interop.
@@ -764,7 +772,7 @@ in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the t
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict
-overview, and every dashboard page. `ReconcilerTests` covers candidates, the landing's fast path (and when it must not
+overview over the API. `ServerAuthTests` covers the token, that the server serves no pages, and CORS. `ReconcilerTests` covers candidates, the landing's fast path (and when it must not
 be taken), validation kept out of the landing, the overview and garbage collection of candidates; `AutoSnapshotTests`
 the snapshots taken while an agent works.
 Every test that starts a server (`ServerTests`, the Studio tests, `SyncEfficiencyTests` and the Azurite integration

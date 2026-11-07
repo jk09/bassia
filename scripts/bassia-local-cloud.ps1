@@ -28,7 +28,7 @@
 	./scripts/bassia-local-cloud.ps1 smoke                 # -Bassia <exe> -Server <exe> to test installed builds; -Keep
 	./scripts/bassia-local-cloud.ps1 down -Purge
 	./scripts/bassia-local-cloud.ps1 serve                 # a lasting bassia-server on both; -Port 8080 -Database bassia -Container bassia -Token <t>
-	./scripts/bassia-local-cloud.ps1 server-token          # the token to sign in, clone or start Studio with
+	./scripts/bassia-local-cloud.ps1 server-token          # the token to clone or start Studio with
 	./scripts/bassia-local-cloud.ps1 import -Git https://github.com/acme/api.git,https://github.com/acme/web.git -History -Limit 200
 	./scripts/bassia-local-cloud.ps1 server-status         # also server-stop, server-reset (an empty monorepo again)
 #>
@@ -778,7 +778,7 @@ function Invoke-Serve {
 		$null -ne (Get-ServerMain $new)
 	} 'bassia-server'
 	Write-Host "bassia-server: running at $($new.Url) (pid $($process.Id)); blobs in Azurite container '$($new.Container)', state in PostgreSQL database '$($new.Database)', data in $($new.Data), log in $log."
-	Write-Host "bassia-server: sign in with the token from: ./scripts/bassia-local-cloud.ps1 server-token"
+	Write-Host "bassia-server: a Web API; clients and Studio take the token from: ./scripts/bassia-local-cloud.ps1 server-token"
 	$new
 }
 
@@ -830,7 +830,7 @@ function Invoke-Import {
 	}
 	Write-Host "Imported $(@($result.repository).Count) repositor$((@($result.repository).Count -eq 1) ? 'y' : 'ies'); mainline is at seq $($result.seq)."
 	Write-Host "Clone: $dir  (bassia -C `"$dir`" workspace create <name>)"
-	Write-Host "Dashboard: $($srv.Url) (sign in with the token from: ./scripts/bassia-local-cloud.ps1 server-token)"
+	Write-Host "Server API: $($srv.Url) (token from: ./scripts/bassia-local-cloud.ps1 server-token; a web UI: Bassia Studio, or bassia -C `"$dir`" web)"
 }
 
 function Invoke-ServerStatus {

@@ -13,7 +13,6 @@ using Bassia.Core.Storage;
 using Bassia.Core.Version;
 using Bassia.Interop;
 using Bassia.Stores;
-using Bassia.Web;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -22,7 +21,7 @@ using OpenTelemetry.Metrics;
 /// <summary>
 /// The single-node server: the version core over the server's stores (a blob container - local disk or S3 - and
 /// PostgreSQL for heads, path index, leases and trees), the RPC surface clients' remote stores call, signed URLs so large chunks
-/// never pass through it, the landing service (the only writer of mainline), a watch stream, and the dashboard.
+/// never pass through it, the landing service (the only writer of mainline) and a watch stream. It is a Web API only: Bassia Studio is its web UI.
 /// </summary>
 internal sealed class ServerApp : IAsyncDisposable
 {
@@ -135,27 +134,32 @@ internal sealed class ServerApp : IAsyncDisposable
 		builder.Services.AddResponseCompression(compression =>
 		{
 			compression.EnableForHttps = true;
-			compression.MimeTypes = ["application/json", "application/octet-stream", "text/html", "text/css", "text/javascript"];
+			compression.MimeTypes = ["application/json", "application/octet-stream"];
 			compression.ExcludedMimeTypes = ["text/event-stream"];
 		});
 		builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 		builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+		if (options.CorsOrigins.Count > 0)
+		{
+			builder.Services.AddCors(cors => cors.AddDefaultPolicy(policy => policy.WithOrigins([.. options.CorsOrigins])
+				.AllowAnyMethod().WithHeaders("Authorization", "Content-Type", "Range", "Accept").WithExposedHeaders("Location", "Content-Range")));
+		}
+
 		app = builder.Build();
 		app.UseResponseCompression();
-		var dashboard = new Dashboard(context => Task.FromResult(new DashboardScope(Repo, Landing, $"bassia-server · {options.Data}", ReadLogAsync,
-			Events: "/events", Overview: Landing.Reconciler)));
+		if (options.CorsOrigins.Count > 0)
+		{
+			// Ahead of authorization: a browser's preflight carries no token.
+			app.UseCors();
+		}
+
 		app.Use(AuthorizeAsync);
-		app.UseWhen(context => Dashboard.IsDashboardPath(context.Request.Path), branch => branch.Use(dashboard.ServeAsync));
-		dashboard.Map(app);
 		MapApi(app);
 		await app.StartAsync();
 		Address = app.Urls.First();
 	}
 
 	public Task WaitForShutdownAsync() => app!.WaitForShutdownAsync();
-
-	private async Task<string> ReadLogAsync(RunRecord run) =>
-		run.Log is { } id && await Blobs.ReadAsync(id) is { } bytes ? Encoding.UTF8.GetString(bytes.Span) : run.LastLine ?? "";
 
 	// ----- authorization -----
 
@@ -188,77 +192,27 @@ internal sealed class ServerApp : IAsyncDisposable
 	private bool IsToken(string? presented) => presented is not null && accessToken is not null
 		&& CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(presented)), SHA256.HashData(Encoding.UTF8.GetBytes(accessToken)));
 
+	/// <summary>Every call needs the bearer token, except the health probe, the root description and signed blob URLs.</summary>
 	private async Task AuthorizeAsync(HttpContext context, RequestDelegate next)
 	{
 		var request = context.Request;
 		var path = request.Path;
-		if (path == SignIn.Path)
-		{
-			await SignInAsync(context);
-			return;
-		}
-
-		if (accessToken is null || path.StartsWithSegments("/blobs") || path == "/healthz" || Dashboard.IsAsset(path))
+		if (accessToken is null || path.StartsWithSegments("/blobs") || path == "/healthz" || path == "/")
 		{
 			await next(context);
 			return;
 		}
 
-		var inUrl = request.Query["token"].FirstOrDefault();
-		var presented = request.Headers.Authorization.ToString() is { } header && header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..]
-			: inUrl ?? request.Cookies[SignIn.Cookie];
-		var page = HttpMethods.IsGet(request.Method) && Dashboard.IsDashboardPath(path);
-		if (IsToken(presented))
+		var header = request.Headers.Authorization.ToString();
+		if (IsToken(header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..] : null))
 		{
-			if (page && inUrl is not null && IsToken(inUrl))
-			{
-				// A signed-in browser needs no token in its address bar and history.
-				SignIn.SetCookie(context, inUrl, PublicUrl);
-				context.Response.Redirect(SignIn.PathWithoutToken(request));
-				return;
-			}
-
 			await next(context);
-			return;
-		}
-
-		if (page && SignIn.IsBrowserPage(request))
-		{
-			context.Response.Redirect(SignIn.PathFor(SignIn.PathWithoutToken(request)));
 			return;
 		}
 
 		context.Response.StatusCode = StatusCodes.Status401Unauthorized;
 		context.Response.Headers.WWWAuthenticate = "Bearer";
 		await context.Response.WriteAsJsonAsync(new Api.ErrorReply("A bearer token is required: 'Authorization: Bearer <token>'. A server started without -token keeps its own in the file 'token' of its data folder."), Api.Json);
-	}
-
-	private async Task SignInAsync(HttpContext context)
-	{
-		var request = context.Request;
-		var target = SignIn.SafeTarget(request.Query["next"].FirstOrDefault());
-		if (accessToken is null || IsToken(request.Cookies[SignIn.Cookie]))
-		{
-			context.Response.Redirect(target);
-			return;
-		}
-
-		if (HttpMethods.IsPost(request.Method))
-		{
-			var form = request.HasFormContentType ? await request.ReadFormAsync(context.RequestAborted) : null;
-			if (IsToken(form?["token"].FirstOrDefault()?.Trim()))
-			{
-				SignIn.SetCookie(context, accessToken, PublicUrl);
-				context.Response.Redirect(target);
-				return;
-			}
-
-			context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-			await SignIn.WritePageAsync(context, target, "That token is not this server's.");
-			return;
-		}
-
-		await SignIn.WritePageAsync(context, target, null);
 	}
 
 	// ----- signed blob URLs -----
@@ -305,7 +259,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 	}
 
-	/// <summary>Publishes a moved workspace head to watchers (the dashboard refreshes on it).</summary>
+	/// <summary>Publishes a moved workspace head to watchers (Studio refreshes on it).</summary>
 	private sealed class NotifyingViewStore(IViewStore inner, ServerApp server) : IViewStore
 	{
 		public ValueTask<ObjectId?> GetHeadAsync(HeadName name, CancellationToken ct = default) => inner.GetHeadAsync(name, ct);
@@ -362,6 +316,8 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	// ----- API -----
 
+	private static string Version => typeof(ServerApp).Assembly.GetName().Version?.ToString() ?? "0";
+
 	private static IResult Json(object value) => Results.Json(value, Api.Json);
 
 	private static IResult Error(int status, string message) => Results.Json(new Api.ErrorReply(message), Api.Json, statusCode: status);
@@ -374,7 +330,8 @@ internal sealed class ServerApp : IAsyncDisposable
 	private void MapApi(WebApplication web)
 	{
 		web.MapGet("/healthz", () => Results.Text("ok"));
-		web.MapGet("/events", WatchAsync);
+		web.MapGet("/", () => Json(new Api.ServiceReply("bassia-server", Version, Api.Prefix, "/healthz")));
+		web.MapFallback("{*path}", (HttpRequest request) => Error(StatusCodes.Status404NotFound, $"No such call: {request.Method} {request.Path}. bassia-server is an API under {Api.Prefix}."));
 		var api = web.MapGroup(Api.Prefix);
 		api.AddEndpointFilter(async (context, next) =>
 		{
@@ -388,7 +345,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			}
 		});
 
-		api.MapGet("/info", () => Json(new Api.Info("bassia-server", typeof(ServerApp).Assembly.GetName().Version?.ToString() ?? "0", options.Chunks.Min, options.Chunks.Average,
+		api.MapGet("/info", () => Json(new Api.Info("bassia-server", Version, options.Chunks.Min, options.Chunks.Average,
 			options.Chunks.Max, options.Storage)));
 		api.MapGet("/watch", WatchAsync);
 
