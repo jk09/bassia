@@ -4,12 +4,10 @@
 <PageTitle>Bassia Studio</PageTitle>
 <h1>Overview</h1>
 <ErrorNotice Message="@Error" />
-@if (main is not null)
+@if (loaded)
 {
 	<div class="cards">
-		<div class="card"><div class="big">@main.Seq</div><div class="muted">mainline seq</div></div>
 		<div class="card"><div class="big">@open</div><div class="muted">open workspaces</div></div>
-		<div class="card"><div class="big">@Format.Time(main.Commit.Time)</div><div class="muted">last landing</div></div>
 	</div>
 	<h2>Recent landings</h2>
 	<LogTable Entries="recent" />
@@ -17,7 +15,7 @@
 }
 
 @code {
-	private MainState? main;
+	private bool loaded;
 	private int open;
 	private IReadOnlyList<LogEntry> recent = [];
 
@@ -26,8 +24,8 @@
 	protected override async Task LoadAsync()
 	{
 		var repo = await Client.OpenAsync();
-		main = await repo.GetMainAsync();
 		open = (await repo.ListWorkspacesAsync()).Count;
 		recent = await Client.LogAsync(null, 10);
+		loaded = true;
 	}
 }

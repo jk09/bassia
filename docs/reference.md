@@ -510,7 +510,7 @@ the server and then become interactive over a SignalR circuit.
 
 Delivered in slices (feature record `bassia-681e8902`):
 
-- **Overview**: mainline's seq, open workspaces, the latest landings.
+- **Overview**: open workspaces and the latest landings.
 - **Depot browser**: mainline's tree at the latest or any seq, a file's content (download at `/raw?path=<p>[&seq=<n>]`)
   and its **history**: the landings that changed it, from the path index.
 - **Mainline log**: the landings by seq, paged; a landing's commit, change id, intent, recipe and its diff, **unified
