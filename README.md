@@ -8,7 +8,7 @@ runs on, its work is
 snapshotted implicitly, and you watch whether each workspace can **land** on the single trunk. When two agents rewrote
 the same file, Bassia does not merge text nobody reviewed: it re-runs the later task on the new trunk.
 
-![Bassia Studio's overview: mainline's seq, open workspaces and the latest landings](docs/images/studio-overview.png)
+![Bassia Studio's overview: open workspaces and the latest landings](docs/images/studio-overview.png)
 
 - **[Workspaces instead of branches](#workspaces-instead-of-branches)**: one per run, stacked or cloned when work
   builds on work; commits are implicit.
@@ -182,8 +182,8 @@ execute as cloud jobs (Azure Container Apps) with their output streamed live - s
 People sign in with Microsoft Entra ID; pages follow the monorepo live. `deploy/azure` deploys the server, Studio and the
 run job to Azure with Terraform in one command (feature record `bassia-681e8902`).
 
-![Overview: mainline's seq, open workspaces and the latest landings.](docs/images/studio-overview.png)
-*Overview: mainline's seq, open workspaces and the latest landings.*
+![Overview: open workspaces and the latest landings.](docs/images/studio-overview.png)
+*Overview: open workspaces and the latest landings.*
 
 ![Depot browser: mainline's tree at any seq, and a file's content.](docs/images/studio-depot.png)
 *Depot browser: mainline's tree at any seq, and a file's content.*
