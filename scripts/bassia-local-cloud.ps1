@@ -278,7 +278,7 @@ function Invoke-Check {
 		[pscustomobject]@{ Requirement = 'git'; Found = $git ? "yes ($git)" : 'no'; For = 'smoke (import, export)' }
 		[pscustomobject]@{ Requirement = '.NET SDK'; Found = $dotnet ? "yes ($(& dotnet --version))" : 'no'; For = 'test, smoke' }
 	)
-	foreach ($row in $rows) { Write-Host ('{0,-18} {1,-60} {2}' -f $row.Requirement, $row.Found, $row.For) }
+	foreach ($row in $rows) { Write-Host ('{0,-18} {1,-64} {2}' -f $row.Requirement, $row.Found, $row.For) }
 	if ($mode) { Write-Host "up -Mode auto would use: $mode" }
 	if (-not $git) { Write-Host 'smoke needs git on PATH.' }
 	if (-not $dotnet) { Write-Host 'test and smoke need the .NET SDK (see /bassia-install check).' }
