@@ -10,6 +10,7 @@ using Bassia.Stores;
 ///             -postgres <connection string> [-storage disk|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
 /// bassia-server gc -data <folder> -postgres <connection string> [-grace-hours 24] [-retention-days 14] [-dry-run]
 /// bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]
+/// bassia-server migrate -postgres <connection string> [-check]
 /// </code>
 /// Every switch can also come from a <c>BASSIA_SERVER_*</c> environment variable (containers).
 /// </summary>
@@ -22,6 +23,8 @@ internal static class Program
 		                [-cors-origin <origin>[,<origin>...]] [-semantic-driver <command>|off] [-validate <command>]        run the server
 		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs and trees
+		  bassia-server migrate -postgres <connection string> [-check]                                                         migrate the PostgreSQL schema (or check it)
+		The server migrates its schema on start under a lock; -migrate verify makes it only check and refuse an outdated one.
 		The state (heads, path index, leases) lives in PostgreSQL; -data holds the signing key and the local-disk blobs.
 		The server is a Web API under /api/v1 (Bassia Studio is its web UI). It needs a bearer token: -token, or without it
 		one generated into <data>/token. -no-auth serves everyone. -cors-origin lets browser apps on those origins call it.
@@ -40,6 +43,11 @@ internal static class Program
 
 		try
 		{
+			if (command == "migrate")
+			{
+				return Migrate(rest);
+			}
+
 			var options = ServerOptions.Parse(rest);
 			await using var server = new ServerApp(options);
 			switch (command)
@@ -93,6 +101,29 @@ internal static class Program
 			Console.Error.WriteLine($"bassia-server: {ex.Message}\n{Usage}");
 			return 2;
 		}
+		catch (SchemaException ex)
+		{
+			Console.Error.WriteLine($"bassia-server: {ex.Message}");
+			return 1;
+		}
+	}
+
+	/// <summary>
+	/// <c>bassia-server migrate</c>: brings the schema to this build's version (a release step before the new version
+	/// starts with <c>-migrate verify</c>), or with <c>-check</c> only reports whether this build can use it. Needs no data folder.
+	/// </summary>
+	private static int Migrate(IReadOnlyList<string> args)
+	{
+		var postgres = Switch(args, "postgres") ?? (Environment.GetEnvironmentVariable("BASSIA_SERVER_POSTGRES") is { Length: > 0 } value ? value : null)
+			?? throw new ArgumentException("-postgres <connection string> is required (or BASSIA_SERVER_POSTGRES).");
+		var mode = args.Contains("-check") ? SchemaMode.Verify : SchemaMode.Migrate;
+		foreach (var status in SchemaMigrator.RunAll(postgres, SchemaMigrator.ServerComponents, mode))
+		{
+			var applied = status.Applied.Count == 0 ? "" : $"; applied {string.Join(", ", status.Applied)}";
+			Console.Out.WriteLine($"{status.Component}: version {status.Version} ({status.Outcome.ToString().ToLowerInvariant()}; usable by builds from version {status.CompatibleFrom}{applied})");
+		}
+
+		return 0;
 	}
 
 	private static string? Switch(IReadOnlyList<string> args, string name)

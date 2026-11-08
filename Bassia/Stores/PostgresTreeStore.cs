@@ -19,17 +19,43 @@ public sealed class PostgresTreeStore : ITreeStore, ITreeStoreMaintenance, IAsyn
 
 	private readonly NpgsqlDataSource source;
 
-	public PostgresTreeStore(string connectionString)
+	private const string Migration1 = """
+		CREATE TABLE IF NOT EXISTS bassia_trees (id bytea PRIMARY KEY, written timestamptz NOT NULL DEFAULT now());
+		CREATE TABLE IF NOT EXISTS bassia_tree_entries (tree_id bytea NOT NULL, name text COLLATE "C" NOT NULL, ord integer NOT NULL, kind smallint NOT NULL,
+			child_id bytea NOT NULL, size bigint NOT NULL, exec boolean NOT NULL, PRIMARY KEY (tree_id, name));
+		""";
+
+	/// <summary>
+	/// The schema of trees on a server and in a local monorepo. Trees are written only here, never to blob storage, so
+	/// these rows are primary data: every step must keep them (no drop-and-rebuild).
+	/// </summary>
+	public static readonly SchemaComponent Schema = new("trees", [new SchemaMigration(1, "trees and tree entries", Migration1)]);
+
+	/// <summary>
+	/// The same tables as a clone's cache of the server's trees: a clone writes every tree to the server before its
+	/// own copy, so a schema this build cannot use is dropped and filled again on demand instead of being refused.
+	/// </summary>
+	public static readonly SchemaComponent CacheSchema = Schema with { DropSql = "DROP TABLE IF EXISTS bassia_tree_entries; DROP TABLE IF EXISTS bassia_trees;" };
+
+	/// <param name="schema">Migrate the schema to this build's version (the default), or only check that it is usable.</param>
+	/// <param name="cache">The store is a clone's cache (<see cref="CacheSchema"/>): rebuilt rather than refused when this build cannot use it.</param>
+	/// <exception cref="SchemaException">The schema is not usable by this build.</exception>
+	public PostgresTreeStore(string connectionString, SchemaMode schema = SchemaMode.Migrate, bool cache = false)
 	{
 		source = NpgsqlDataSource.Create(connectionString);
-		using var connection = source.OpenConnection();
-		using var command = new NpgsqlCommand("""
-			CREATE TABLE IF NOT EXISTS bassia_trees (id bytea PRIMARY KEY, written timestamptz NOT NULL DEFAULT now());
-			CREATE TABLE IF NOT EXISTS bassia_tree_entries (tree_id bytea NOT NULL, name text COLLATE "C" NOT NULL, ord integer NOT NULL, kind smallint NOT NULL,
-				child_id bytea NOT NULL, size bigint NOT NULL, exec boolean NOT NULL, PRIMARY KEY (tree_id, name));
-			""", connection);
-		command.ExecuteNonQuery();
+		try
+		{
+			SchemaStatus = SchemaMigrator.Run(source, cache ? CacheSchema : Schema, schema);
+		}
+		catch
+		{
+			source.Dispose();
+			throw;
+		}
 	}
+
+	/// <summary>What opening the schema found and did.</summary>
+	public SchemaStatus SchemaStatus { get; }
 
 	public async ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
 	{

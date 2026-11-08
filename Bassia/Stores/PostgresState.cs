@@ -24,11 +24,14 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 
 	private readonly NpgsqlDataSource source;
 
-	public PostgresState(string connectionString)
-	{
-		source = NpgsqlDataSource.Create(connectionString);
-		using var connection = source.OpenConnection();
-		Execute(connection, """
+	/// <summary>
+	/// The schema of heads, path index and leases. Migration 1 is the schema as it was created before versioning, kept
+	/// verbatim and idempotent (it is also what existing databases are stamped against). Add a step for any later change;
+	/// never edit an applied one. Heads and the fencing sequence are primary data: no step may recreate them.
+	/// </summary>
+	public static readonly SchemaComponent Schema = new("state",
+	[
+		new SchemaMigration(1, "heads, path index, meta, leases, lease queue and fencing sequence", """
 			CREATE TABLE IF NOT EXISTS bassia_heads (name text COLLATE "C" PRIMARY KEY, head text NOT NULL);
 			CREATE TABLE IF NOT EXISTS bassia_paths (path text COLLATE "C" NOT NULL, seq bigint NOT NULL, kind integer, id text, size bigint NOT NULL,
 				exec boolean NOT NULL, PRIMARY KEY (path, seq));
@@ -39,8 +42,27 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 			CREATE TABLE IF NOT EXISTS bassia_lease_queue (ticket bigserial PRIMARY KEY, prefix text COLLATE "C" NOT NULL, mode integer NOT NULL,
 				owner text NOT NULL, alive_until timestamptz NOT NULL);
 			CREATE SEQUENCE IF NOT EXISTS bassia_fencing;
-			""");
+			"""),
+	]);
+
+	/// <param name="schema">Migrate the schema to this build's version (the default), or only check that it is usable (<c>bassia-server -migrate verify</c>).</param>
+	/// <exception cref="SchemaException">The schema is not usable by this build.</exception>
+	public PostgresState(string connectionString, SchemaMode schema = SchemaMode.Migrate)
+	{
+		source = NpgsqlDataSource.Create(connectionString);
+		try
+		{
+			SchemaStatus = SchemaMigrator.Run(source, Schema, schema);
+		}
+		catch
+		{
+			source.Dispose();
+			throw;
+		}
 	}
+
+	/// <summary>What opening the schema found and did.</summary>
+	public SchemaStatus SchemaStatus { get; }
 
 	public Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
 

@@ -44,7 +44,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		Directory.CreateDirectory(options.Data);
 		signingKey = LoadKey(Path.Combine(options.Data, "blob.key"));
 		State = new PostgresState(options.Postgres
-			?? throw new ArgumentException("-postgres <connection string> is required (or BASSIA_SERVER_POSTGRES): bassia-server keeps its state in PostgreSQL."));
+			?? throw new ArgumentException("-postgres <connection string> is required (or BASSIA_SERVER_POSTGRES): bassia-server keeps its state in PostgreSQL."), options.Migrate);
 		if (options.Storage.Equals("azure", StringComparison.OrdinalIgnoreCase))
 		{
 			var azure = options.AzureConnection is { } connection
@@ -73,7 +73,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			Disk = disk;
 		}
 
-		Trees = new PostgresTreeStore(options.Postgres);
+		Trees = new PostgresTreeStore(options.Postgres, options.Migrate);
 		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees);
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
