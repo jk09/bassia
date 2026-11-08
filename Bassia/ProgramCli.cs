@@ -134,7 +134,7 @@ internal static class ProgramCli
 
 	/// <summary>The failures a command reports as its TOML error rather than as a crash.</summary>
 	internal static bool IsReportable(Exception ex) =>
-		ex is MonorepoException or Core.Storage.VersionException or Interop.GitException or Feedback.FeedbackException or IOException
+		ex is MonorepoException or Stores.SchemaException or Core.Storage.VersionException or Interop.GitException or Feedback.FeedbackException or IOException
 			or UnauthorizedAccessException or HttpRequestException or TaskCanceledException { InnerException: TimeoutException };
 
 	/// <summary>A command line that does not parse: a TOML error on stderr, exit code 2.</summary>

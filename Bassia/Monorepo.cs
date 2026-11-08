@@ -47,7 +47,7 @@ internal sealed class Monorepo : IDisposable
 			ITreeStore localTrees;
 			if (Config.GetOrNull(LocalPostgres.ConfigKey) is not null)
 			{
-				var persistent = new PostgresTreeStore(LocalPostgres.Connect(Config, settings));
+				var persistent = new PostgresTreeStore(LocalPostgres.Connect(Config, settings), cache: true);
 				postgres.Add(persistent);
 				localTrees = persistent;
 			}

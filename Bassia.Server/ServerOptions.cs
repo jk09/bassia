@@ -1,6 +1,7 @@
 namespace Bassia.Server;
 
 using Bassia.Core.Model;
+using Bassia.Stores;
 
 /// <summary>
 /// How a <c>bassia-server</c> runs: where its state lives (PostgreSQL for heads, the path index and leases; a data folder
@@ -49,6 +50,13 @@ internal sealed record ServerOptions
 	/// <c>SSL Mode=Require</c>). Required; the server has no other state backend.
 	/// </summary>
 	public string? Postgres { get; init; }
+
+	/// <summary>
+	/// What the server does about its PostgreSQL schema on start: <c>auto</c> (the default) migrates it under an advisory
+	/// lock; <c>verify</c> changes nothing and refuses to start unless the schema is usable, for deployments that run
+	/// <c>bassia-server migrate</c> as a release step first.
+	/// </summary>
+	public SchemaMode Migrate { get; init; } = SchemaMode.Migrate;
 
 	public ChunkParameters Chunks { get; init; } = ChunkParameters.Default;
 
@@ -107,6 +115,12 @@ internal sealed record ServerOptions
 			AzureUrl = Get("azure-url"),
 			AzureContainer = Get("azure-container") ?? "bassia",
 			Postgres = Get("postgres"),
+			Migrate = (Get("migrate") ?? "auto").ToLowerInvariant() switch
+			{
+				"auto" => SchemaMode.Migrate,
+				"verify" => SchemaMode.Verify,
+				var other => throw new ArgumentException($"-migrate '{other}' is not supported: use auto (the default) or verify.")
+			},
 			SemanticDriver = Get("semantic-driver") ?? "weave-driver",
 			Validate = Get("validate")
 		};

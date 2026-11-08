@@ -403,7 +403,25 @@ bassia-server -data /srv/bassia -postgres "Host=db;Database=bassia;Username=bass
 bassia-server -data /srv/bassia -postgres "<connection string>" -storage s3 -bucket acme-bassia -region eu-central-1   # blobs on S3
 bassia-server gc -data /srv/bassia -postgres "<connection string>" [-grace-hours 24] [-retention-days 14] [-dry-run]
 bassia-server scrub -data /srv/bassia -postgres "<connection string>" [-sample 1000]
+bassia-server migrate -postgres "<connection string>" [-check]   # bring the schema to this build's version (or only check it)
 ```
+
+### Schema versions and migrations
+
+The PostgreSQL schema is versioned per component - `state` (heads, path index, meta, leases, lease queue, fencing
+sequence) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
+in the connection's schema. Steps are numbered from 1, run in order, each once, in one transaction with the version
+bump; migration 1 is the schema as it was created before versioning. On start the server (and every local monorepo
+or clone command) reads the version in one query; only when it is behind does it take a session advisory lock keyed
+by the schema name, so nodes starting together wait for one another and the steps run once. Tables made before
+versioning are stamped as version 1 when they match what migration 1 creates, and refused, unchanged, when they differ.
+
+`-migrate auto` (the default) migrates on start. For deployments that migrate as a release step, run
+`bassia-server migrate` first and start the nodes with `-migrate verify`, which changes nothing and refuses a schema
+that is behind. A database newer than the build is used as long as its `compatible_from` is at most the build's
+latest version: steps that only add (a table, a column with a default, an index) keep older nodes running through a
+rolling deploy, and a step that removes what older builds read raises `compatible_from`, so those builds refuse to start.
+A clone's tree cache is rebuilt instead of refused when the build cannot use it. Design: `feat/done/bassia-5eee7287/DESIGN.md`.
 
 ### Azure: Blob Storage and Azure Database for PostgreSQL
 
@@ -424,7 +442,8 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   `-azure-prefix` (default `objects/`), keyed by hash prefix. Chunks of 256 KiB and more move between clients and the
   container directly on SAS URLs valid for 30 minutes; the server never proxies them.
 - **PostgreSQL**: `-postgres <connection string>` (PostgreSQL 13 or later), the same as on any server. The tables (`bassia_heads`,
-  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, sequence `bassia_fencing`) are created on start.
+  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, sequence `bassia_fencing`) are created and migrated on start
+  (see "Schema versions and migrations"); Terraform provisions the server, not the schema.
   Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
   transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
   order from the operation log - so any number of nodes can share one database. Use `SSL Mode=Require` on Azure.
@@ -740,7 +759,7 @@ undo and restore, the path index and its rebuild from the operation log, leases 
 agents landing through several landing services, a replay landing with the original change id, garbage collection
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` and `PostgresStateTests` hold the
-in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
+in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict
