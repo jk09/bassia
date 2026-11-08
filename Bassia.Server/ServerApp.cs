@@ -377,14 +377,19 @@ internal sealed class ServerApp : IAsyncDisposable
 				return Error(StatusCodes.Status403Forbidden, "Only the landing service advances mainline; call land.");
 			}
 
-			if (!name.IsWorkspace && !name.Value.StartsWith("pin/", StringComparison.Ordinal))
+			if (!name.IsWorkspace && !name.IsWorkspaceName && !name.Value.StartsWith("pin/", StringComparison.Ordinal))
 			{
 				return Error(StatusCodes.Status400BadRequest, $"'{name}' is not a head a client may move.");
 			}
 
 			// The operation and its view must be stored and well formed before a head may point at them.
 			var op = await Repo.Objects.ReadOperationAsync(body.Next);
-			await Repo.Objects.ReadViewAsync(op.View);
+			var view = await Repo.Objects.ReadViewAsync(op.View);
+			if (name.IsWorkspaceName && view.Workspace?.Name != name.Value[HeadName.WorkspaceNamePrefix.Length..])
+			{
+				return Error(StatusCodes.Status400BadRequest, $"'{name}' must point at an operation of a workspace with that name.");
+			}
+
 			var update = await Repo.Views.AdvanceHeadAsync(name, body.Expected, body.Next);
 			return Json(new Api.AdvanceReply(update.Success, update.Current));
 		});

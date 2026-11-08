@@ -23,6 +23,7 @@ public sealed class WorkspaceService(Repository repo)
 		ChangeId? changeId = null, string? path = null, string? host = null, string? replayOf = null, CancellationToken ct = default)
 	{
 		CheckName(name);
+		await CheckFreeAsync(name, ct);
 		ObjectId baseId;
 		long baseSeq;
 		string? parent = null;
@@ -50,20 +51,21 @@ public sealed class WorkspaceService(Repository repo)
 		var workingId = await repo.Objects.WriteAsync(working, ct);
 		var record = new WorkspaceRecord(NewId(), name, parent, baseId, baseSeq, workingId, WorkspaceStatus.Open, repo.Clock(), owner, path, host,
 			ReplayOf: replayOf);
-		return await repo.CommitWorkspaceAsync(null, record, parent is null ? $"create on seq {baseSeq}" : $"create stacked on {parent}", owner, null, ct);
+		return await OpenAsync(record, parent is null ? $"create on seq {baseSeq}" : $"create stacked on {parent}", owner, ct);
 	}
 
 	/// <summary>A new workspace with the same base and the same work as <paramref name="source"/>, as a new change.</summary>
 	public async Task<WorkspaceState> CloneAsync(string source, string name, string owner, string? path = null, string? host = null, CancellationToken ct = default)
 	{
 		CheckName(name);
+		await CheckFreeAsync(name, ct);
 		var from = await repo.ResolveWorkspaceAsync(source, ct);
 		var working = await repo.Objects.ReadCommitAsync(from.Record.Working, ct);
 		var copy = working with { ChangeId = ChangeId.New(), Author = new Author(owner), Time = repo.Clock() };
 		var copyId = await repo.Objects.WriteAsync(copy, ct);
 		var record = new WorkspaceRecord(NewId(), name, from.Record.Parent, from.Record.Base, from.Record.BaseSeq, copyId, WorkspaceStatus.Open,
 			repo.Clock(), owner, path, host);
-		return await repo.CommitWorkspaceAsync(null, record, $"clone of {from.Name}", owner, null, ct);
+		return await OpenAsync(record, $"clone of {from.Name}", owner, ct);
 	}
 
 	/// <summary>Amends the working commit with a new tree (a snapshot); returns the state unchanged if the tree is the same.</summary>
@@ -223,6 +225,35 @@ public sealed class WorkspaceService(Repository repo)
 	public Task<WorkspaceState> SetPathAsync(string id, string? path, string? host, CancellationToken ct = default) =>
 		repo.UpdateWorkspaceAsync(id, current => Task.FromResult<(WorkspaceRecord, string)?>(
 			current.Record.Path == path && current.Record.Host == host ? null : (current.Record with { Path = path, Host = host }, "move")), null, null, ct);
+
+	/// <summary>Fails early, before anything is written, when an open workspace holds <paramref name="name"/>.</summary>
+	private async Task CheckFreeAsync(string name, CancellationToken ct)
+	{
+		if (await repo.OpenWorkspaceNamedAsync(name, ct) is { } holder)
+		{
+			throw new WorkspaceNameTakenException(name, holder.Id);
+		}
+	}
+
+	/// <summary>
+	/// Writes a new workspace's first operation, then reserves its name. A create that loses the reservation to a
+	/// concurrent one removes its workspace again, so two open workspaces never share a name.
+	/// </summary>
+	private async Task<WorkspaceState> OpenAsync(WorkspaceRecord record, string description, string owner, CancellationToken ct)
+	{
+		var state = await repo.CommitWorkspaceAsync(null, record, description, owner, null, ct);
+		try
+		{
+			await repo.ClaimWorkspaceNameAsync(state, ct);
+		}
+		catch (VersionException)
+		{
+			await repo.Views.DeleteHeadAsync(HeadName.Workspace(state.Id), state.Head, CancellationToken.None);
+			throw;
+		}
+
+		return state;
+	}
 
 	private static void CheckName(string name)
 	{

@@ -73,6 +73,40 @@ public sealed class ServerTests : IAsyncLifetime
 	}
 
 	[PostgresFact]
+	public async Task WorkspaceNames_AreUniqueAmongOpenWorkspaces_AcrossClients()
+	{
+		var clients = Enumerable.Range(0, 6).Select(_ => Client()).ToList();
+		try
+		{
+			var attempts = clients.Select((client, index) => Task.Run(async () =>
+			{
+				try
+				{
+					return await new WorkspaceService(client.Repo).CreateAsync("shared", "agent-" + index);
+				}
+				catch (WorkspaceNameTakenException)
+				{
+					return null;
+				}
+			})).ToList();
+			var winner = Assert.Single((await Task.WhenAll(attempts)).OfType<WorkspaceState>());
+			Assert.Equal(winner.Id, Assert.Single(await server.Repo.ListWorkspacesAsync(), state => state.Name == "shared").Id);
+
+			// The server only takes a reservation that points at a workspace of that name.
+			var other = await new WorkspaceService(clients[0].Repo).CreateAsync("other", "ann");
+			await Assert.ThrowsAnyAsync<Exception>(async () => await clients[0].Repo.Views.AdvanceHeadAsync(HeadName.WorkspaceName("shared"), winner.Head, other.Head));
+			Assert.Equal(winner.Id, (await server.Repo.OpenWorkspaceNamedAsync("shared"))!.Id);
+		}
+		finally
+		{
+			foreach (var client in clients)
+			{
+				client.Connection.Dispose();
+			}
+		}
+	}
+
+	[PostgresFact]
 	public async Task ClonesWorkTogether_ThroughTheCommandLine()
 	{
 		await OkAsync(temp.Path, "clone", "-from", Url, "-path", "one", "-token", Token);

@@ -228,7 +228,7 @@ internal static class AgentCommands
 			return Fail(invocation, $"Workspace '{original.Name}' has no replay recipe (it was not made by 'bassia agent start'); sync it and resolve by hand.");
 		}
 
-		var name = $"{original.Name.Split("-replay")[0]}-replay{DateTimeOffset.UtcNow:HHmmss}";
+		var name = await monorepo.Repo.FreeWorkspaceNameAsync($"{original.Name.Split("-replay")[0]}-replay{DateTimeOffset.UtcNow:HHmmss}");
 		var options = new AgentRunOptions(recipe.Prompt, recipe.Command, null, name, null, recipe.Model, invocation.Has("land"), false, invocation.List("lease"),
 			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"), ReplayOf: original.Id, ChangeId: working.ChangeId,
 			// A replay loads what the original loaded here, unless told otherwise.

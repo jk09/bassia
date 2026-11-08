@@ -171,7 +171,7 @@ internal static class MainlineCommands
 		var target = await monorepo.Repo.MainAtSeqAsync(seq);
 		var main = await monorepo.Repo.GetMainAsync();
 		var intent = invocation.Get("intent") ?? $"restore mainline to seq {seq}";
-		var workspace = await monorepo.Workspaces.Service.CreateAsync($"restore-{seq}", monorepo.User, intent: intent);
+		var workspace = await monorepo.Workspaces.Service.CreateAsync(await monorepo.Repo.FreeWorkspaceNameAsync($"restore-{seq}"), monorepo.User, intent: intent);
 		await monorepo.Workspaces.Service.AmendWorkingAsync(workspace.Id, commit => commit with { Tree = target.Tree }, "restore", monorepo.User);
 		var result = await monorepo.Landing.LandAsync(new LandRequest(workspace.Id, Agent: monorepo.User));
 		var data = Land(result);

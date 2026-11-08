@@ -12,7 +12,7 @@ public sealed record ScrubReport(int Checked, IReadOnlyList<ObjectId> Corrupt, I
 
 /// <summary>
 /// Mark and sweep over the object store. Roots are every head - mainline (its operation log is the audit trail and is
-/// kept), the workspaces, and pins (heads named <c>pin/...</c>). A closed workspace's head is pruned
+/// kept), the workspaces, and pins (heads named <c>pin/...</c>); workspace name reservations are not roots. A closed workspace's head is pruned
 /// <paramref name="retention"/> after it closed, which makes its unlanded snapshots collectable. Only blobs older than
 /// the grace period are swept, so chunks uploaded for a landing that has not happened yet survive.
 /// </summary>
@@ -30,6 +30,18 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 			if (name.IsCandidate)
 			{
 				candidates.Add((name, head));
+				continue;
+			}
+
+			// A name reservation points at its workspace's first operation, which the workspace's own head reaches;
+			// once that workspace is closed (or gone) the reservation only pins garbage and is dropped.
+			if (name.IsWorkspaceName)
+			{
+				if (!dryRun && await repo.NameHolderAsync(head, name.Value[HeadName.WorkspaceNamePrefix.Length..], ct) is null)
+				{
+					await repo.Views.DeleteHeadAsync(name, head, ct);
+				}
+
 				continue;
 			}
 
