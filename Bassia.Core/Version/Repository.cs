@@ -24,6 +24,15 @@ public sealed record WorkspaceState(ObjectId Head, Operation Operation, Workspac
 /// <summary>An operation with its id, as an operation log lists it.</summary>
 public sealed record OperationEntry(ObjectId Id, Operation Operation);
 
+/// <summary>Raised when a workspace is created or cloned under the name of an open workspace.</summary>
+public sealed class WorkspaceNameTakenException(string name, string holder)
+	: VersionException($"A workspace named '{name}' is already open ({holder}).")
+{
+	public string Name => name;
+
+	public string Holder => holder;
+}
+
 /// <summary>Raised when a head moved underneath an operation; the caller re-reads and retries.</summary>
 public sealed class ConcurrentUpdateException(HeadName head) : VersionException($"'{head}' moved during the operation; try again.")
 {
@@ -189,6 +198,81 @@ public sealed class Repository
 			0 => throw new VersionException($"No workspace '{reference}'. Run 'bassia workspace list'."),
 			_ => throw new VersionException($"'{reference}' matches several workspaces: {string.Join(", ", prefixed.Select(state => state.Name))}.")
 		};
+	}
+
+	/// <summary>
+	/// The open workspace named <paramref name="name"/>, or null when the name is free. Names are case-sensitive and
+	/// unique among open workspaces; a landed or abandoned workspace frees its name.
+	/// </summary>
+	public async Task<WorkspaceState?> OpenWorkspaceNamedAsync(string name, CancellationToken ct = default)
+	{
+		if (await Views.GetHeadAsync(HeadName.WorkspaceName(name), ct) is { } head && await NameHolderAsync(head, name, ct) is { } holder)
+		{
+			return holder;
+		}
+
+		// Workspaces opened before names were reserved hold no reservation; they still keep their name.
+		return (await ListWorkspacesAsync(false, ct)).FirstOrDefault(state => state.Name == name);
+	}
+
+	/// <summary><paramref name="name"/> if no open workspace holds it, else the first free <c>name-2</c>, <c>name-3</c>, ...</summary>
+	public async Task<string> FreeWorkspaceNameAsync(string name, CancellationToken ct = default)
+	{
+		for (var suffix = 1; ; suffix++)
+		{
+			var candidate = suffix == 1 ? name : $"{name}-{suffix}";
+			if (await OpenWorkspaceNamedAsync(candidate, ct) is null)
+			{
+				return candidate;
+			}
+		}
+	}
+
+	/// <summary>
+	/// Reserves <paramref name="state"/>'s name for it by compare-and-swap on <c>name/&lt;name&gt;</c>: from empty, or
+	/// from a reservation whose workspace is no longer open. Throws <see cref="WorkspaceNameTakenException"/> when
+	/// another open workspace holds the name.
+	/// </summary>
+	public async Task ClaimWorkspaceNameAsync(WorkspaceState state, CancellationToken ct = default)
+	{
+		var head = HeadName.WorkspaceName(state.Name);
+		var current = await Views.GetHeadAsync(head, ct);
+		for (var attempt = 0; ; attempt++)
+		{
+			if (current is { } held && await NameHolderAsync(held, state.Name, ct) is { } holder && holder.Id != state.Id)
+			{
+				throw new WorkspaceNameTakenException(state.Name, holder.Id);
+			}
+
+			var update = await Views.AdvanceHeadAsync(head, current, state.Head, ct);
+			if (update.Success)
+			{
+				return;
+			}
+
+			if (attempt >= 20)
+			{
+				throw new ConcurrentUpdateException(head);
+			}
+
+			current = update.Current;
+		}
+	}
+
+	/// <summary>The workspace a name reservation points at, if it is open and still has that name.</summary>
+	public async Task<WorkspaceState?> NameHolderAsync(ObjectId reservation, string name, CancellationToken ct = default)
+	{
+		Operation op;
+		try
+		{
+			op = await Objects.ReadOperationAsync(reservation, ct);
+		}
+		catch (MissingObjectException)
+		{
+			return null; // a reservation outliving its workspace's objects holds nothing
+		}
+
+		return op.Workspace is { } id && await FindWorkspaceAsync(id, ct) is { IsOpen: true } state && state.Name == name ? state : null;
 	}
 
 	/// <summary>Writes a workspace's new record as an operation on its head; throws <see cref="ConcurrentUpdateException"/> if the head moved.</summary>

@@ -145,6 +145,8 @@ public sealed class StudioAzuriteIntegrationTests(ITestOutputHelper output) : IA
 		await bob.SaveTextAsync(theirs.Id, "service/app.txt", "version 2 (bob)\n", (await LeafAsync(theirs.Id, "service/app.txt"))!.Id);
 		Assert.Equal(LandOutcome.Landed, (await bob.LandAsync(theirs.Id)).Outcome);
 		Assert.Equal(LandOutcome.NeedsReplay, (await ann.LandAsync(mine.Id)).Outcome);
+		// The conflicts page reads the server's overview, which the server reconciles in the background after a landing.
+		await UntilAsync(() => server.Reconciling.Idle, "the server's reconciliation settles");
 		var conflicts = await PageAsync("/conflicts");
 		Assert.Contains("ann-change", conflicts);
 		Assert.Contains("service/app.txt", conflicts);

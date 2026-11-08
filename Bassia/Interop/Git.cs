@@ -187,7 +187,7 @@ internal sealed class GitImporter(Monorepo monorepo)
 
 			// One timeline across repositories: oldest first, a repository's own order kept on equal times.
 			commits = commits.Select((commit, index) => (commit, index)).OrderBy(item => item.commit.Time).ThenBy(item => item.index).Select(item => item.commit).ToList();
-			var name = "import-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+			var name = await monorepo.Repo.FreeWorkspaceNameAsync("import-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture), ct);
 			var workspace = await monorepo.Workspaces.Service.CreateAsync(name, monorepo.User, intent: "import", ct: ct);
 			var previous = new Dictionary<GitSource, Dictionary<string, GitEntry>>();
 			var readers = new Dictionary<string, GitObjectReader>();

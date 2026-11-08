@@ -76,7 +76,8 @@ internal sealed class AgentRunner(Monorepo monorepo)
 			return (await monorepo.Repo.FindWorkspaceAsync(existing.Id, ct))!;
 		}
 
-		var name = options.Name ?? Slug(options.Prompt ?? options.Command ?? "run") + "-" + runId[RunPrefix.Length..].Split('-')[^1];
+		// A name given by the user must be free; one derived from the task takes the next free suffix.
+		var name = options.Name ?? await monorepo.Repo.FreeWorkspaceNameAsync(Slug(options.Prompt ?? options.Command ?? "run") + "-" + runId[RunPrefix.Length..].Split('-')[^1], ct);
 		var (agent, line) = CommandLine(options);
 		var recipe = new ReplayRecipe(options.Prompt, options.Command, agent, options.Model ?? monorepo.Config.GetOrNull("agent.model"));
 		var (state, _) = await monorepo.Workspaces.CreateAsync(name, monorepo.DefaultWorkspacePath(name), options.On, options.Prompt ?? line, recipe,

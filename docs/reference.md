@@ -103,7 +103,12 @@ bassia [-C <path>] <command> [<subcommand>] [-switch [value]]...
 - `-C <path>` runs `bassia` as if it had been started in `<path>`, same as `git -C <path>`; it may repeat, each relative
   to the one before. `-human` and `-help` (`-h`, `--help`) are accepted anywhere on the line.
 - A workspace is named by its name, its id (`w3f9a1c2b0d`), or a unique prefix of either of at least four characters.
-  Inside a workspace's folder the workspace switch can be left out.
+  Inside a workspace's folder the workspace switch can be left out. Names are case-sensitive and unique among open
+  workspaces: creating or cloning under the name of an open workspace fails, and a landed or abandoned workspace frees
+  its name. The name is reserved atomically with a head `name/<name>` that points at the workspace's first operation,
+  so of two concurrent creates only one succeeds. Names Bassia makes up itself (`restore-<seq>`, `import-<time>`, run
+  and replay names) take the next free suffix instead (`restore-12-2`). A legacy duplicate (two open workspaces of one
+  name, made before names were reserved) keeps working by id.
 - Runs are named by their id (`run-brave-otter-3f2a91`), a unique prefix of its key of at least four characters
   (`brave-ot`), or the name of their workspace.
 
@@ -621,7 +626,8 @@ Rewrites create garbage quickly. `bassia gc` (local monorepo) and `bassia-server
 the retained operations - mainline's whole log (the audit trail), every workspace head, and heads named `pin/...` - and
 the candidates of open workspaces (`rc/...`, whose merge results exist nowhere else; those of closed workspaces are
 dropped), and sweep the blobs nothing reaches that are older than the grace period. A closed workspace's head is pruned
-`gc.retention_days` after it closed, which makes its unlanded snapshots collectable. `scrub` re-hashes stored blobs (all,
+`gc.retention_days` after it closed, which makes its unlanded snapshots collectable. Workspace name reservations
+(`name/...`) are not roots; those whose workspace is closed are dropped. `scrub` re-hashes stored blobs (all,
 or a `-sample`) and reports any whose bytes do not match their id.
 
 ## Feedback and crash reports

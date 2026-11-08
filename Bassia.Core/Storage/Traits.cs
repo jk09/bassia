@@ -64,7 +64,10 @@ public interface IObjectStoreMaintenance
 	ValueTask DeleteAsync(ObjectId id, CancellationToken ct = default);
 }
 
-/// <summary>A named head: <c>main</c>, or <c>ws/&lt;id&gt;</c> for a workspace.</summary>
+/// <summary>
+/// A named head: <c>main</c>, <c>ws/&lt;id&gt;</c> for a workspace, or <c>name/&lt;name&gt;</c> for the reservation of a
+/// workspace name (it points at the first operation of the open workspace holding the name).
+/// </summary>
 public readonly record struct HeadName(string Value)
 {
 	public static readonly HeadName Main = new("main");
@@ -74,13 +77,20 @@ public readonly record struct HeadName(string Value)
 	/// <summary>Heads of reconciled candidates, <c>rc/&lt;workspace id&gt;</c>: they point at a Candidate, not an operation.</summary>
 	public const string CandidatePrefix = "rc/";
 
+	/// <summary>Reservations of workspace names, <c>name/&lt;name&gt;</c>: one open workspace per name.</summary>
+	public const string WorkspaceNamePrefix = "name/";
+
 	public static HeadName Workspace(string id) => new(WorkspacePrefix + id);
+
+	public static HeadName WorkspaceName(string name) => new(WorkspaceNamePrefix + name);
 
 	public static HeadName Candidate(string workspaceId) => new(CandidatePrefix + workspaceId);
 
 	public bool IsWorkspace => Value.StartsWith(WorkspacePrefix, StringComparison.Ordinal);
 
 	public bool IsCandidate => Value.StartsWith(CandidatePrefix, StringComparison.Ordinal);
+
+	public bool IsWorkspaceName => Value.StartsWith(WorkspaceNamePrefix, StringComparison.Ordinal);
 
 	public string WorkspaceId => IsWorkspace ? Value[WorkspacePrefix.Length..]
 		: IsCandidate ? Value[CandidatePrefix.Length..]
