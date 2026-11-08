@@ -60,7 +60,7 @@ detection runs migration 1 in the session's temporary schema inside a rolled-bac
 - **Startup migration and an explicit command, one runner** (options a + b). Startup migration is the default because
   every node already opened the schema on start and the lock makes it safe; `bassia-server migrate` plus
   `-migrate verify` is for deployments that want the schema change as a separate, observable release step.
-  Rejected: an off-the-shelf tool (option c, DbUp/FluentMigrator) - see DESIGN.md. *Provisional: see open question 1.*
+  Rejected: an off-the-shelf tool (option c, DbUp/FluentMigrator) - see DESIGN.md. Confirmed by the user.
 - **A table of its own, `bassia_schema`, not a row in `bassia_meta`.** `bassia_meta` belongs to the `state` component's
   own schema (it would have to exist before the migration that creates it), is absent from a clone's schema, and
   holds a single bigint per key - no room for `compatible_from`.
@@ -74,19 +74,16 @@ detection runs migration 1 in the session's temporary schema inside a rolled-bac
 - **No real step 2 ships with this change.** The example steps (expand, contract, failing, slow) live in the tests' own
   `widgets` component; adding an unneeded change to the production schema just to have an example was rejected.
 
-### Open questions (defaults applied; confirm or change)
-
-1. Should `bassia-server` migrate on start by default (`-migrate auto`), or should production require
-   `bassia-server migrate` and default to `verify`? Default applied: `auto`.
-2. Lock wait timeout: 5 minutes by default (`SchemaMigrator.DefaultLockTimeout`), not yet a server switch. Enough?
-3. Should a clone's cache that is rebuilt be reported to the user (a line on stderr), or stay silent? Default: silent.
+- **Defaults confirmed by the user** (were open questions): `bassia-server` migrates on start by default
+  (`-migrate auto`); the lock wait stays at 5 minutes (`SchemaMigrator.DefaultLockTimeout`, no server switch); a
+  rebuilt clone cache is not reported.
 
 ## Progress
 
 - [x] Runner, stores wired, server switch and command.
 - [x] Tests: 15 in `SchemaMigrationTests`; full suite green on PostgreSQL 16.
-- [ ] Open questions answered; record moved to `feat/done/`; pull request with auto-merge.
-- [ ] CI run (postgres:16 service container). Not run on PostgreSQL 13-15.
+- [x] Open questions answered (defaults kept); record moved to `feat/done/`.
+- [x] CI runs on the pull request (postgres:16 service container). Not run on PostgreSQL 13-15.
 
 ## Validation
 

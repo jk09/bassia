@@ -421,7 +421,7 @@ versioning are stamped as version 1 when they match what migration 1 creates, an
 that is behind. A database newer than the build is used as long as its `compatible_from` is at most the build's
 latest version: steps that only add (a table, a column with a default, an index) keep older nodes running through a
 rolling deploy, and a step that removes what older builds read raises `compatible_from`, so those builds refuse to start.
-A clone's tree cache is rebuilt instead of refused when the build cannot use it. Design: `feat/active/bassia-5eee7287/DESIGN.md`.
+A clone's tree cache is rebuilt instead of refused when the build cannot use it. Design: `feat/done/bassia-5eee7287/DESIGN.md`.
 
 ### Azure: Blob Storage and Azure Database for PostgreSQL
 
