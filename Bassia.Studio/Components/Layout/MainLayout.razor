@@ -2,6 +2,7 @@
 @inject MonorepoClient Client
 @inject StudioUser User
 @inject StudioOptions Options
+@inject IHostApplicationLifetime Lifetime
 
 <div class="studio">
 	<header class="toolbar">
@@ -12,6 +13,10 @@
 		@if (Options.UsesEntra)
 		{
 			<a class="user" href="/signout" data-enhance-nav="false">Sign out</a>
+		}
+		@if (Options.ExitButton && User.IsAdmin)
+		{
+			<button type="button" class="user" title="Stop Bassia Studio (development)" @onclick="Lifetime.StopApplication">Exit</button>
 		}
 	</header>
 	<nav class="sidebar">

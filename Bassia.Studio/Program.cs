@@ -4,7 +4,7 @@ namespace Bassia.Studio;
 /// <c>bassia-studio</c>: the web client of a <c>bassia-server</c>.
 /// <code>
 /// bassia-studio -server <url> [-token <t>] [-url http://0.0.0.0:8080] [-cache <folder>] [-label <text>]
-///               [-user <name>] [-role reader|contributor|admin]
+///               [-user <name>] [-role reader|contributor|admin] [-exit-button true]
 ///               [-run-host none|local|aca] [-bassia <command>] [-runs <folder>] [-public-url <url>] [-job-server <url>]
 ///               [-aca-job <resource id>] [-aca-image <image>] [-aca-secrets NAME=secret,...]
 ///               [-auth none|entra -entra-tenant <t> -entra-client-id <id> -entra-client-secret <s>]
@@ -15,11 +15,12 @@ internal static class Program
 	private const string Usage = """
 		Usage:
 		  bassia-studio -server <bassia-server url> [-token <token>] [-url <listen url>] [-cache <folder>] [-label <text>]
-		                [-user <name>] [-role reader|contributor|admin]
+		                [-user <name>] [-role reader|contributor|admin] [-exit-button true]
 		                [-run-host none|local|aca] [-bassia <command>] [-runs <folder>] [-public-url <url>] [-job-server <url>]
 		                [-aca-job <resource id>] [-aca-image <image>] [-aca-secrets NAME=secret,...]
 		                [-auth none|entra -entra-tenant <t> -entra-client-id <id> -entra-client-secret <s>]
 		Switches may also come from BASSIA_STUDIO_<NAME> environment variables (BASSIA_STUDIO_SERVER, BASSIA_STUDIO_TOKEN, ...).
+		-exit-button true adds an Exit button to the toolbar for admins (development aid; stops Studio like Ctrl+C).
 		""";
 
 	public static async Task<int> Main(string[] args)
