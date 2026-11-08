@@ -114,6 +114,9 @@ public sealed class StudioTests : IAsyncLifetime
 		var page = await PageAsync("/");
 		Assert.Contains("Bassia Studio", page);
 		Assert.Contains("open workspaces", page);
+		Assert.Contains("class=\"btn primary\" href=\"/workspaces/new\"", page);
+		Assert.Contains("active runs", page);
+		Assert.DoesNotContain("class=\"btn primary\" href=\"/runs/new\"", page); // no run host in this fixture
 		Assert.DoesNotContain("mainline seq", page);
 		Assert.DoesNotContain("last landing", page);
 		Assert.Contains("Add the greeter", page);

@@ -82,6 +82,18 @@ public sealed class StudioRunTests : IAsyncLifetime
 	}
 
 	[PostgresFact]
+	public async Task Overview_ShowsRunsCard_WithNewRunButton()
+	{
+		var run = await Runs.StartAsync(new RunSpec(Command: "echo done", Name: "overview-run"), Ann);
+		await FinishedAsync(run);
+		using var http = new HttpClient { BaseAddress = new Uri(studio.Address!) };
+		var page = System.Net.WebUtility.HtmlDecode(await http.GetStringAsync("/"));
+		Assert.Contains("class=\"btn primary\" href=\"/workspaces/new\"", page);
+		Assert.Contains("class=\"btn primary\" href=\"/runs/new\"", page);
+		Assert.Contains("active runs · 1 in all", page);
+	}
+
+	[PostgresFact]
 	public async Task Run_ExecutesAsAJob_StreamsOutput_AndLands()
 	{
 		var run = await Runs.StartAsync(new RunSpec(Command: "echo made by the job> made.txt && echo line one && echo line two", Name: "job-run", Land: true), Ann);

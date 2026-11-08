@@ -1,5 +1,6 @@
 @page "/"
 @inherits StudioPage
+@inject Bassia.Studio.Runs.RunService RunService
 
 <PageTitle>Bassia Studio</PageTitle>
 <h1>Overview</h1>
@@ -7,7 +8,22 @@
 @if (loaded)
 {
 	<div class="cards">
-		<div class="card"><div class="big">@open</div><div class="muted">open workspaces</div></div>
+		<div class="card">
+			<div class="big">@open</div>
+			<div class="muted">open workspaces</div>
+			@if (User.CanChange)
+			{
+				<div class="card-action"><a class="btn primary" href="/workspaces/new">+ New workspace</a></div>
+			}
+		</div>
+		<div class="card">
+			<div class="big">@liveRuns</div>
+			<div class="muted">active runs · @totalRuns in all</div>
+			@if (User.CanChange && RunService.Enabled)
+			{
+				<div class="card-action"><a class="btn primary" href="/runs/new" title="Starts an agentic run in a new workspace on mainline">+ New run</a></div>
+			}
+		</div>
 	</div>
 	<h2>Recent landings</h2>
 	<LogTable Entries="recent" />
@@ -16,6 +32,8 @@
 @code {
 	private bool loaded;
 	private int open;
+	private int liveRuns;
+	private int totalRuns;
 	private IReadOnlyList<LogEntry> recent = [];
 
 	protected override bool LiveUpdates => true;
@@ -24,7 +42,28 @@
 	{
 		var repo = await Client.OpenAsync();
 		open = (await repo.ListWorkspacesAsync()).Count;
+		var runs = await RunService.ListAsync();
+		totalRuns = runs.Count;
+		liveRuns = runs.Count(run => Bassia.Studio.Runs.StudioRunStatus.IsLive(run.Status));
 		recent = await Client.LogAsync(null, 10);
 		loaded = true;
+	}
+
+	protected override void OnInitialized()
+	{
+		base.OnInitialized();
+		RunService.Changed += OnChanged;
+	}
+
+	private void OnChanged(Bassia.Studio.Runs.StudioRun run) => _ = InvokeAsync(async () =>
+	{
+		await LoadAsync();
+		StateHasChanged();
+	});
+
+	public override void Dispose()
+	{
+		base.Dispose();
+		RunService.Changed -= OnChanged;
 	}
 }
