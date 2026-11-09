@@ -3,6 +3,7 @@ namespace Bassia.Core.Version;
 using System.Security.Cryptography;
 using Bassia.Core.Model;
 using Bassia.Core.Storage;
+using Bassia.Core.Workspaces;
 
 /// <summary>What a sync did: the workspace's new state, the trees before and after, conflicts stored and paths merged.</summary>
 public sealed record SyncResult(WorkspaceState Workspace, ObjectId OldTree, ObjectId NewTree, long FromSeq, long ToSeq,
@@ -20,7 +21,7 @@ public sealed class WorkspaceService(Repository repo)
 	public static string NewId() => "w" + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(5));
 
 	public async Task<WorkspaceState> CreateAsync(string name, string owner, string? on = null, string intent = "", ReplayRecipe? recipe = null,
-		ChangeId? changeId = null, string? path = null, string? host = null, string? replayOf = null, CancellationToken ct = default)
+		ChangeId? changeId = null, string? path = null, string? host = null, string? replayOf = null, ContextSpec? context = null, CancellationToken ct = default)
 	{
 		CheckName(name);
 		await CheckFreeAsync(name, ct);
@@ -44,18 +45,22 @@ public sealed class WorkspaceService(Repository repo)
 			baseId = parentState.Record.Working;
 			baseSeq = parentState.Record.BaseSeq;
 			parent = parentState.Id;
+			// A stacked workspace contains what its parent contains, unless it was given its own context-spec.
+			context ??= ContextSpec.Of(parentState.Record.Context);
 		}
 
 		var baseCommit = await repo.Objects.ReadCommitAsync(baseId, ct);
 		var working = new Commit(baseCommit.Tree, [baseId], changeId ?? ChangeId.New(), new Author(owner), intent, repo.Clock(), recipe);
 		var workingId = await repo.Objects.WriteAsync(working, ct);
 		var record = new WorkspaceRecord(NewId(), name, parent, baseId, baseSeq, workingId, WorkspaceStatus.Open, repo.Clock(), owner, path, host,
-			ReplayOf: replayOf);
+			ReplayOf: replayOf, Context: context?.ToStored());
 		return await OpenAsync(record, parent is null ? $"create on seq {baseSeq}" : $"create stacked on {parent}", owner, ct);
 	}
 
-	/// <summary>A new workspace with the same base and the same work as <paramref name="source"/>, as a new change.</summary>
-	public async Task<WorkspaceState> CloneAsync(string source, string name, string owner, string? path = null, string? host = null, CancellationToken ct = default)
+	/// <summary>A new workspace with the same base and the same work as <paramref name="source"/>, as a new change; it
+	/// contains what the source contains unless <paramref name="context"/> says otherwise.</summary>
+	public async Task<WorkspaceState> CloneAsync(string source, string name, string owner, string? path = null, string? host = null,
+		ContextSpec? context = null, CancellationToken ct = default)
 	{
 		CheckName(name);
 		await CheckFreeAsync(name, ct);
@@ -64,7 +69,12 @@ public sealed class WorkspaceService(Repository repo)
 		var copy = working with { ChangeId = ChangeId.New(), Author = new Author(owner), Time = repo.Clock() };
 		var copyId = await repo.Objects.WriteAsync(copy, ct);
 		var record = new WorkspaceRecord(NewId(), name, from.Record.Parent, from.Record.Base, from.Record.BaseSeq, copyId, WorkspaceStatus.Open,
-			repo.Clock(), owner, path, host);
+			repo.Clock(), owner, path, host, Context: (context ?? ContextSpec.Of(from.Record.Context)).ToStored());
+		if (context is not null)
+		{
+			await CheckContainsChangesAsync(from.Name, copyId, from.Record.Base, context, ct);
+		}
+
 		return await OpenAsync(record, $"clone of {from.Name}", owner, ct);
 	}
 
@@ -81,6 +91,50 @@ public sealed class WorkspaceService(Repository repo)
 			var amended = await repo.AmendAsync(working, tree, ct);
 			return (current.Record with { Working = amended }, description);
 		}, agent, run, ct);
+
+	/// <summary>
+	/// Changes the workspace's context-spec, as an operation of its own (so undo reverts it). A spec that would leave out
+	/// a path the workspace changed against its base is refused, naming the paths.
+	/// </summary>
+	public Task<WorkspaceState> SetContextAsync(string id, ContextSpec context, string? agent, CancellationToken ct = default) =>
+		repo.UpdateWorkspaceAsync(id, async current =>
+		{
+			if (ContextSpec.Of(current.Record.Context).Equals(context))
+			{
+				return null;
+			}
+
+			if (!current.IsOpen)
+			{
+				throw new VersionException($"Workspace '{current.Name}' is {current.Record.Status}; only an open workspace's context-spec can change.");
+			}
+
+			await CheckContainsChangesAsync(current.Name, current.Record.Working, current.Record.Base, context, ct);
+			return (current.Record with { Context = context.ToStored() }, $"context: {context}");
+		}, agent, null, ct);
+
+	/// <summary>The paths the working commit changed against the base that <paramref name="context"/> leaves out.</summary>
+	public async Task<IReadOnlyList<string>> OutsideContextAsync(ObjectId working, ObjectId baseCommit, ContextSpec context, CancellationToken ct = default)
+	{
+		if (context.IsAll)
+		{
+			return [];
+		}
+
+		var tree = (await repo.Objects.ReadCommitAsync(working, ct)).Tree;
+		var baseTree = (await repo.Objects.ReadCommitAsync(baseCommit, ct)).Tree;
+		return (await repo.Trees.DiffAsync(baseTree, tree, "", ct)).Select(change => change.Path).Where(path => !context.Contains(path)).ToList();
+	}
+
+	private async Task CheckContainsChangesAsync(string name, ObjectId working, ObjectId baseCommit, ContextSpec context, CancellationToken ct)
+	{
+		var outside = await OutsideContextAsync(working, baseCommit, context, ct);
+		if (outside.Count > 0)
+		{
+			throw new ContextBoundaryException(outside, $"The context-spec '{context}' leaves out {outside.Count} path(s) workspace '{name}' changed: " +
+				$"{ContextBoundaryException.List(outside)}. Keep them in context, or undo those changes first.");
+		}
+	}
 
 	/// <summary>Changes the working commit's intent: the text a landing records as its message.</summary>
 	public Task<WorkspaceState> DescribeAsync(string id, string intent, string? agent, CancellationToken ct = default) =>

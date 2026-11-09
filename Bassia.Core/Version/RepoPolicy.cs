@@ -48,9 +48,9 @@ public static class LeaseEnforcement
 /// [textmerge]
 /// min_similarity = 0.5
 ///
-/// [load]                                    # what a workspace loads (Workspaces.LoadRules); default: everything
+/// [context]                                 # what a new workspace contains (Workspaces.ContextSpec); default: everything
 /// default = ["*", "docs/"]
-/// [load.profiles]                           # named rule sets: bassia workspace create -load @api
+/// [context.profiles]                        # named rule sets: bassia workspace create -context @api
 /// api = ["*", "api/", "libs/shared/", "!api/testdata/"]
 /// </code>
 /// </summary>
@@ -74,11 +74,17 @@ public sealed class RepoPolicy
 
 	public double TextMergeMinSimilarity { get; init; } = 0.5;
 
-	/// <summary>The load rules a workspace gets when none are given; empty: everything.</summary>
-	public IReadOnlyList<string> LoadDefault { get; init; } = [];
+	/// <summary>The context-spec a new workspace gets when none is given; empty: everything.</summary>
+	public IReadOnlyList<string> ContextDefault { get; init; } = [];
 
-	/// <summary>Named load rule sets (<c>-load @name</c>).</summary>
-	public IReadOnlyDictionary<string, IReadOnlyList<string>> LoadProfiles { get; init; } = new Dictionary<string, IReadOnlyList<string>>();
+	/// <summary>Named context rule sets (<c>-context @name</c>).</summary>
+	public IReadOnlyDictionary<string, IReadOnlyList<string>> ContextProfiles { get; init; } = new Dictionary<string, IReadOnlyList<string>>();
+
+	/// <summary>
+	/// Whether the file still has a <c>[load]</c> table: load rules were replaced by context-specs, so it is no longer
+	/// read (landings keep working), and resolving a workspace's default context says to rename it to <c>[context]</c>.
+	/// </summary>
+	public bool HasLoadTable { get; init; }
 
 	public string PolicyFor(string path) =>
 		ConflictRules.FirstOrDefault(rule => rule.Glob.IsMatch(path)).Policy ?? DefaultConflictPolicy;
@@ -119,9 +125,9 @@ public sealed class RepoPolicy
 		var leases = table.TryGetValue("leases", out var l) ? l as TomlTable : null;
 		var ignore = table.TryGetValue("ignore", out var i) ? i as TomlTable : null;
 		var textmerge = table.TryGetValue("textmerge", out var t) ? t as TomlTable : null;
-		var load = table.TryGetValue("load", out var lo) ? lo as TomlTable : null;
+		var context = table.TryGetValue("context", out var co) ? co as TomlTable : null;
 		var profiles = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
-		if (load?.TryGetValue("profiles", out var pr) == true && pr is TomlTable profileTable)
+		if (context?.TryGetValue("profiles", out var pr) == true && pr is TomlTable profileTable)
 		{
 			foreach (var (name, _) in profileTable)
 			{
@@ -131,8 +137,9 @@ public sealed class RepoPolicy
 
 		return new RepoPolicy
 		{
-			LoadDefault = load is null ? [] : Strings(load, "default").ToList(),
-			LoadProfiles = profiles,
+			ContextDefault = context is null ? [] : Strings(context, "default").ToList(),
+			ContextProfiles = profiles,
+			HasLoadTable = table.ContainsKey("load"),
 			DefaultConflictPolicy = defaultPolicy,
 			ConflictRules = rules,
 			LeaseRequired = leases is null ? [] : Strings(leases, "required").Select(PathNames.Prefix).ToList(),

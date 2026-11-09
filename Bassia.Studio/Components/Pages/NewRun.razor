@@ -56,7 +56,7 @@ else
 			<label>Workspace name <input @bind="name" placeholder="(from the task)" /></label>
 		}
 		<label>Lease these prefixes while it runs <input @bind="leases" placeholder="src/payments, docs" /></label>
-		<label>Load only <input @bind="load" placeholder="(everything) e.g. api/, *.md" /></label>
+		<label>Context: the paths the workspace contains <input @bind="context" placeholder="(everything; or what it is stacked on or replays) e.g. api/, *.md, @@profile" /></label>
 		<label class="check"><input type="checkbox" @bind="land" /> Land when the agent succeeds</label>
 		<div><button class="btn primary" disabled="@Busy" @onclick="StartAsync">Start the run</button></div>
 	</div>
@@ -73,7 +73,7 @@ else
 	private string workspace = "";
 	private string name = "";
 	private string leases = "";
-	private string load = "";
+	private string context = "";
 	private bool land;
 	private IReadOnlyList<WorkspaceState> open = [];
 
@@ -105,7 +105,7 @@ else
 			Model: kind == "prompt" ? model : null,
 			Land: land,
 			Leases: List(leases),
-			Load: List(load));
+			Context: List(context).Count == 0 ? null : List(context));
 		var run = await RunService.StartAsync(spec, User);
 		Navigation.NavigateTo("/runs/" + run.RunId);
 		return null;

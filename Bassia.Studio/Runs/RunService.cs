@@ -17,7 +17,7 @@ public sealed record RunSpec(
 	string? Model = null,
 	bool Land = false,
 	IReadOnlyList<string>? Leases = null,
-	IReadOnlyList<string>? Load = null,
+	IReadOnlyList<string>? Context = null,
 	string? ReplayOf = null);
 
 /// <summary>The states of a run Studio started, before and after the run records itself on its workspace.</summary>
@@ -125,9 +125,9 @@ public sealed class RunService(MonorepoClient client, StudioOptions options, IRu
 			Add("on", spec.On);
 			Add("name", spec.Name);
 			Add("model", spec.Model);
-			if (spec.Load is { Count: > 0 } load)
+			if (spec.Context is { Count: > 0 } context)
 			{
-				args.AddRange(["-load", string.Join(',', load)]);
+				args.AddRange(["-context", string.Join(',', context)]);
 			}
 		}
 

@@ -45,7 +45,7 @@ public sealed class CliTests : IDisposable
 	}
 
 	[Fact]
-	public async Task LoadRules_FromAProfile_ShapeTheFolder_AndWorkspaceLoadChangesThem()
+	public async Task ContextSpec_FromAProfile_ShapesTheFolder_GuardsItsBoundary_AndWorkspaceContextChangesIt()
 	{
 		await InitAsync();
 		await OkAsync(Root, "workspace", "create", "base");
@@ -53,26 +53,64 @@ public sealed class CliTests : IDisposable
 		Directory.CreateDirectory(Path.Combine(Workspace("base"), "web"));
 		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), "api", "a.cs"), "a\n");
 		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), "web", "w.js"), "w\n");
-		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), ".bassia.toml"), "[load.profiles]\napi = [\"*\", \"api/\"]\n");
+		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), ".bassia.toml"), "[context.profiles]\napi = [\"*\", \"api/\"]\n");
 		await OkAsync(Root, "workspace", "land", "base");
 
-		var created = await OkAsync(Root, "workspace", "create", "api-fix", "-load", "@api");
-		Assert.Equal(new[] { "*", "api/" }, ((TomlArray)created["load"]).Cast<string>());
-		Assert.Equal(2L, created["files_loaded"]);
+		var created = await OkAsync(Root, "workspace", "create", "api-fix", "-context", "@api");
+		Assert.Equal(new[] { "*", "api/" }, ((TomlArray)created["context"]).Cast<string>());
+		Assert.Equal(2L, created["files_in_folder"]);
 		Assert.True(File.Exists(Path.Combine(Workspace("api-fix"), "api", "a.cs")));
 		Assert.False(File.Exists(Path.Combine(Workspace("api-fix"), "web", "w.js")));
+		Assert.True(Directory.Exists(Path.Combine(Workspace("api-fix"), "web")));
+
+		var shown = await OkAsync(Root, "workspace", "context", "api-fix");
+		Assert.Equal(2L, shown["paths_in_context"]);
+
+		// A write outside the context is refused, naming the path, by every command that snapshots.
+		await File.WriteAllTextAsync(Path.Combine(Workspace("api-fix"), "web", "x.js"), "x\n");
+		var refused = await FailAsync(Root, "workspace", "status", "api-fix");
+		Assert.Contains("web/x.js", (string)refused["error"]);
+		Assert.Contains("web/x.js", (string)(await FailAsync(Root, "workspace", "land", "api-fix"))["error"]);
+		File.Delete(Path.Combine(Workspace("api-fix"), "web", "x.js"));
 
 		await File.WriteAllTextAsync(Path.Combine(Workspace("api-fix"), "api", "a.cs"), "a2\n");
 		var landed = await OkAsync(Root, "workspace", "land", "api-fix", "-keep");
 		Assert.Equal("landed", landed["outcome"]);
 		Assert.Equal("w\n", (string)(await OkAsync(Root, "mainline", "cat", "web/w.js"))["content"]);
 
-		var loaded = await OkAsync(Root, "workspace", "load", "api-fix", "-load", "all");
-		Assert.Equal(1L, loaded["files_added"]);
+		var widened = await OkAsync(Root, "workspace", "context", "api-fix", "-add", "web/");
+		Assert.Equal(new[] { "*", "api/", "web/" }, ((TomlArray)widened["context"]).Cast<string>());
+		Assert.Equal(1L, widened["files_added"]);
 		Assert.Equal("w\n", await File.ReadAllTextAsync(Path.Combine(Workspace("api-fix"), "web", "w.js")));
+		await OkAsync(Root, "workspace", "undo", "api-fix");
+		Assert.False(File.Exists(Path.Combine(Workspace("api-fix"), "web", "w.js")));
+		var all = await OkAsync(Root, "workspace", "context", "api-fix", "-set", "all");
+		Assert.Equal(new[] { "all" }, ((TomlArray)all["context"]).Cast<string>());
 
-		var missing = await FailAsync(Root, "workspace", "create", "nope", "-load", "@nope");
+		var missing = await FailAsync(Root, "workspace", "create", "nope", "-context", "@nope");
 		Assert.Contains("defines: api", (string)missing["error"]);
+	}
+
+	[Fact]
+	public async Task LoadRules_AreGone_AndSayWhatReplacedThem()
+	{
+		await InitAsync();
+		var (code, _, stderr) = await RunInDirectoryAsync(Root, "workspace", "create", "x", "-load", "api/");
+		Assert.Equal(2, code);
+		Assert.Contains("-context", stderr);
+		(code, _, stderr) = await RunInDirectoryAsync(Root, "workspace", "load", "x");
+		Assert.Equal(2, code);
+		Assert.Contains("workspace context", stderr);
+		(code, _, stderr) = await RunInDirectoryAsync(Root, "config", "set", "-key", "workspace.load", "-value", "api/");
+		Assert.Equal(2, code);
+		Assert.Contains("context-spec", stderr);
+
+		// A [load] table left on mainline is not read; a new workspace says to rename it.
+		await OkAsync(Root, "workspace", "create", "base");
+		await File.WriteAllTextAsync(Path.Combine(Workspace("base"), ".bassia.toml"), "[load]\ndefault = [\"*\"]\n");
+		await OkAsync(Root, "workspace", "land", "base");
+		Assert.Contains("[context]", (string)(await FailAsync(Root, "workspace", "create", "next"))["error"]);
+		await OkAsync(Root, "workspace", "create", "next", "-context", "all");
 	}
 
 	[Fact]
@@ -159,6 +197,23 @@ public sealed class CliTests : IDisposable
 		var failed = await FailAsync(Root, "agent", "start", "-name", "broken", "-land", "-run", OperatingSystem.IsWindows() ? "exit /b 3" : "exit 3");
 		Assert.Equal("failed", ((TomlTable)failed["run"])["status"]);
 		Assert.False(failed.ContainsKey("land"));
+	}
+
+	[Fact]
+	public async Task AgentStart_WritingOutsideItsContext_FailsTheRun_AndLandsNothing()
+	{
+		await InitAsync();
+		var inside = await OkAsync(Root, "agent", "start", "-name", "inside", "-land", "-context", "docs/", "-run",
+			(OperatingSystem.IsWindows() ? "mkdir docs && " : "mkdir -p docs && ") + WriteFileCommand("docs/notes.txt", "inside"));
+		Assert.Equal("landed", ((TomlTable)inside["land"])["outcome"]);
+		Assert.Equal(new[] { "docs/" }, ((TomlArray)inside["context"]).Cast<string>());
+
+		var outside = await FailAsync(Root, "agent", "start", "-name", "outside", "-land", "-context", "docs/", "-run", WriteFileCommand("notes.txt", "outside"));
+		Assert.Equal("failed", ((TomlTable)outside["run"])["status"]);
+		Assert.Contains("notes.txt", (string)((TomlTable)outside["run"])["last_line"]);
+		Assert.False(outside.ContainsKey("land"));
+		var (_, _, error) = await RunInDirectoryAsync(Root, "mainline", "cat", "notes.txt");
+		Assert.Contains("notes.txt", error);
 	}
 
 	[Fact]

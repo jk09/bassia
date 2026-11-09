@@ -5,6 +5,7 @@ using Bassia.Core.Model;
 using Bassia.Core.Storage;
 using Bassia.Core.Text;
 using Bassia.Core.Version;
+using Bassia.Core.Workspaces;
 
 /// <summary>An edit refused because the path changed since the user loaded it: their text is kept, nothing is lost.</summary>
 public sealed class StaleEditException(string message) : VersionException(message);
@@ -59,21 +60,40 @@ public sealed class StudioActions(MonorepoClient client, StudioUser user)
 
 	// ----- workspaces -----
 
-	/// <summary>A new workspace on mainline, or stacked on another workspace.</summary>
-	public async Task<WorkspaceState> CreateAsync(string name, string intent = "", string? on = null, CancellationToken ct = default)
+	/// <summary>
+	/// A new workspace on mainline, or stacked on another workspace. <paramref name="context"/> is its context-spec
+	/// (rules, <c>@profile</c>s); empty: the parent's when stacked, else mainline's <c>[context] default</c>, else everything.
+	/// </summary>
+	public async Task<WorkspaceState> CreateAsync(string name, string intent = "", string? on = null, IReadOnlyList<string>? context = null, CancellationToken ct = default)
 	{
 		EnsureCanChange();
-		var (_, service) = await OpenAsync(ct);
-		return await service.CreateAsync(name.Trim(), user.Name, string.IsNullOrWhiteSpace(on) ? null : on, intent, ct: ct);
+		var (repo, service) = await OpenAsync(ct);
+		on = string.IsNullOrWhiteSpace(on) ? null : on;
+		var spec = context is { Count: > 0 } given
+			? ContextSpec.Resolve(given, await MainPolicyAsync(repo, ct))
+			: on is null && (await MainPolicyAsync(repo, ct)).ContextDefault is { Count: > 0 } defaults ? ContextSpec.Resolve(defaults, await MainPolicyAsync(repo, ct)) : null;
+		return await service.CreateAsync(name.Trim(), user.Name, on, intent, context: spec, ct: ct);
 	}
 
-	/// <summary>A new workspace with the same base and work as another one, as a new change.</summary>
-	public async Task<WorkspaceState> CloneAsync(string source, string name, CancellationToken ct = default)
+	/// <summary>A new workspace with the same base and work as another one, as a new change; with the source's context-spec unless given.</summary>
+	public async Task<WorkspaceState> CloneAsync(string source, string name, IReadOnlyList<string>? context = null, CancellationToken ct = default)
 	{
 		EnsureCanChange();
-		var (_, service) = await OpenAsync(ct);
-		return await service.CloneAsync(source, name.Trim(), user.Name, ct: ct);
+		var (repo, service) = await OpenAsync(ct);
+		var spec = context is { Count: > 0 } given ? ContextSpec.Resolve(given, await MainPolicyAsync(repo, ct)) : null;
+		return await service.CloneAsync(source, name.Trim(), user.Name, context: spec, ct: ct);
 	}
+
+	/// <summary>Changes a workspace's context-spec (an operation: undo reverts it); refused if it leaves out a path the workspace changed.</summary>
+	public async Task<WorkspaceState> SetContextAsync(string workspace, IReadOnlyList<string> context, CancellationToken ct = default)
+	{
+		var (repo, service) = await OpenAsync(ct);
+		var state = await OwnedAsync(repo, workspace, ct);
+		return await service.SetContextAsync(state.Id, ContextSpec.Resolve(context.Count == 0 ? ["all"] : context, await MainPolicyAsync(repo, ct)), user.Name, ct);
+	}
+
+	private static async Task<RepoPolicy> MainPolicyAsync(Repository repo, CancellationToken ct) =>
+		await RepoPolicy.LoadAsync(repo.Trees, (await repo.GetMainAsync(ct)).Tree, ct);
 
 	public async Task<WorkspaceState> DescribeAsync(string workspace, string intent, CancellationToken ct = default)
 	{
@@ -99,6 +119,14 @@ public sealed class StudioActions(MonorepoClient client, StudioUser user)
 		foreach (var change in changes)
 		{
 			PathNames.Normalize(change.Path);
+		}
+
+		// Studio edits the working commit directly, so it guards the context boundary a snapshot guards in a folder.
+		var context = ContextSpec.Of(state.Record.Context);
+		var outside = changes.Select(change => change.Path).Where(path => !context.Contains(path)).ToList();
+		if (outside.Count > 0)
+		{
+			throw new ContextBoundaryException(outside, $"{ContextBoundaryException.List(outside)} is outside workspace '{state.Name}''s context-spec '{context}'; widen its context first.");
 		}
 
 		return await repo.UpdateWorkspaceAsync(state.Id, async current =>

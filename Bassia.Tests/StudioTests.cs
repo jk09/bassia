@@ -340,6 +340,31 @@ public sealed class StudioTests : IAsyncLifetime
 	}
 
 	[PostgresFact]
+	public async Task Actions_ContextSpec_IsShownEditedAndGuardsEdits()
+	{
+		var kit = As("kit");
+		var scoped = await kit.CreateAsync("scoped", context: ["src/"]);
+		Assert.Equal(["src/"], scoped.Record.Context);
+		await kit.SaveTextAsync(scoped.Id, "src/new.txt", "in\n", null);
+		var refused = await Assert.ThrowsAsync<Bassia.Core.Workspaces.ContextBoundaryException>(() => kit.SaveTextAsync(scoped.Id, "docs/out.txt", "out\n", null));
+		Assert.Equal(["docs/out.txt"], refused.Paths);
+
+		var page = await PageAsync($"/workspaces/{scoped.Id}");
+		Assert.Contains("context", page);
+		Assert.Contains("src/", page);
+
+		var widened = await kit.SetContextAsync(scoped.Id, ["src/", "docs/"]);
+		Assert.Equal(["src/", "docs/"], widened.Record.Context);
+		await kit.SaveTextAsync(scoped.Id, "docs/out.txt", "out\n", null);
+		await Assert.ThrowsAsync<Bassia.Core.Workspaces.ContextBoundaryException>(() => kit.SetContextAsync(scoped.Id, ["src/"]));
+		Assert.Null((await kit.SetContextAsync(scoped.Id, ["all"])).Record.Context);
+
+		var stacked = await kit.CreateAsync("scoped-child", on: "scoped");
+		Assert.Null(stacked.Record.Context);
+		await Assert.ThrowsAsync<VersionException>(() => kit.CreateAsync("bad", context: ["@nope"]));
+	}
+
+	[PostgresFact]
 	public async Task Roles_ReadersReadContributorsOwnAdminsAll()
 	{
 		var reader = As("rita", StudioRole.Reader);
