@@ -22,7 +22,8 @@ internal sealed record AgentRunOptions(
 	string? RunId = null,
 	string? ReplayOf = null,
 	ChangeId? ChangeId = null,
-	IReadOnlyList<string>? Context = null);
+	IReadOnlyList<string>? Context = null,
+	string? Materialize = null);
 
 /// <summary>How a run ended.</summary>
 internal sealed record AgentRunResult(string RunId, WorkspaceState Workspace, RunRecord Run, IReadOnlyList<PathChange> Changes, LandResult? Land, string LogFile);
@@ -70,7 +71,13 @@ internal sealed class AgentRunner(Monorepo monorepo)
 
 			if (monorepo.Workspaces.Local(existing) is null)
 			{
-				await monorepo.Workspaces.CheckOutAsync(existing, existing.Record.Path is { } path && !Directory.Exists(path) ? path : monorepo.DefaultWorkspacePath(existing.Name), ct);
+				await monorepo.Workspaces.CheckOutAsync(existing, existing.Record.Path is { } path && !Directory.Exists(path) ? path : monorepo.DefaultWorkspacePath(existing.Name),
+					monorepo.IsLazy(options.Materialize), ct);
+			}
+			else
+			{
+				// A lazy folder must be projected while the agent works in it.
+				await monorepo.Workspaces.MountAsync(existing, ct);
 			}
 
 			if (options.Context is { } rules)
@@ -92,7 +99,7 @@ internal sealed class AgentRunner(Monorepo monorepo)
 			: null;
 		var context = options.On is not null && options.Context is null ? null : await monorepo.ResolveContextAsync(options.Context, inherited, ct);
 		var (state, _) = await monorepo.Workspaces.CreateAsync(name, monorepo.DefaultWorkspacePath(name), options.On, options.Prompt ?? line, recipe,
-			options.ChangeId, options.ReplayOf, context, ct);
+			options.ChangeId, options.ReplayOf, context, monorepo.IsLazy(options.Materialize), ct);
 		return state;
 	}
 

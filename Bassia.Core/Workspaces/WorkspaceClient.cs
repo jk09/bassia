@@ -7,18 +7,31 @@ using Bassia.Core.Version;
 using Tomlyn;
 using Tomlyn.Model;
 
-/// <summary>A workspace's directory on this machine and its tree state.</summary>
-public sealed class LocalWorkspace(string id, string root, string stateFile, IWorkspaceProvider provider)
+/// <summary>
+/// A workspace's directory on this machine and its tree state. A lazy one keeps its files in a backing directory
+/// (<see cref="TreeState.Backing"/>) that a virtual file system projects at <see cref="Root"/>.
+/// </summary>
+public sealed class LocalWorkspace(string id, string root, string stateFile, IWorkspaceProvider provider, TreeState? state = null)
 {
 	public string Id { get; } = id;
 
+	/// <summary>The workspace's folder: where agents and tools work.</summary>
 	public string Root { get; } = root;
 
 	public string StateFile { get; } = stateFile;
 
 	public IWorkspaceProvider Provider { get; } = provider;
 
-	public TreeState State { get; set; } = TreeState.Load(stateFile);
+	public TreeState State { get; set; } = state ?? TreeState.Load(stateFile);
+
+	/// <summary>Whether the folder is lazy: placeholders in a backing directory, projected at the folder.</summary>
+	public bool IsLazy => State.Backing is not null;
+
+	/// <summary>Where the files really are: the backing directory of a lazy folder, else the folder.</summary>
+	public string Files => State.Backing ?? Root;
+
+	/// <summary>The provider that reads the folder for snapshots, when it is not <see cref="Provider"/> (a ProjFS folder keeps changes itself).</summary>
+	public IWorkspaceProvider? Scanner { get; init; }
 
 	public void Save() => State.Save(StateFile);
 }
@@ -34,10 +47,14 @@ public sealed record SnapshotResult(WorkspaceState Workspace, IReadOnlyList<Path
 /// keeps the directory in step when sync, undo or restore change the working commit. Commits are never made by hand:
 /// every command that reads a workspace snapshots it first.
 /// </summary>
-public sealed class WorkspaceClient(Repository repo, ILanding landing, string stateDir, string agent, Func<string, string, IWorkspaceProvider>? providers = null,
-	string? monorepoRoot = null)
+public sealed class WorkspaceClient(Repository repo, ILanding landing, string stateDir, string agent, Func<string, string, bool, IWorkspaceProvider>? providers = null,
+	string? monorepoRoot = null, ILazyFolders? lazyFolders = null)
 {
-	private readonly Func<string, string, IWorkspaceProvider> providers = providers ?? ((root, _) => new CheckoutProvider(root, repo));
+	/// <summary>The provider for a directory of files (a workspace's id; whether it holds placeholders).</summary>
+	private readonly Func<string, string, bool, IWorkspaceProvider> providers = providers ?? ((root, _, lazy) => new CheckoutProvider(root, repo) { Lazy = lazy });
+
+	/// <summary>The virtual file system of lazy folders here, if any.</summary>
+	public ILazyFolders? LazyFolders => lazyFolders;
 
 	public Repository Repository => repo;
 
@@ -53,44 +70,66 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 	/// <summary>Creates a workspace (on mainline, or stacked on <paramref name="on"/>) and checks it out into <paramref name="directory"/>.</summary>
 	public async Task<(WorkspaceState State, LocalWorkspace Local)> CreateAsync(string name, string directory, string? on = null, string intent = "",
-		ReplayRecipe? recipe = null, ChangeId? changeId = null, string? replayOf = null, ContextSpec? context = null, CancellationToken ct = default)
+		ReplayRecipe? recipe = null, ChangeId? changeId = null, string? replayOf = null, ContextSpec? context = null, bool lazy = false, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		CheckDirectory(directory);
+		CheckLazy(lazy);
 		var state = await Service.CreateAsync(name, agent, on, intent, recipe, changeId, directory, Host, replayOf, context, ct);
-		var local = await CheckOutAsync(state, directory, ct);
+		var local = await CheckOutAsync(state, directory, lazy, ct);
 		return (state, local);
 	}
 
 	public async Task<(WorkspaceState State, LocalWorkspace Local)> CloneAsync(string source, string name, string directory, ContextSpec? context = null,
-		CancellationToken ct = default)
+		bool lazy = false, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		CheckDirectory(directory);
+		CheckLazy(lazy);
 		var state = await Service.CloneAsync(source, name, agent, directory, Host, context, ct);
-		return (state, await CheckOutAsync(state, directory, ct));
+		return (state, await CheckOutAsync(state, directory, lazy, ct));
 	}
 
 	/// <summary>
 	/// Writes a workspace's working tree into <paramref name="directory"/> and makes it the workspace's local directory:
 	/// the paths its context-spec contains, with only their content fetched and cached; directories outside the context
-	/// appear empty at its edge.
+	/// appear empty at its edge. A <paramref name="lazy"/> folder holds placeholders, hydrated on first use by this
+	/// machine's virtual file system (<see cref="ILazyFolders"/>): nothing is fetched until a file is read.
 	/// </summary>
-	public async Task<LocalWorkspace> CheckOutAsync(WorkspaceState state, string directory, CancellationToken ct = default)
+	public async Task<LocalWorkspace> CheckOutAsync(WorkspaceState state, string directory, bool lazy = false, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
+		CheckLazy(lazy);
+		if (Local(state) is { IsLazy: true } previous && lazyFolders is not null)
+		{
+			await lazyFolders.UnmountAsync(previous, ct);
+		}
+
 		Directory.CreateDirectory(directory);
 		if (File.Exists(StateFile(state.Id)))
 		{
 			File.Delete(StateFile(state.Id));
 		}
 
-		var local = new LocalWorkspace(state.Id, directory, StateFile(state.Id), providers(directory, state.Id));
-		local.State.Context = ContextSpec.Of(state.Record.Context);
+		var backing = lazy ? BackingDirectory(state.Id) : null;
+		if (backing is not null && Directory.Exists(backing))
+		{
+			Directory.Delete(backing, true);
+		}
+
+		var files = backing ?? directory;
+		Directory.CreateDirectory(files);
+		var tree = new TreeState { Context = ContextSpec.Of(state.Record.Context), Backing = backing };
+		var local = new LocalWorkspace(state.Id, directory, StateFile(state.Id), providers(files, state.Id, lazy), tree);
 		var working = await repo.Objects.ReadCommitAsync(state.Record.Working, ct);
 		await local.Provider.UpdateAsync(local.State, working.Tree, ct);
 		local.Save();
-		WriteMarker(directory, state.Id, monorepoRoot);
+		WriteMarker(files, state.Id, monorepoRoot);
+		if (lazy)
+		{
+			await lazyFolders!.MountAsync(local, ct);
+		}
+
 		if (state.Record.Path != directory || state.Record.Host != Host)
 		{
 			await Service.SetPathAsync(state.Id, directory, Host, ct);
@@ -99,16 +138,37 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		return local;
 	}
 
-	/// <summary>The workspace's directory on this machine, if it has one here.</summary>
+	/// <summary>The workspace's directory on this machine, if it has one here (a lazy one whether projected now or not).</summary>
 	public LocalWorkspace? Local(WorkspaceState state)
 	{
 		var path = state.Record.Path;
-		if (path is null || state.Record.Host != Host || !File.Exists(StateFile(state.Id)) || ReadMarker(path) is not { } marker || marker.Workspace != state.Id)
+		if (path is null || state.Record.Host != Host || !File.Exists(StateFile(state.Id)))
 		{
 			return null;
 		}
 
-		return new LocalWorkspace(state.Id, path, StateFile(state.Id), providers(path, state.Id));
+		var tree = TreeState.Load(StateFile(state.Id));
+		var files = tree.Backing ?? path;
+		if (ReadMarker(files) is not { } marker || marker.Workspace != state.Id)
+		{
+			return null;
+		}
+
+		return new LocalWorkspace(state.Id, path, StateFile(state.Id), providers(files, state.Id, tree.Backing is not null), tree)
+		{
+			Scanner = tree.Backing is not null && lazyFolders is { ScansFolder: true } ? providers(path, state.Id, false) : null
+		};
+	}
+
+	/// <summary>Where a lazy folder of workspace <paramref name="id"/> keeps its files and placeholders.</summary>
+	public string BackingDirectory(string id) => Path.Combine(stateDir, id + ".files");
+
+	private void CheckLazy(bool lazy)
+	{
+		if (lazy && (lazyFolders is null ? "this client has no virtual file system for lazy folders" : lazyFolders.Unavailable) is { } why)
+		{
+			throw new VersionException($"A lazy workspace folder cannot be made here: {why}. Use full materialization instead.");
+		}
 	}
 
 	/// <summary>
@@ -128,7 +188,13 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		var policy = await PolicyAsync(local, ct);
 		// The record's context-spec is the boundary, even when another client changed it and this folder is not in step yet.
-		var scan = await local.Provider.ScanAsync(local.State, policy, true, ct, ContextSpec.Of(state.Record.Context));
+		if (local.Scanner is not null)
+		{
+			// The folder holds the changes, and only a served folder lists its placeholders.
+			await lazyFolders!.MountAsync(local, ct);
+		}
+
+		var scan = await (local.Scanner ?? local.Provider).ScanAsync(local.State, policy, true, ct, ContextSpec.Of(state.Record.Context));
 		var diskTree = scan.Changes.Count == 0 ? local.State.Tree : await repo.Trees.EditAsync(local.State.Tree, scan.Changes, ct);
 		var current = state;
 		var working = await repo.Objects.ReadCommitAsync(current.Record.Working, ct);
@@ -137,6 +203,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 			local.State.Tree = diskTree;
 			await ApplyContextAsync(local, current, ct);
 			local.Save();
+			await RefreshAsync(local, ct);
 			return new SnapshotResult(current, scan.Changes, scan.Hashed, true);
 		}
 
@@ -152,6 +219,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		await ApplyContextAsync(local, updated, ct);
 		local.Save();
+		await RefreshAsync(local, ct);
 		return new SnapshotResult(updated, scan.Changes, scan.Hashed, true);
 	}
 
@@ -215,6 +283,11 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		if (!request.DryRun && result.Outcome == LandOutcome.Landed && await repo.FindWorkspaceAsync(state.Id, ct) is { } after)
 		{
 			await UpdateDirectoryAsync(after, ct);
+			if (!after.IsOpen)
+			{
+				// A landed workspace's lazy folder is no longer served; 'workspace mount' serves it again.
+				await UnmountAsync(after, ct);
+			}
 		}
 
 		return result;
@@ -239,14 +312,37 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		var result = await ApplyContextAsync(local, state, ct);
 		local.Save();
+		await RefreshAsync(local, ct);
 		return result;
 	}
 
-	/// <summary>Removes the workspace's directory and its tree state from this machine.</summary>
-	public void RemoveDirectory(WorkspaceState state)
+	/// <summary>Has a lazy folder's server show again what the provider just changed in the backing directory.</summary>
+	private async Task RefreshAsync(LocalWorkspace local, CancellationToken ct)
+	{
+		if (local.IsLazy && local.Provider is CheckoutProvider provider && provider.TakeChanged() is { Count: > 0 } paths && lazyFolders is not null)
+		{
+			await lazyFolders.RefreshAsync(local, paths, ct);
+		}
+	}
+
+	/// <summary>Removes the workspace's directory (and a lazy one's backing directory) and its tree state from this machine.</summary>
+	public async Task RemoveDirectoryAsync(WorkspaceState state, CancellationToken ct = default)
 	{
 		if (Local(state) is { } local)
 		{
+			if (local.IsLazy)
+			{
+				if (lazyFolders is not null)
+				{
+					await lazyFolders.RemoveFolderAsync(local, ct);
+				}
+
+				if (Directory.Exists(local.Files))
+				{
+					Directory.Delete(local.Files, true);
+				}
+			}
+
 			if (Directory.Exists(local.Root))
 			{
 				Directory.Delete(local.Root, true);
@@ -256,9 +352,28 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		}
 	}
 
+	/// <summary>Stops projecting a lazy folder (after its workspace closed); its files stay in the backing directory.</summary>
+	public async Task UnmountAsync(WorkspaceState state, CancellationToken ct = default)
+	{
+		if (Local(state) is { IsLazy: true } local && lazyFolders is not null)
+		{
+			await lazyFolders.UnmountAsync(local, ct);
+		}
+	}
+
+	/// <summary>Projects a lazy folder again (after a restart), if it is lazy and not projected now.</summary>
+	public async Task MountAsync(WorkspaceState state, CancellationToken ct = default)
+	{
+		if (Local(state) is { IsLazy: true } local)
+		{
+			CheckLazy(true);
+			await lazyFolders!.MountAsync(local, ct);
+		}
+	}
+
 	private async Task<RepoPolicy> PolicyAsync(LocalWorkspace local, CancellationToken ct)
 	{
-		var file = Path.Combine(local.Root, RepoPolicy.FileName);
+		var file = Path.Combine(local.Files, RepoPolicy.FileName);
 		if (File.Exists(file))
 		{
 			try

@@ -160,7 +160,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | --- | --- |
 | Monorepo | `init [-path <dir>] [-postgres <connection>]`, `clone -from <url> [-path <dir>] [-token <t>] [-postgres <connection>]`, `status`, `version`, `help` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>`, `config unset -key <k>` |
-| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>]`, `workspace clone -from <w> -name <n> [-context <rules>]`, `workspace checkout <w>`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
+| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>] [-materialize full\|lazy]`, `workspace clone -from <w> -name <n> [-context <rules>] [-materialize ...]`, `workspace checkout <w> [-materialize ...]`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace mount [<w>]`, `workspace unmount [<w>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
 | Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]`, `agent job` (in a container: clone, then start or replay from `BASSIA_JOB_ARGS`) |
@@ -253,6 +253,42 @@ bassia workspace context api-fix                                                
 - **Load rules are gone.** Context-specs replaced them: `-load`, `workspace load` and the `workspace.load` setting
   fail and name the replacement. A `[load]` table in `.bassia.toml` is no longer read (landings are unaffected); a new
   workspace without `-context` asks to rename it to `[context]`.
+
+### Lazy folders: files fetched when first used
+
+By default a workspace's folder holds every file in its context, fetched before the folder is made. A **lazy** folder
+(`-materialize lazy` on `workspace create|clone|checkout` and `agent start|replay`, or the `workspace.materialize`
+setting) holds placeholders instead: every file in context is listed with its size and mode, and nothing is fetched
+until a file is first read or changed. An agent needs no cooperation - reading a file is enough - so a run over a large
+context costs only what it touches.
+
+```sh
+bassia workspace create big-fix -context @platform -materialize lazy   # placeholders; the folder is served
+cat workspaces/big-fix/platform/src/Main.cs                            # fetched now, and only this file
+bassia workspace unmount big-fix                                       # stop serving it (files stay)
+bassia workspace mount big-fix                                         # serve it again, e.g. after a restart
+```
+
+- **How.** The files and placeholders live in a backing directory (`.bassia/workspaces/<id>.files`), and a virtual
+  file system projects it at the workspace's folder, served by a background `bassia workspace serve <w>` process (log:
+  `.bassia/workspaces/<id>.mount.log`). `workspace create` and `checkout` start it, `agent start` and every snapshot
+  make sure it runs, and `workspace close` stops it (`-remove` also deletes the backing directory).
+  - On **Linux and macOS** it is a FUSE file system, a passthrough to the backing directory: a placeholder is hydrated -
+    its content fetched through the client's cache - just before it is opened, truncated, renamed, linked, or has its
+    mode or times set. Snapshots read the backing directory.
+  - On **Windows** it is a ProjFS provider: the folder is a virtualization root, a file's content is hydrated when it
+    is first read, and changes stay in the folder, which snapshots read. When a sync, undo or context change rewrites
+    the backing directory, the command asks the server to drop those paths from the folder so it shows them anew.
+
+  Listings and sizes never fetch anything.
+- **Snapshots** treat an untouched or merely read placeholder as unchanged; edits, new files, renames and deletions
+  through the folder are snapshotted as in a full folder, and the context boundary applies the same way.
+  `.bassia.toml` is always written in full.
+- **Requirements.** Linux: FUSE 3 (`apt install fuse3`, `/dev/fuse`). Windows: the Projected File System feature
+  (`Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart`, as an administrator). macOS:
+  macFUSE with libfuse 3 (not tested in CI). Where none is available, a lazy folder is refused with the reason, and a
+  full one works as always.
+- Results of `workspace create|clone|checkout` report `materialize` and, for a lazy folder, `files_placeholders`.
 
 ## Workspaces on a Dev Drive (Windows)
 
@@ -629,6 +665,7 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 | `merge.semantic_driver` | `weave-driver` | The driver of the semantic policy, git merge-driver style (`%O %A %B`); `off` disables it. The release packages bundle it. |
 | `land.validate` | | A shell command a machine-merged tree must pass before it lands (local monorepo). |
 | `workspace.clone` | `auto` | On Windows, block-clone workspace files from `.bassia/clones` on a Dev Drive (or another block-cloning ReFS volume); `off` always writes them. |
+| `workspace.materialize` | `full` | How a new workspace folder gets its files: `full` (every file in its context written) or `lazy` (placeholders hydrated when first read or changed, by FUSE or ProjFS). `-materialize` overrides it. |
 | `workspace.dir` | `workspaces` | Where new workspaces' folders go. |
 | `lease.ttl` | `600` | Seconds a lease lives unless renewed. |
 | `gc.grace_hours` | `24` | Unreferenced blobs younger than this are kept (uploads for landings in flight). |
@@ -697,12 +734,15 @@ Bassia has four projects; each depends only on the ones before it.
      fast path for reconciled candidates), `LandingPlanner` (the decision of a landing, shared by the landing and the
      reconciler), `Reconciler` (candidates behind `rc/` heads and the conflict overview), `RepoPolicy` and
      `ConflictResolver` (the conflict policies), `GarbageCollector`.
-   - `Workspaces`: `IWorkspaceProvider` - the plain-checkout `CheckoutProvider` (a ProjFS provider on Windows would
-     implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
+   - `Workspaces`: `IWorkspaceProvider` - the plain-checkout `CheckoutProvider`, which writes files in full or, for a
+     lazy folder, as placeholders that `Placeholders` hydrates on first use (behind `ILazyFolders`, the virtual file
+     system the frontend implements), with an optional `IFileMaterializer` that creates files more cheaply than writing
      them - its tree state, `ContextSpec` (a workspace's context-spec, stored on its record, and the boundary its
      snapshots enforce), and `WorkspaceClient`, which snapshots and keeps folders in step with the record's tree and
      context.
-2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
+2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), lazy folders (`Lazy`: `FuseServer`, a libfuse 3
+   passthrough over the backing directory that hydrates placeholders, and `ProjFsServer`, a ProjFS provider over it
+   (the `Microsoft.Windows.ProjFS` package), each served by `workspace serve`), the store implementations that need more than the core
    may use (`Stores`: `PostgresState` (`bassia-server` and local monorepos) for heads, path index and leases and `PostgresTreeStore` for trees; `S3ObjectStore` and
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive

@@ -272,7 +272,7 @@ public class WorkspaceDiskTests
 		var repo = await TestRepo.CreateAsync();
 		using var dir = new TempDir();
 		var client = new WorkspaceClient(repo.Repo, repo.Landing, dir.Combine(".state"), "tester",
-			(root, _) => new CheckoutProvider(root, repo.Repo) { TracksExecutable = false });
+			(root, _, _) => new CheckoutProvider(root, repo.Repo) { TracksExecutable = false });
 		var setup = await repo.Workspaces.CreateAsync("setup", "tester");
 		var working = await repo.Repo.Objects.ReadCommitAsync(setup.Record.Working);
 		var tree = await repo.Repo.Trees.EditAsync(working.Tree,

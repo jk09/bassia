@@ -86,7 +86,8 @@ internal sealed class Monorepo : IDisposable
 		Clones = new CloneCache(Path.Combine(BassiaDir, "clones"), Repo, Cloner ?? FileCloners.Platform());
 		var cloneSetting = Config.Get("workspace.clone");
 		Workspaces = new WorkspaceClient(Repo, Landing, Path.Combine(BassiaDir, "workspaces"), User,
-			(folder, _) => new CheckoutProvider(folder, Repo) { Materializer = Clones.For(folder, cloneSetting) }, monorepoRoot: Root);
+			(folder, _, lazy) => new CheckoutProvider(folder, Repo) { Materializer = lazy ? null : Clones.For(folder, cloneSetting), Lazy = lazy }, monorepoRoot: Root,
+			lazyFolders: Lazy.LazyFolders.Platform(this));
 	}
 
 	public string Root { get; }
@@ -296,6 +297,22 @@ internal sealed class Monorepo : IDisposable
 		}
 
 		return await ExpandContextAsync(given, Policy, ct);
+	}
+
+	/// <summary>
+	/// Whether a new workspace folder is lazy: <c>-materialize</c> if given (<paramref name="given"/>), else this
+	/// machine's <c>workspace.materialize</c> setting.
+	/// </summary>
+	public bool IsLazy(string? given)
+	{
+		try
+		{
+			return Materialize.IsLazy(given ?? Config.Get("workspace.materialize"));
+		}
+		catch (VersionException ex)
+		{
+			throw new MonorepoException(ex.Message);
+		}
 	}
 
 	/// <summary>Expands <c>@profile</c> references (from mainline's <c>.bassia.toml</c>) and parses the rules.</summary>

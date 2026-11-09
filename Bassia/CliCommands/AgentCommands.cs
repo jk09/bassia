@@ -21,7 +21,7 @@ internal static class AgentCommands
 
 		return new AgentRunOptions(prompt, command, invocation.Get("workspace"), invocation.Get("name"), invocation.Get("on"), invocation.Get("model"),
 			invocation.Has("land"), invocation.Has("keep"), invocation.List("lease"), TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"),
-			Context: invocation.Has("context") ? invocation.List("context") : null);
+			Context: invocation.Has("context") ? invocation.List("context") : null, Materialize: invocation.Get("materialize"));
 	}
 
 	public static async Task<int> StartAsync(Invocation invocation)
@@ -85,6 +85,11 @@ internal static class AgentCommands
 		if (invocation.List("context") is { Count: > 0 } context)
 		{
 			args.AddRange(["-context", string.Join(',', context)]);
+		}
+
+		if (invocation.Get("materialize") is { } materialize)
+		{
+			args.AddRange(["-materialize", materialize]);
 		}
 
 		if (invocation.Get("prompt") is { } prompt)
@@ -232,7 +237,7 @@ internal static class AgentCommands
 		var options = new AgentRunOptions(recipe.Prompt, recipe.Command, null, name, null, recipe.Model, invocation.Has("land"), false, invocation.List("lease"),
 			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"), ReplayOf: original.Id, ChangeId: working.ChangeId,
 			// A replay contains what the original contained, unless told otherwise.
-			Context: invocation.Has("context") ? invocation.List("context") : null);
+			Context: invocation.Has("context") ? invocation.List("context") : null, Materialize: invocation.Get("materialize"));
 		await monorepo.Workspaces.Service.SetStatusAsync(original.Id, WorkspaceStatus.Replaced, "replaced by a replay", monorepo.User);
 		var result = await runner.RunAsync(options, Console.WriteLine);
 		var data = await WorkspaceAsync(monorepo.Repo, result.Workspace);

@@ -9,8 +9,10 @@ using Bassia.Core.Text;
 using Bassia.Core.Version;
 
 /// <summary>What the workspace last saw at a path: the tree's leaf, the file's size and modification time on disk, and
-/// the id the disk bytes hash to (equal to the leaf's id, except for a conflict materialized with markers).</summary>
-public sealed record TreeStateEntry(Leaf Leaf, long Size, long Mtime, ObjectId DiskId);
+/// the id the disk bytes hash to (equal to the leaf's id, except for a conflict materialized with markers). A
+/// <see cref="Placeholder"/> was written lazily: the file has the leaf's size and mode but no content until a virtual
+/// file system hydrates it on first use (<see cref="Placeholders"/>), keeping its size and modification time.</summary>
+public sealed record TreeStateEntry(Leaf Leaf, long Size, long Mtime, ObjectId DiskId, bool Placeholder = false);
 
 /// <summary>
 /// A workspace's tree state: for each tracked path the leaf last seen plus local size and modification time, and the
@@ -28,6 +30,12 @@ public sealed class TreeState
 	/// </summary>
 	public ContextSpec Context { get; set; } = ContextSpec.All;
 
+	/// <summary>
+	/// For a lazily materialized folder: the backing directory that holds its files and placeholders, which a virtual
+	/// file system projects at the workspace's folder. Null: the folder holds the files itself.
+	/// </summary>
+	public string? Backing { get; set; }
+
 	private static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new IdConverter() } };
 
 	public static TreeState Load(string file)
@@ -42,8 +50,9 @@ public sealed class TreeState
 		{
 			Tree = data.Tree,
 			Context = ContextSpec.Of(data.Context),
+			Backing = data.Backing,
 			Entries = data.Entries.ToDictionary(entry => entry.Path, entry => new TreeStateEntry(
-				new Leaf(entry.Kind, entry.Id, entry.LeafSize, entry.Executable), entry.Size, entry.Mtime, entry.DiskId), StringComparer.Ordinal)
+				new Leaf(entry.Kind, entry.Id, entry.LeafSize, entry.Executable), entry.Size, entry.Mtime, entry.DiskId, entry.Placeholder == true), StringComparer.Ordinal)
 		};
 	}
 
@@ -51,15 +60,16 @@ public sealed class TreeState
 	{
 		Directory.CreateDirectory(Path.GetDirectoryName(file)!);
 		var data = new Stored(Tree, Context.IsAll ? null : Context.Patterns.ToList(), Entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new StoredEntry(pair.Key, pair.Value.Leaf.Kind,
-			pair.Value.Leaf.Id, pair.Value.Leaf.Size, pair.Value.Leaf.Executable, pair.Value.Size, pair.Value.Mtime, pair.Value.DiskId)).ToList());
+			pair.Value.Leaf.Id, pair.Value.Leaf.Size, pair.Value.Leaf.Executable, pair.Value.Size, pair.Value.Mtime, pair.Value.DiskId, pair.Value.Placeholder ? true : null)).ToList(), Backing);
 		var temp = file + ".tmp";
 		File.WriteAllText(temp, JsonSerializer.Serialize(data, Json));
 		File.Move(temp, file, true);
 	}
 
-	private sealed record Stored(ObjectId Tree, List<string>? Context, List<StoredEntry> Entries);
+	private sealed record Stored(ObjectId Tree, List<string>? Context, List<StoredEntry> Entries, string? Backing = null);
 
-	private sealed record StoredEntry(string Path, EntryKind Kind, ObjectId Id, long LeafSize, bool Executable, long Size, long Mtime, ObjectId DiskId);
+	private sealed record StoredEntry(string Path, EntryKind Kind, ObjectId Id, long LeafSize, bool Executable, long Size, long Mtime, ObjectId DiskId,
+		bool? Placeholder = null);
 
 	private sealed class IdConverter : JsonConverter<ObjectId>
 	{
@@ -118,6 +128,9 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 	/// <summary>The file in a workspace's root that names its monorepo and workspace; never snapshotted.</summary>
 	public const string MarkerName = ".bassia-workspace";
 
+	/// <summary>The suffix of a file a placeholder is being hydrated into; never snapshotted.</summary>
+	public const string HydratingSuffix = ".bassia-hydrate";
+
 	public string Root { get; } = Path.GetFullPath(root);
 
 	/// <summary>
@@ -128,6 +141,29 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 
 	/// <summary>Tried first for every file; null writes every file from the store.</summary>
 	public IFileMaterializer? Materializer { get; init; }
+
+	/// <summary>
+	/// Writes regular files as placeholders - the right size and mode, no content, nothing fetched - for a virtual file
+	/// system to hydrate on first use. Symlinks and conflicts are written in full.
+	/// </summary>
+	public bool Lazy { get; init; }
+
+	/// <summary>Files written as placeholders by this provider.</summary>
+	public int Placeholders { get; private set; }
+
+	/// <summary>The paths (files and directories) this provider wrote or removed since <see cref="TakeChanged"/>.</summary>
+	private readonly List<string> changed = [];
+
+	/// <summary>The paths written or removed since the last call, for a virtual file system to show again.</summary>
+	public IReadOnlyList<string> TakeChanged()
+	{
+		var paths = changed.Distinct(StringComparer.Ordinal).ToList();
+		changed.Clear();
+		return paths;
+	}
+
+	/// <summary>The modification time of placeholders: in the past, so a snapshot trusts it (no racy re-hash).</summary>
+	private readonly DateTime placeholderTime = new(DateTime.UtcNow.AddMinutes(-1).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
 
 	/// <summary>Files the materializer created, and files written from the store, by this provider.</summary>
 	public int Materialized { get; private set; }
@@ -156,22 +192,25 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 					emptied.Add(change.Path);
 				}
 
+				changed.Add(change.Path);
 				continue;
 			}
 
 			if (state.Entries.Remove(change.Path))
 			{
 				Delete(change.Path);
+				changed.Add(change.Path);
 				emptied.Add(PathNames.Parent(change.Path));
 			}
 		}
 
 		var written = changes.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && context.Contains(change.Path)).ToList();
-		// The content of every new file in a few batched round trips, before any is written.
-		await repo.Objects.PrefetchContentAsync(written.Select(change => change.New!), ct);
+		// The content of every new file in a few batched round trips, before any is written (a lazy folder fetches none).
+		await repo.Objects.PrefetchContentAsync(written.Where(change => !IsPlaceholder(change.Path, change.New!)).Select(change => change.New!), ct);
 		foreach (var change in written)
 		{
 			state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
+			changed.Add(change.Path);
 		}
 
 		RemoveEmptyDirectories(emptied);
@@ -186,6 +225,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		{
 			Delete(path);
 			state.Entries.Remove(path);
+			changed.Add(path);
 		}
 
 		RemoveEmptyDirectories(dropped.Select(PathNames.Parent));
@@ -196,14 +236,19 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			var all = await repo.Trees.DiffAsync(null, state.Tree, "", context.IsAll ? null : context.MayContainUnder, ct);
 			foreach (var change in all.Where(change => change.New?.Kind == EntryKind.Tree))
 			{
-				Directory.CreateDirectory(Full(change.Path));
+				if (!Directory.Exists(Full(change.Path)))
+				{
+					Directory.CreateDirectory(Full(change.Path));
+					changed.Add(change.Path);
+				}
 			}
 
 			var adding = all.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && context.Contains(change.Path) && !state.Entries.ContainsKey(change.Path)).ToList();
-			await repo.Objects.PrefetchContentAsync(adding.Select(change => change.New!), ct);
+			await repo.Objects.PrefetchContentAsync(adding.Where(change => !IsPlaceholder(change.Path, change.New!)).Select(change => change.New!), ct);
 			foreach (var change in adding)
 			{
 				state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
+				changed.Add(change.Path);
 				added++;
 			}
 		}
@@ -211,9 +256,17 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		return new ContextResult(added, dropped.Count);
 	}
 
+	/// <summary>Whether a lazy folder writes this file as a placeholder: every regular file but <c>.bassia.toml</c>, which a snapshot reads.</summary>
+	private bool IsPlaceholder(string path, Leaf leaf) => Lazy && leaf.Kind is EntryKind.File or EntryKind.Chunked && path != RepoPolicy.FileName;
+
 	private async Task<TreeStateEntry> WriteAsync(string path, Leaf leaf, CancellationToken ct)
 	{
 		var full = Full(path);
+		if (IsPlaceholder(path, leaf))
+		{
+			return WritePlaceholder(path, full, leaf);
+		}
+
 		Directory.CreateDirectory(Path.GetDirectoryName(full)!);
 		if (Directory.Exists(full))
 		{
@@ -271,6 +324,27 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		}
 		var info = new FileInfo(full);
 		return new TreeStateEntry(leaf, LinkOrLength(info), Mtime(info), diskId);
+	}
+
+	private TreeStateEntry WritePlaceholder(string path, string full, Leaf leaf)
+	{
+		Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+		Delete(path);
+		using (var stream = new FileStream(full, FileMode.CreateNew, FileAccess.Write))
+		{
+			// Sparse: the size a listing shows, without the content.
+			stream.SetLength(leaf.Size);
+		}
+
+		if (TracksExecutable)
+		{
+			SetExecutable(full, leaf.Executable);
+		}
+
+		File.SetLastWriteTimeUtc(full, placeholderTime);
+		Placeholders++;
+		var info = new FileInfo(full);
+		return new TreeStateEntry(leaf, info.Length, Mtime(info), leaf.Id, Placeholder: true);
 	}
 
 	private async Task<bool> TryMaterializeAsync(Leaf leaf, string full, CancellationToken ct)
@@ -336,6 +410,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 				}
 
 				Directory.Delete(full);
+				changed.Add(dir);
 			}
 		}
 	}
@@ -365,7 +440,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			{
 				ct.ThrowIfCancellationRequested();
 				var path = PathNames.Join(dir, entry.Name);
-				if (dir.Length == 0 && entry.Name == MarkerName)
+				if ((dir.Length == 0 && entry.Name == MarkerName) || entry.Name.EndsWith(HydratingSuffix, StringComparison.Ordinal))
 				{
 					continue;
 				}
@@ -431,7 +506,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 					if (known is not null && known.DiskId == diskId && known.Leaf.Executable == executable)
 					{
 						// Touched but not changed (or a conflict left as materialized): only the stat is new.
-						state.Entries[path] = known with { Size = size, Mtime = mtime };
+						state.Entries[path] = known with { Size = size, Mtime = mtime, Placeholder = false };
 						unchanged++;
 						continue;
 					}
@@ -513,5 +588,47 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		{
 			File.SetUnixFileMode(full, wanted);
 		}
+	}
+}
+
+/// <summary>
+/// Hydrates placeholders: what a virtual file system (FUSE, ProjFS) calls before a file is first read or changed.
+/// A placeholder is hydrated only while it is still untouched - its size and modification time those its tree state
+/// recorded - and keeps both, so a snapshot still sees it unchanged.
+/// </summary>
+public static class Placeholders
+{
+	/// <summary>
+	/// Writes the content of the placeholder at <paramref name="path"/> (under <paramref name="root"/>) in place, if it
+	/// is one and still untouched; true when it wrote it.
+	/// </summary>
+	public static async Task<bool> HydrateAsync(Repository repo, string root, string path, TreeStateEntry entry, CancellationToken ct = default)
+	{
+		if (!entry.Placeholder || entry.Leaf.Kind is not (EntryKind.File or EntryKind.Chunked))
+		{
+			return false;
+		}
+
+		var full = Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar));
+		var info = new FileInfo(full);
+		if (!info.Exists || info.LinkTarget is not null || info.Length != entry.Size || info.LastWriteTimeUtc.Ticks != entry.Mtime)
+		{
+			return false;
+		}
+
+		var temp = full + CheckoutProvider.HydratingSuffix;
+		await using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+		{
+			await repo.Objects.CopyContentAsync(entry.Leaf, stream, ct);
+		}
+
+		if (!OperatingSystem.IsWindows())
+		{
+			File.SetUnixFileMode(temp, File.GetUnixFileMode(full));
+		}
+
+		File.SetLastWriteTimeUtc(temp, new DateTime(entry.Mtime, DateTimeKind.Utc));
+		File.Move(temp, full, true);
+		return true;
 	}
 }
