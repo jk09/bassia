@@ -131,6 +131,7 @@ public sealed class LazyFolderTests : IDisposable
 		private readonly CancellationTokenSource stop = new();
 		private Thread? thread;
 		private Func<int>? hydrated;
+		private Exception? failure;
 
 		public string? Control { get; private set; }
 
@@ -147,17 +148,41 @@ public sealed class LazyFolderTests : IDisposable
 				Control = ProjFsServer.ControlDirectory(local.StateFile);
 				var server = new ProjFsServer(local.Files, local.Root, Control, hydrator.Hydrate);
 				hydrated = () => server.Hydrated;
-				thread = new Thread(() => server.Run(stop.Token)) { IsBackground = true };
+				thread = new Thread(() => Guard(() => server.Run(stop.Token))) { IsBackground = true };
 				thread.Start();
-				await WaitAsync(() => ProjFsControl.IsServing(Control));
+				await WaitAsync(() => ProjFsControl.IsServing(Control) || failure is not null);
+				ThrowIfFailed();
 			}
 			else
 			{
 				var server = new FuseServer(local.Files, hydrator.Hydrate);
 				hydrated = () => server.Hydrated;
-				thread = new Thread(() => server.Run(local.Root)) { IsBackground = true };
+				thread = new Thread(() => Guard(() => server.Run(local.Root))) { IsBackground = true };
 				thread.Start();
-				await WaitAsync(() => IsMountPoint(local.Root));
+				await WaitAsync(() => IsMountPoint(local.Root) || failure is not null);
+				ThrowIfFailed();
+			}
+		}
+
+		/// <summary>A server that fails must fail the test, not crash the test host from its thread.</summary>
+		private void Guard(Action serve)
+		{
+			try
+			{
+				serve();
+			}
+			catch (Exception ex)
+			{
+				failure = ex;
+			}
+		}
+
+		/// <summary>Throws what the server failed with, if it did.</summary>
+		public void ThrowIfFailed()
+		{
+			if (failure is not null)
+			{
+				throw new InvalidOperationException($"The lazy folder server failed: {failure}", failure);
 			}
 		}
 
@@ -238,6 +263,8 @@ public sealed class LazyFolderTests : IDisposable
 		{
 			server.Stop();
 		}
+
+		server.ThrowIfFailed();
 
 		if (!OperatingSystem.IsWindows())
 		{
@@ -345,9 +372,18 @@ public sealed class LazyFolderTests : IDisposable
 
 		public string? Unavailable => null;
 
+		private bool mounted;
+
+		/// <summary>Mounts once, like the real ones: a snapshot of a ProjFS folder asks for the mount every time.</summary>
 		public async Task MountAsync(LocalWorkspace local, CancellationToken ct = default)
 		{
+			if (mounted)
+			{
+				return;
+			}
+
 			Mounts++;
+			mounted = true;
 			if (mount is not null)
 			{
 				await mount(local);
@@ -357,10 +393,11 @@ public sealed class LazyFolderTests : IDisposable
 		public Task UnmountAsync(LocalWorkspace local, CancellationToken ct = default)
 		{
 			Unmounts++;
+			mounted = false;
 			return Task.CompletedTask;
 		}
 
-		public bool IsMounted(LocalWorkspace local) => false;
+		public bool IsMounted(LocalWorkspace local) => mounted;
 
 		public bool ScansFolder { get; set; }
 
@@ -370,6 +407,7 @@ public sealed class LazyFolderTests : IDisposable
 		public Task RemoveFolderAsync(LocalWorkspace local, CancellationToken ct = default)
 		{
 			Unmounts++;
+			mounted = false;
 			if (Directory.Exists(local.Root))
 			{
 				Directory.Delete(local.Root, true);
