@@ -62,7 +62,6 @@ internal sealed class ProjFsServer : IRequiredCallbacks
 	{
 		Directory.CreateDirectory(Requests(control));
 		File.Delete(StopFile(control));
-		using var serving = new FileStream(LockFile(control), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 		Directory.CreateDirectory(root);
 		var idFile = Path.Combine(control, "instance.id");
 		if (!File.Exists(idFile))
@@ -74,9 +73,12 @@ internal sealed class ProjFsServer : IRequiredCallbacks
 
 		instance = new VirtualizationInstance(root, 0, 0, false, []);
 		Check(instance.StartVirtualizing(this), "start virtualizing");
-		log?.Invoke($"serving '{backing}' at '{root}'");
+		FileStream? serving = null;
 		try
 		{
+			// Held only once the folder is virtualized: holding it is what tells commands the folder is served.
+			serving = new FileStream(LockFile(control), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+			log?.Invoke($"serving '{backing}' at '{root}'");
 			while (!ct.IsCancellationRequested && !File.Exists(StopFile(control)))
 			{
 				ProcessRequests();
@@ -91,6 +93,7 @@ internal sealed class ProjFsServer : IRequiredCallbacks
 			instance.Dispose();
 			instance = null;
 			File.Delete(StopFile(control));
+			serving?.Dispose();
 			log?.Invoke($"stopped serving '{root}' ({Hydrated} placeholder(s) hydrated)");
 		}
 	}
