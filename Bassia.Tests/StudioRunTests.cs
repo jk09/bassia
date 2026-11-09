@@ -192,8 +192,8 @@ public sealed class StudioRunTests : IAsyncLifetime
 	[PostgresFact]
 	public void Arguments_PutTheCommandLast()
 	{
-		var start = RunService.Arguments(new RunSpec(Command: "make test -j 4", On: "base", Name: "n", Land: true, Leases: ["src", "docs"], Load: ["src/"]), "run-1");
-		Assert.Equal(["agent", "start", "-run-id", "run-1", "-on", "base", "-name", "n", "-load", "src/", "-land", "-lease", "src,docs", "-run", "make test -j 4"], start);
+		var start = RunService.Arguments(new RunSpec(Command: "make test -j 4", On: "base", Name: "n", Land: true, Leases: ["src", "docs"], Context: ["src/"]), "run-1");
+		Assert.Equal(["agent", "start", "-run-id", "run-1", "-on", "base", "-name", "n", "-context", "src/", "-land", "-lease", "src,docs", "-run", "make test -j 4"], start);
 		var replay = RunService.Arguments(new RunSpec(ReplayOf: "w123", Land: true), "run-2");
 		Assert.Equal(["agent", "replay", "w123", "-run-id", "run-2", "-land"], replay);
 	}

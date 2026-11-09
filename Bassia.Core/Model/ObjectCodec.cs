@@ -326,7 +326,9 @@ public static class ObjectCodec
 
 	private static void WriteWorkspace(CborWriter writer, WorkspaceRecord workspace)
 	{
-		writer.WriteStartArray(15);
+		// The context-spec is a 16th item only when set, so records without one keep their encoding (and object ids).
+		var context = workspace.Context is { Count: > 0 } rules ? rules : null;
+		writer.WriteStartArray(context is null ? 15 : 16);
 		writer.WriteTextString(workspace.Id);
 		writer.WriteTextString(workspace.Name);
 		WriteText(writer, workspace.Parent);
@@ -409,6 +411,17 @@ public static class ObjectCodec
 
 		WriteText(writer, workspace.ReplayOf);
 		WriteOptionalTime(writer, workspace.Closed);
+		if (context is not null)
+		{
+			writer.WriteStartArray(context.Count);
+			foreach (var rule in context)
+			{
+				writer.WriteTextString(rule);
+			}
+
+			writer.WriteEndArray();
+		}
+
 		writer.WriteEndArray();
 	}
 
@@ -478,8 +491,21 @@ public static class ObjectCodec
 
 		var replayOf = ReadText(reader);
 		var closed = ReadOptionalTime(reader);
+		List<string>? context = null;
+		if (reader.PeekState() != CborReaderState.EndArray)
+		{
+			var count = reader.ReadStartArray() ?? throw new InvalidDataException("Indefinite array.");
+			context = new List<string>(count);
+			for (var index = 0; index < count; index++)
+			{
+				context.Add(reader.ReadTextString());
+			}
+
+			reader.ReadEndArray();
+		}
+
 		reader.ReadEndArray();
-		return new WorkspaceRecord(id, name, parent, baseCommit, baseSeq, working, status, created, owner, path, host, run, land, replayOf, closed);
+		return new WorkspaceRecord(id, name, parent, baseCommit, baseSeq, working, status, created, owner, path, host, run, land, replayOf, closed, context);
 	}
 
 	private static Candidate ReadCandidate(CborReader reader)

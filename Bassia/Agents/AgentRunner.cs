@@ -5,6 +5,7 @@ using System.Text;
 using Bassia.Core.Model;
 using Bassia.Core.Storage;
 using Bassia.Core.Version;
+using Bassia.Core.Workspaces;
 
 /// <summary>What an agentic run should do.</summary>
 internal sealed record AgentRunOptions(
@@ -21,7 +22,7 @@ internal sealed record AgentRunOptions(
 	string? RunId = null,
 	string? ReplayOf = null,
 	ChangeId? ChangeId = null,
-	IReadOnlyList<string>? Load = null);
+	IReadOnlyList<string>? Context = null);
 
 /// <summary>How a run ended.</summary>
 internal sealed record AgentRunResult(string RunId, WorkspaceState Workspace, RunRecord Run, IReadOnlyList<PathChange> Changes, LandResult? Land, string LogFile);
@@ -69,8 +70,13 @@ internal sealed class AgentRunner(Monorepo monorepo)
 
 			if (monorepo.Workspaces.Local(existing) is null)
 			{
-				await monorepo.Workspaces.CheckOutAsync(existing, existing.Record.Path is { } path && !Directory.Exists(path) ? path : monorepo.DefaultWorkspacePath(existing.Name),
-					await monorepo.ResolveLoadAsync(options.Load, ct), ct);
+				await monorepo.Workspaces.CheckOutAsync(existing, existing.Record.Path is { } path && !Directory.Exists(path) ? path : monorepo.DefaultWorkspacePath(existing.Name), ct);
+			}
+
+			if (options.Context is { } rules)
+			{
+				// -context on a run in an existing workspace changes that workspace's context-spec first.
+				await monorepo.Workspaces.SetContextAsync((await monorepo.Repo.FindWorkspaceAsync(existing.Id, ct))!, await monorepo.ExpandContextAsync(rules, null, ct), ct);
 			}
 
 			return (await monorepo.Repo.FindWorkspaceAsync(existing.Id, ct))!;
@@ -80,8 +86,13 @@ internal sealed class AgentRunner(Monorepo monorepo)
 		var name = options.Name ?? await monorepo.Repo.FreeWorkspaceNameAsync(Slug(options.Prompt ?? options.Command ?? "run") + "-" + runId[RunPrefix.Length..].Split('-')[^1], ct);
 		var (agent, line) = CommandLine(options);
 		var recipe = new ReplayRecipe(options.Prompt, options.Command, agent, options.Model ?? monorepo.Config.GetOrNull("agent.model"));
+		// A replay contains what the original contained, and a stacked run what its parent contains, unless -context says otherwise.
+		var inherited = options.ReplayOf is { } original && await monorepo.Repo.FindWorkspaceAsync(original, ct) is { } replayed
+			? ContextSpec.Of(replayed.Record.Context)
+			: null;
+		var context = options.On is not null && options.Context is null ? null : await monorepo.ResolveContextAsync(options.Context, inherited, ct);
 		var (state, _) = await monorepo.Workspaces.CreateAsync(name, monorepo.DefaultWorkspacePath(name), options.On, options.Prompt ?? line, recipe,
-			options.ChangeId, options.ReplayOf, await monorepo.ResolveLoadAsync(options.Load, ct), ct);
+			options.ChangeId, options.ReplayOf, context, ct);
 		return state;
 	}
 
@@ -134,7 +145,9 @@ internal sealed class AgentRunner(Monorepo monorepo)
 				{
 					["BASSIA_RUN_ID"] = runId,
 					["BASSIA_WORKSPACE"] = workspace.Id,
-					["BASSIA_MONOREPO"] = monorepo.Root
+					["BASSIA_MONOREPO"] = monorepo.Root,
+					// What the workspace contains: the agent may read and change only these paths ('all': everything).
+					["BASSIA_CONTEXT"] = ContextSpec.Of(workspace.Record.Context).ToString()
 				};
 				exit = await ShellCommand.RunAsync(line, local.Root, environment, null, text =>
 				{
@@ -166,10 +179,24 @@ internal sealed class AgentRunner(Monorepo monorepo)
 
 		// The result: snapshot what the agent changed, keep the log with the run.
 		var current = (await monorepo.Repo.FindWorkspaceAsync(workspace.Id, CancellationToken.None))!;
-		var snapshot = await monorepo.Workspaces.SnapshotAsync(current, runId, CancellationToken.None);
+		SnapshotResult snapshot;
+		string? refused = null;
+		try
+		{
+			snapshot = await monorepo.Workspaces.SnapshotAsync(current, runId, CancellationToken.None);
+		}
+		catch (ContextBoundaryException ex)
+		{
+			// The agent changed paths outside the workspace's context: the run fails and nothing of its last edits is taken.
+			refused = "bassia: " + ex.Message;
+			await File.AppendAllTextAsync(log, refused + Environment.NewLine, CancellationToken.None);
+			output?.Invoke(refused);
+			snapshot = new SnapshotResult(current, [], 0, true);
+		}
+
 		var logLeaf = await monorepo.Repo.Objects.WriteContentAsync(await File.ReadAllBytesAsync(log, CancellationToken.None), false, CancellationToken.None);
-		var status = exit is null ? RunStatus.Stopped : exit == 0 ? RunStatus.Succeeded : RunStatus.Failed;
-		run = run with { Status = status, Finished = DateTimeOffset.UtcNow, ExitCode = exit, Log = logLeaf.Kind == EntryKind.File ? logLeaf.Id : null, LastLine = Trim(lastLine) };
+		var status = exit is null ? RunStatus.Stopped : exit == 0 && refused is null ? RunStatus.Succeeded : RunStatus.Failed;
+		run = run with { Status = status, Finished = DateTimeOffset.UtcNow, ExitCode = exit, Log = logLeaf.Kind == EntryKind.File ? logLeaf.Id : null, LastLine = Trim(refused ?? lastLine) };
 		var recorded = await monorepo.Workspaces.Service.RecordRunAsync(workspace.Id, run, $"run {runId} {status}", CancellationToken.None);
 
 		LandResult? land = null;

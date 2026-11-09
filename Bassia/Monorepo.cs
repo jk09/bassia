@@ -264,38 +264,57 @@ internal sealed class Monorepo : IDisposable
 
 	/// <summary>A workspace by reference, or the one the current directory is in.</summary>
 	/// <summary>
-	/// The load rules for a new workspace folder: the ones given (null: none given), else this machine's
-	/// <c>workspace.load</c>, else the <c>[load] default</c> of mainline's <c>.bassia.toml</c>, else everything.
-	/// <c>@name</c> stands for that profile of <c>[load.profiles]</c>; "all" for everything.
+	/// The context-spec for a new workspace: the rules given (null: none given), else <paramref name="inherited"/> (the
+	/// source's, for a stacked or cloned workspace or a replay), else the <c>[context] default</c> of mainline's
+	/// <c>.bassia.toml</c>, else everything. <c>@name</c> stands for that profile of <c>[context.profiles]</c>; "all" for
+	/// everything. Profiles are expanded: the workspace records the rules themselves.
 	/// </summary>
-	public async Task<LoadRules> ResolveLoadAsync(IReadOnlyList<string>? given, CancellationToken ct = default)
+	public async Task<ContextSpec?> ResolveContextAsync(IReadOnlyList<string>? given, ContextSpec? inherited = null, CancellationToken ct = default)
 	{
-		var configured = Config.GetOrNull("workspace.load");
-		RepoPolicy? policy = null;
-		async Task<RepoPolicy> Policy() => policy ??= await RepoPolicy.LoadAsync(Repo.Trees, (await Repo.GetMainAsync(ct)).Tree, ct);
-		var patterns = given ?? (configured is { Length: > 0 } ? configured.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : null)
-			?? (await Policy()).LoadDefault;
-		var expanded = new List<string>();
-		foreach (var pattern in patterns)
+		if (given is null && inherited is not null)
 		{
-			if (pattern.StartsWith('@'))
-			{
-				var profiles = (await Policy()).LoadProfiles;
-				if (!profiles.TryGetValue(pattern[1..], out var profile))
-				{
-					throw new MonorepoException($"No load profile '{pattern[1..]}' in {RepoPolicy.FileName} [load.profiles]" +
-						(profiles.Count == 0 ? " (it defines none)." : $"; it defines: {string.Join(", ", profiles.Keys)}."));
-				}
-
-				expanded.AddRange(profile);
-			}
-			else
-			{
-				expanded.Add(pattern);
-			}
+			return inherited;
 		}
 
-		return LoadRules.Parse(expanded);
+		RepoPolicy? policy = null;
+		async Task<RepoPolicy> Policy() => policy ??= await RepoPolicy.LoadAsync(Repo.Trees, (await Repo.GetMainAsync(ct)).Tree, ct);
+		if (given is null)
+		{
+			var main = await Policy();
+			if (main.HasLoadTable && main.ContextDefault.Count == 0 && main.ContextProfiles.Count == 0)
+			{
+				throw new MonorepoException($"{RepoPolicy.FileName} on mainline still has a [load] table: load rules were replaced by context-specs. " +
+					"Rename [load] to [context] (and [load.profiles] to [context.profiles]) and land it, or give -context <rules>.");
+			}
+
+			if (main.ContextDefault.Count == 0)
+			{
+				return null;
+			}
+
+			given = main.ContextDefault;
+		}
+
+		return await ExpandContextAsync(given, Policy, ct);
+	}
+
+	/// <summary>Expands <c>@profile</c> references (from mainline's <c>.bassia.toml</c>) and parses the rules.</summary>
+	public async Task<ContextSpec> ExpandContextAsync(IReadOnlyList<string> given, Func<Task<RepoPolicy>>? policy = null, CancellationToken ct = default)
+	{
+		if (!ContextSpec.NamesProfile(given))
+		{
+			return ContextSpec.Parse(given);
+		}
+
+		policy ??= async () => await RepoPolicy.LoadAsync(Repo.Trees, (await Repo.GetMainAsync(ct)).Tree, ct);
+		try
+		{
+			return ContextSpec.Resolve(given, await policy());
+		}
+		catch (VersionException ex)
+		{
+			throw new MonorepoException(ex.Message);
+		}
 	}
 
 	public async Task<WorkspaceState> WorkspaceAsync(string? reference, CancellationToken ct = default)

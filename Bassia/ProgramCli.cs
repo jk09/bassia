@@ -58,6 +58,8 @@ internal static class ProgramCli
 			var path = command.Lineage.Select(part => part.Name).ToList();
 			return unmatched.Count == 0 || IsHelp(unmatched[0]) || helpRequested
 				? Help.Show(path)
+				: CommandTable.ReplacedSubcommands.TryGetValue($"{command.FullName} {unmatched[0]}", out var gone)
+					? UsageError($"{command.FullName} {unmatched[0].ToLowerInvariant()}", gone)
 				: UsageError(command.FullName, $"'bassia {command.FullName}' has no subcommand '{unmatched[0]}'; it has {string.Join(", ", command.Nested.Select(child => child.Name))}. Run 'bassia help {command.FullName}'.");
 		}
 
@@ -98,7 +100,10 @@ internal static class ProgramCli
 		var rest = line.Rest;
 		if (line.UnknownSwitches.Count > 0)
 		{
-			return Invocation.Usage(command, $"Unknown switch '{line.UnknownSwitches[0]}'.");
+			var unknown = line.UnknownSwitches[0];
+			return Invocation.Usage(command, CommandTable.ReplacedSwitches.TryGetValue(unknown.TrimStart('-'), out var replaced)
+				? $"Unknown switch '{unknown}'. {replaced}"
+				: $"Unknown switch '{unknown}'.");
 		}
 
 		if (rest is { Text.Length: 0 } && command.FindSwitch(rest.Switch) is { } restOption)

@@ -40,6 +40,7 @@ internal static class Results
 			["path"] = record.Path,
 			["host"] = record.Host,
 			["replay_of"] = record.ReplayOf,
+			["context"] = record.Context is { Count: > 0 } context ? context.ToList() : new List<string> { "all" },
 			["operations"] = state.Operation.Seq + 1
 		};
 		if (record.Run is { } run)

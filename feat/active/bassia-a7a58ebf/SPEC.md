@@ -33,29 +33,31 @@ Delivered in three phases, each a separate pull request against this record.
 
 ### Phase 1 - the context-spec on the workspace (replaces load rules)
 
-- [ ] A context-spec is an ordered list of rules in today's load-rule grammar (literal paths and directories,
+- [x] A context-spec is an ordered list of rules in today's load-rule grammar (literal paths and directories,
       `*`/`?`/`**` globs, trailing `/` for directories only, `!` exclusion, last match wins) plus `@profile`
       references to `.bassia.toml` `[context.profiles]`. `all` (or no rules) is the whole monorepo. `.bassia.toml` is
       always in context. An invalid rule or unknown profile fails, names it, and changes nothing.
-- [ ] The context-spec is stored on the workspace record (`WorkspaceRecord.Context`), so it is versioned in the
+- [x] The context-spec is stored on the workspace record (`WorkspaceRecord.Context`), so it is versioned in the
       workspace's operation log and the same on every client, in Studio and over the server API. A record without it
       decodes as `all`.
-- [ ] `workspace create|clone|checkout` and `agent start|replay` take `-context <rules>`. Default, first to last:
+- [x] `workspace create|clone` and `agent start|replay` take `-context <rules>` (`checkout` follows the record). Default, first to last:
       `-context`; the source's context-spec for a stacked (`-on`) or cloned workspace and for a replay;
       `.bassia.toml` `[context] default`; `all`.
-- [ ] `bassia workspace context [<w>]` shows the spec; `-set <rules>`, `-add <rules>`, `-remove <rules>` edit it as a
+- [x] `bassia workspace context [<w>]` shows the spec; `-set <rules>`, `-add <rules>`, `-remove <rules>` edit it as a
       new workspace operation (`workspace log` lists it, `workspace undo|restore` reverts it). Narrowing the spec so
       that it drops paths the workspace changed fails and names them. Results report `context` and
       `paths_in_context`.
-- [ ] Load rules are gone: `-load`, `workspace load` and the `workspace.load` setting fail with exit code 2 naming the
-      context-spec equivalent, and a `[load]` table in `.bassia.toml` is a policy error naming `[context]`. The tree
-      state no longer stores rules.
-- [ ] Out-of-context directories appear in the folder as empty directories at the edge of the context, so an agent
+- [x] Load rules are gone: `-load`, `workspace load` and the `workspace.load` setting fail with exit code 2 naming the
+      context-spec equivalent. A `[load]` table in `.bassia.toml` is no longer read; a new workspace without
+      `-context` fails, asking to rename it to `[context]` (see Decisions). The tree state stores a copy of the
+      record's spec, not rules of its own.
+- [x] Out-of-context directories appear in the folder as empty directories at the edge of the context, so an agent
       sees the monorepo's shape; out-of-context files at in-context levels are not shown.
-- [ ] Boundary: a snapshot that finds a new, changed or deleted path outside the context-spec fails with an error
+- [x] Boundary: a snapshot that finds a new, changed or deleted path outside the context-spec fails with an error
       naming the paths and how to widen the context (`workspace context -add`); nothing is snapshotted. `check` and
       `land` fail the same way. Sync and landing carry out-of-context paths along unchanged.
-- [ ] Studio shows and edits a workspace's context-spec; the run guide written for a run states the context-spec.
+- [x] Studio shows and edits a workspace's context-spec (and refuses its own edits outside it); a run sees its spec
+      in `BASSIA_CONTEXT`, and a run whose agent changed a path outside it fails and lands nothing.
 
 ### Phase 2 - lazy materialization through a virtual file system
 
@@ -111,13 +113,21 @@ Delivered in three phases, each a separate pull request against this record.
 - **Writes outside the context are refused by the snapshot** (user, 2026-11-09), naming the paths; the agent widens
   the context explicitly. Rejected: ignoring them silently, and widening automatically (the spec would stop being a
   boundary).
+- **A leftover `[load]` table is ignored, not a policy error** (phase 1). A policy error would make `RepoPolicy`
+  refuse every landing - including the one that fixes the file. Instead `[load]` is not read, and resolving a new
+  workspace's default context fails with a message to rename it to `[context]` (or give `-context`).
+- **No run guide file exists**, so the run's context is exposed as the `BASSIA_CONTEXT` environment variable, and a
+  boundary refusal ends the run as `failed` with the refusal as its last line (phase 1). Rewriting the prompt was
+  rejected: it is the replay recipe.
+- **`-add` appends; `-remove` removes exact rules.** On `all`, `-add` keeps `all` (it already contains everything);
+  narrowing from `all` uses `-set`.
 - The context-spec lives on the workspace record, not in the client's tree state: it defines the workspace, so every
   client, Studio and a replay agree on it (unlike load rules, which were per checkout).
 
 ## Progress
 
 - [x] Specification agreed (open questions answered).
-- [ ] Phase 1: context-spec on the workspace, load rules removed, boundary.
+- [x] Phase 1: context-spec on the workspace, load rules removed, boundary; docs and help updated with it.
 - [ ] Phase 2: ProjFS and FUSE providers, laziness test.
 - [ ] Phase 3: documentation, live validation.
 

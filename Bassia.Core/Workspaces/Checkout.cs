@@ -22,8 +22,11 @@ public sealed class TreeState
 
 	public Dictionary<string, TreeStateEntry> Entries { get; init; } = new(StringComparer.Ordinal);
 
-	/// <summary>What the folder loads (<see cref="LoadRules"/>); everything by default. Only loaded paths are tracked.</summary>
-	public LoadRules Rules { get; set; } = LoadRules.All;
+	/// <summary>
+	/// The context-spec the folder holds (<see cref="ContextSpec"/>): a copy of the workspace record's, as it was when the
+	/// folder was last brought in step with it. Only in-context paths are tracked.
+	/// </summary>
+	public ContextSpec Context { get; set; } = ContextSpec.All;
 
 	private static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new IdConverter() } };
 
@@ -38,7 +41,7 @@ public sealed class TreeState
 		return new TreeState
 		{
 			Tree = data.Tree,
-			Rules = data.Load is { Count: > 0 } load ? new LoadRules(load) : LoadRules.All,
+			Context = ContextSpec.Of(data.Context),
 			Entries = data.Entries.ToDictionary(entry => entry.Path, entry => new TreeStateEntry(
 				new Leaf(entry.Kind, entry.Id, entry.LeafSize, entry.Executable), entry.Size, entry.Mtime, entry.DiskId), StringComparer.Ordinal)
 		};
@@ -47,14 +50,14 @@ public sealed class TreeState
 	public void Save(string file)
 	{
 		Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-		var data = new Stored(Tree, Rules.IsAll ? null : Rules.Patterns.ToList(), Entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new StoredEntry(pair.Key, pair.Value.Leaf.Kind,
+		var data = new Stored(Tree, Context.IsAll ? null : Context.Patterns.ToList(), Entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new StoredEntry(pair.Key, pair.Value.Leaf.Kind,
 			pair.Value.Leaf.Id, pair.Value.Leaf.Size, pair.Value.Leaf.Executable, pair.Value.Size, pair.Value.Mtime, pair.Value.DiskId)).ToList());
 		var temp = file + ".tmp";
 		File.WriteAllText(temp, JsonSerializer.Serialize(data, Json));
 		File.Move(temp, file, true);
 	}
 
-	private sealed record Stored(ObjectId Tree, List<string>? Load, List<StoredEntry> Entries);
+	private sealed record Stored(ObjectId Tree, List<string>? Context, List<StoredEntry> Entries);
 
 	private sealed record StoredEntry(string Path, EntryKind Kind, ObjectId Id, long LeafSize, bool Executable, long Size, long Mtime, ObjectId DiskId);
 
@@ -92,18 +95,22 @@ public interface IWorkspaceProvider
 	/// <summary>Makes the directory hold <paramref name="to"/>, given it holds <paramref name="state"/>'s tree.</summary>
 	Task UpdateAsync(TreeState state, ObjectId to, CancellationToken ct = default);
 
-	/// <summary>Finds what changed on disk since <paramref name="state"/> and stores the new content (only missing chunks are uploaded).</summary>
-	Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default);
+	/// <summary>
+	/// Finds what changed on disk since <paramref name="state"/> and stores the new content (only missing chunks are
+	/// uploaded). A change to a path outside <paramref name="context"/> (default: the state's) fails the whole scan with
+	/// a <see cref="ContextBoundaryException"/> before anything is stored.
+	/// </summary>
+	Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default, ContextSpec? context = null);
 
 	/// <summary>
-	/// Changes what the directory loads: writes the paths <paramref name="rules"/> add and removes the ones it drops,
-	/// for the tree it holds. Snapshot first: a dropped path's local edits are not kept.
+	/// Brings the directory in step with a new context-spec: writes the paths <paramref name="context"/> adds and removes
+	/// the ones it drops, for the tree it holds. Snapshot first: a dropped path's local edits are not kept.
 	/// </summary>
-	Task<LoadResult> LoadAsync(TreeState state, LoadRules rules, CancellationToken ct = default);
+	Task<ContextResult> ApplyContextAsync(TreeState state, ContextSpec context, CancellationToken ct = default);
 }
 
-/// <summary>What changing a workspace's load rules did.</summary>
-public sealed record LoadResult(int Loaded, int Unloaded);
+/// <summary>What bringing a folder in step with a new context-spec did: files written, and files removed.</summary>
+public sealed record ContextResult(int Added, int Removed);
 
 /// <summary>A plain directory checkout of a workspace's tree.</summary>
 public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceProvider
@@ -132,14 +139,14 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 	public async Task UpdateAsync(TreeState state, ObjectId to, CancellationToken ct = default)
 	{
 		Directory.CreateDirectory(Root);
-		var rules = state.Rules;
-		var changes = await repo.Trees.DiffAsync(state.Tree.IsEmpty ? null : state.Tree, to, "", rules.IsAll ? null : rules.MayLoadUnder, ct);
+		var context = state.Context;
+		var changes = await repo.Trees.DiffAsync(state.Tree.IsEmpty ? null : state.Tree, to, "", context.IsAll ? null : context.MayContainUnder, ct);
 		var emptied = new List<string>();
 		foreach (var change in changes.Where(change => change.New is null || change.New.Kind == EntryKind.Tree))
 		{
 			if (change.Old?.Kind == EntryKind.Tree || change.New?.Kind == EntryKind.Tree)
 			{
-				// A directory nothing of which is loaded: shown empty, so the folder keeps the monorepo's shape.
+				// A directory nothing of which is in context: shown empty, so the folder keeps the monorepo's shape.
 				if (change.New?.Kind == EntryKind.Tree)
 				{
 					Directory.CreateDirectory(Full(change.Path));
@@ -159,7 +166,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			}
 		}
 
-		var written = changes.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && rules.IsLoaded(change.Path)).ToList();
+		var written = changes.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && context.Contains(change.Path)).ToList();
 		// The content of every new file in a few batched round trips, before any is written.
 		await repo.Objects.PrefetchContentAsync(written.Select(change => change.New!), ct);
 		foreach (var change in written)
@@ -171,10 +178,10 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		state.Tree = to;
 	}
 
-	public async Task<LoadResult> LoadAsync(TreeState state, LoadRules rules, CancellationToken ct = default)
+	public async Task<ContextResult> ApplyContextAsync(TreeState state, ContextSpec context, CancellationToken ct = default)
 	{
 		Directory.CreateDirectory(Root);
-		var dropped = state.Entries.Keys.Where(path => !rules.IsLoaded(path)).ToList();
+		var dropped = state.Entries.Keys.Where(path => !context.Contains(path)).ToList();
 		foreach (var path in dropped)
 		{
 			Delete(path);
@@ -182,26 +189,26 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		}
 
 		RemoveEmptyDirectories(dropped.Select(PathNames.Parent));
-		state.Rules = rules;
-		var loaded = 0;
+		state.Context = context;
+		var added = 0;
 		if (!state.Tree.IsEmpty)
 		{
-			var all = await repo.Trees.DiffAsync(null, state.Tree, "", rules.IsAll ? null : rules.MayLoadUnder, ct);
+			var all = await repo.Trees.DiffAsync(null, state.Tree, "", context.IsAll ? null : context.MayContainUnder, ct);
 			foreach (var change in all.Where(change => change.New?.Kind == EntryKind.Tree))
 			{
 				Directory.CreateDirectory(Full(change.Path));
 			}
 
-			var added = all.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && rules.IsLoaded(change.Path) && !state.Entries.ContainsKey(change.Path)).ToList();
-			await repo.Objects.PrefetchContentAsync(added.Select(change => change.New!), ct);
-			foreach (var change in added)
+			var adding = all.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && context.Contains(change.Path) && !state.Entries.ContainsKey(change.Path)).ToList();
+			await repo.Objects.PrefetchContentAsync(adding.Select(change => change.New!), ct);
+			foreach (var change in adding)
 			{
 				state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
-				loaded++;
+				added++;
 			}
 		}
 
-		return new LoadResult(loaded, dropped.Count);
+		return new ContextResult(added, dropped.Count);
 	}
 
 	private async Task<TreeStateEntry> WriteAsync(string path, Leaf leaf, CancellationToken ct)
@@ -333,8 +340,10 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		}
 	}
 
-	public async Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default)
+	public async Task<ScanResult> ScanAsync(TreeState state, RepoPolicy policy, bool store = true, CancellationToken ct = default, ContextSpec? context = null)
 	{
+		context ??= state.Context;
+		var outside = new List<string>();
 		var changes = new List<PathChange>();
 		var seen = new HashSet<string>(StringComparer.Ordinal);
 		var hashed = 0;
@@ -398,6 +407,13 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 					continue;
 				}
 
+				if (!context.Contains(path))
+				{
+					// A change outside the context: refused below, before anything is hashed or stored.
+					outside.Add(path);
+					continue;
+				}
+
 				hashed++;
 				Leaf leaf;
 				ObjectId diskId;
@@ -435,6 +451,14 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		if (collisions.Count > 0)
 		{
 			throw new VersionException($"Paths that differ only by case cannot be snapshotted (Windows cannot hold both): {string.Join("; ", collisions)}.");
+		}
+
+		outside.AddRange(state.Entries.Keys.Where(path => !seen.Contains(path) && !context.Contains(path)));
+		if (outside.Count > 0)
+		{
+			outside.Sort(StringComparer.Ordinal);
+			throw new ContextBoundaryException(outside, $"{outside.Count} path(s) outside the workspace's context-spec '{context}' were created, changed or deleted: " +
+				$"{ContextBoundaryException.List(outside)}. Nothing was snapshotted. Widen the context ('bassia workspace context -add <rule>') or undo those changes.");
 		}
 
 		foreach (var path in state.Entries.Keys.Where(path => !seen.Contains(path)).ToList())

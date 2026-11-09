@@ -72,13 +72,14 @@ Each step has a Claude Code skill that does the same.
    client then creates its workspaces by block cloning from its own cache: each file's content is stored once and
    shared copy-on-write, so a new workspace costs metadata, not bytes. `bassia devdrive status -path D:\clients\a`
    tells whether a folder qualifies.
-5. **Run agents in the clients.** Each run gets its own workspace in that client, landed when it succeeds. Load rules
-   (`-load`) choose what the workspace holds, so the client fetches and caches only that: here, profiles defined in
-   the monorepo's `.bassia.toml` ([load rules](docs/reference.md#load-rules-what-a-workspace-fetches-caches-and-holds)).
+5. **Run agents in the clients.** Each run gets its own workspace in that client, landed when it succeeds. A
+   workspace's context-spec (`-context`) chooses which part of the monorepo it contains, so the agent sees and changes
+   only that and the client fetches and caches only that: here, profiles defined in the monorepo's `.bassia.toml`
+   ([context-specs](docs/reference.md#context-specs-what-a-workspace-contains)).
 
    ```powershell
-   bassia -C D:\clients\a agent start -load "@api" -land -prompt "add multiply() to the calculator, with a test; run the tests"
-   bassia -C D:\clients\b agent start -load "@web" -land -detach -prompt "add a farewell page, with a test; run the tests"
+   bassia -C D:\clients\a agent start -context "@api" -land -prompt "add multiply() to the calculator, with a test; run the tests"
+   bassia -C D:\clients\b agent start -context "@web" -land -detach -prompt "add a farewell page, with a test; run the tests"
    ```
 
    To let Claude Code also build and run tests, allow the commands, and keep `-p` last:
@@ -111,8 +112,8 @@ bassia workspace clone -from fix-login -name fix-login-alt            # the same
 On Windows, keep the client on a [Dev Drive](https://learn.microsoft.com/en-us/windows/dev-drive/) and its workspaces
 are created by block cloning: each file's content is stored once and every workspace of the client shares it
 copy-on-write, so a new workspace over a large monorepo costs metadata, not bytes (`bassia devdrive status` tells
-whether a folder qualifies). Load rules (`-load api/,docs/` or `-load @profile`) keep a workspace to the part of the
-monorepo its task needs: the client fetches and caches only that.
+whether a folder qualifies). A context-spec (`-context api/,docs/` or `-context @profile`) keeps a workspace to the
+part of the monorepo its task needs: the agent sees and changes only that, and the client fetches and caches only that.
 
 Every mutation is an operation in the workspace's own log, so `workspace undo` and `workspace restore -op <n>` recover
 any earlier state, and an abandoned run is never lost. Workspaces never contend with each other, however many agents

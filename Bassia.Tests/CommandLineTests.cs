@@ -80,7 +80,7 @@ public sealed class CommandLineTests
 	[InlineData("-C /tmp -c ../x status", "-C /tmp -C ../x status")]
 	[InlineData("config get -key -x", "config get -key -x")]
 	[InlineData("mainline show -seq -1", "mainline show -seq -1")]
-	[InlineData("workspace create fix --load @api", "workspace create fix -load @api")]
+	[InlineData("workspace create fix --context @api", "workspace create fix -context @api")]
 	public void Normalizing_CanonicalizesCommandsAndSwitches(string line, string expected)
 	{
 		var normalized = CommandLineNormalizer.Normalize(CommandTable.Root, line.Split(' '));
@@ -156,7 +156,7 @@ public sealed class CommandLineTests
 	[Fact]
 	public void TheUsageLine_ListsRequiredSwitchesFirst_ThenOptionalOnes_ThenTheRestOfLine()
 	{
-		Assert.Equal("bassia workspace create -name <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-load <rule,...>]",
+		Assert.Equal("bassia workspace create -name <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rule,...>]",
 			CommandTable.Find("workspace")!.FindChild("create")!.UsageLine);
 		Assert.Equal("bassia agent show -id <run-id>", CommandTable.Find("agent")!.FindChild("show")!.UsageLine);
 		Assert.Equal("bassia feedback send [-kind <bug|idea|question>] [-yes] <message...>", CommandTable.Find("feedback")!.FindChild("send")!.UsageLine);

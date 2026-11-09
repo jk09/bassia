@@ -58,6 +58,22 @@
 				}
 			</td>
 		</tr>
+		<tr>
+			<td>context</td>
+			<td>
+				@if (editingContext)
+				{
+					<input class="context" @bind="contextText" placeholder="all, or rules: api/, *.md, !api/testdata/, @@profile" />
+					<div><button class="btn primary" disabled="@Busy" @onclick="SetContextAsync">Save</button> <button class="btn" @onclick="() => editingContext = false">Cancel</button></div>
+				}
+				else
+				{
+					<code>@(record.Context is { Count: > 0 } rules ? string.Join(", ", rules) : "all")</code>
+					<span class="muted">the paths this workspace contains</span>
+					@if (act) { <button class="btn small" @onclick="StartContext">Change</button> }
+				}
+			</td>
+		</tr>
 		<tr><td>owner</td><td>@record.Owner</td></tr>
 		<tr><td>base</td><td><a href="/log/@record.BaseSeq">mainline seq @record.BaseSeq</a></td></tr>
 		<tr><td>stacked on</td><td class="id">@(record.Parent is { } parent ? parent : "mainline")</td></tr>
@@ -132,13 +148,15 @@
 	private List<OperationEntry> operations = [];
 	private IReadOnlyList<StoredConflict> conflicts = [];
 	private bool describing;
+	private bool editingContext;
+	private string contextText = "";
 	private string intent = "";
 	private string? merging;
 	private string mergedText = "";
 
 	protected override bool LiveUpdates => true;
 
-	protected override bool Editing => describing || merging is not null;
+	protected override bool Editing => describing || editingContext || merging is not null;
 
 	protected override async Task LoadAsync()
 	{
@@ -163,6 +181,19 @@
 		await Actions.DescribeAsync(state!.Id, intent);
 		describing = false;
 		return "Intent saved: it becomes the landing's message.";
+	});
+
+	private void StartContext()
+	{
+		contextText = state?.Record.Context is { Count: > 0 } rules ? string.Join(", ", rules) : "all";
+		editingContext = true;
+	}
+
+	private Task SetContextAsync() => RunAsync(async () =>
+	{
+		var after = await Actions.SetContextAsync(state!.Id, contextText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+		editingContext = false;
+		return $"Context set to {(after.Record.Context is { Count: > 0 } rules ? string.Join(", ", rules) : "all")}; Undo reverts it.";
 	});
 
 	private Task CheckAsync() => RunAsync(async () =>

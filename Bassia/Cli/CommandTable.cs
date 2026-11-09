@@ -40,6 +40,20 @@ internal static class CommandTable
 		["prompt"] = "bassia has no LLM of its own: drive it from your agent, which learns it from 'bassia help -all'."
 	};
 
+	private const string LoadRulesGone = "Load rules were replaced by the workspace's context-spec, which every client shares: ";
+
+	/// <summary>Subcommands that were removed or replaced (by their full name), with what to use instead.</summary>
+	public static readonly IReadOnlyDictionary<string, string> ReplacedSubcommands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+	{
+		["workspace load"] = LoadRulesGone + "'bassia workspace context [<w>] [-set|-add|-remove <rules>]' shows or changes it."
+	};
+
+	/// <summary>Switches that were removed or replaced, with what to use instead.</summary>
+	public static readonly IReadOnlyDictionary<string, string> ReplacedSwitches = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+	{
+		["load"] = LoadRulesGone + "give -context <rules> instead (and 'bassia workspace context' to change it later)."
+	};
+
 	private static Option<string> WorkspaceSwitch() => Value("workspace", "workspace", "The workspace: its name, id, or a unique prefix of either (4+ characters). Default: the workspace the current folder is in.");
 	private static Option<string> RunId() => Value("id", "run-id", "The run: its id (run-<key>), a unique prefix of its key (4+ characters), or its workspace's name.", Required: true);
 
@@ -80,27 +94,32 @@ internal static class CommandTable
 				[Value("name", "name", "The workspace's name.", Required: true), Value("path", "dir", "Its folder (new or empty). Default: <monorepo>/workspaces/<name>."),
 					Value("on", "workspace", "Stack it on this open workspace instead of mainline: it starts from that workspace's work and lands after it."),
 					Value("intent", "text", "What the change is for: the message its landing records (also set by 'workspace describe')."),
-					List("load", "rule,...", "What the folder loads (fetched, cached and written): paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything.")],
+					List("context", "rule,...", "Which paths of the monorepo the workspace contains (its context-spec): paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [context.profiles]; all for everything. Default (stacked with -on: the parent's): .bassia.toml [context] default, else everything.")],
 				["bassia workspace create fix-login", "bassia workspace create fix-login-tests -on fix-login", "bassia workspace create spike -path /tmp/spike",
-					"bassia workspace create api-fix -load api/,libs/shared/,*"],
+					"bassia workspace create api-fix -context api/,libs/shared/,*"],
 				WorkspaceCommands.CreateAsync, Positional: "name",
 				Details: "Instead of branches, every agentic run gets a workspace. Workspaces never contend with each other: each has its own operation log. " +
 					"Only landing contends, on mainline."),
 			Cmd("clone", "A new workspace with another workspace's base and work, as a new change: branch off a workspace.",
 				[Value("from", "workspace", "The workspace to clone.", Required: true), Value("name", "name", "The new workspace's name.", Required: true),
-					Value("path", "dir", "Its folder. Default: <monorepo>/workspaces/<name>."), List("load", "rule,...", "What the folder loads: paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything.")],
+					Value("path", "dir", "Its folder. Default: <monorepo>/workspaces/<name>."), List("context", "rule,...", "Which paths the new workspace contains (its context-spec): paths from the root such as api/, *.md, !api/testdata/, or @profile; all for everything. Default: the source's context-spec.")],
 				["bassia workspace clone -from fix-login -name fix-login-alt"], WorkspaceCommands.CloneAsync),
 			Cmd("checkout", "Give a workspace a folder on this machine (one created elsewhere, or whose folder was removed).",
-				[Value("workspace", "workspace", "The workspace.", Required: true), Value("path", "dir", "The folder. Default: <monorepo>/workspaces/<name>."),
-					List("load", "rule,...", "What the folder loads: paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything.")],
-				["bassia workspace checkout fix-login", "bassia workspace checkout fix-login -load @web"], WorkspaceCommands.CheckoutAsync, Positional: "workspace"),
-			Cmd("load", "Show or change what a workspace's folder loads: write the paths new rules add, remove the ones they drop (after a snapshot).",
-				[WorkspaceSwitch(), List("load", "rule,...", "The new rules: paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything.")],
-				["bassia workspace load", "bassia workspace load fix-login -load api/,docs/", "bassia workspace load fix-login -load all"], WorkspaceCommands.LoadAsync,
-				Positional: "workspace",
-				Details: "A workspace's folder holds only what its load rules select, like a ClearCase snapshot view's load rules: the clone fetches and caches the " +
-					"content of those paths only, and directories not loaded appear empty. The workspace's tree still holds everything: snapshots never read an " +
-					"unloaded path as deleted, and sync and landing carry it along unchanged. Rules are tried in order and the last match decides."),
+				[Value("workspace", "workspace", "The workspace.", Required: true), Value("path", "dir", "The folder. Default: <monorepo>/workspaces/<name>.")],
+				["bassia workspace checkout fix-login"], WorkspaceCommands.CheckoutAsync, Positional: "workspace",
+				Details: "The folder holds what the workspace's context-spec contains ('bassia workspace context')."),
+			Cmd("context", "Show or change a workspace's context-spec: which paths of the monorepo it contains, like a ClearCase config spec.",
+				[WorkspaceSwitch(),
+					List("set", "rule,...", "Replace the rules: paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [context.profiles]; all for everything."),
+					List("add", "rule,...", "Append rules (the last match decides, so they take precedence)."),
+					List("remove", "rule,...", "Remove these rules, exactly as 'bassia workspace context' lists them.")],
+				["bassia workspace context", "bassia workspace context fix-login -add docs/", "bassia workspace context fix-login -set @api", "bassia workspace context fix-login -set all"],
+				WorkspaceCommands.ContextAsync, Positional: "workspace",
+				Details: "A workspace contains only the paths its context-spec selects; an agentic run in it sees, reads and changes only those. The spec is " +
+					"stored on the workspace (every client and Studio see the same), and a change to it is an operation ('workspace undo' reverts it). " +
+					"Its folder holds the files in context; directories outside it appear empty, so the monorepo's shape shows. A snapshot refuses a change " +
+					"outside the context, naming the paths; sync and landing carry the rest of the tree along unchanged. A spec that leaves out a path the " +
+					"workspace changed is refused. Rules are tried in order and the last match decides."),
 			Cmd("list", "The open workspaces (all with -all): status, base seq, what they are stacked on, their run and last landing.",
 				[Flag("all", "Also landed, closed, replaced and abandoned workspaces.")], ["bassia workspace list", "bassia workspace list -all -human"],
 				WorkspaceCommands.ListAsync),
@@ -195,7 +214,7 @@ internal static class CommandTable
 					Value("model", "model", "The model (default agent.model)."), Flag("land", "Land the workspace when the agent succeeds."),
 					Flag("keep", "With -land: keep the workspace open on the new head."),
 					List("lease", "prefix,...", "Lease these prefixes exclusively for the run (renewed while it runs, presented when landing)."),
-					List("load", "rule,...", "What the run's workspace loads: paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything."),
+					List("context", "rule,...", "Which paths the run's workspace contains (its context-spec): paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [context.profiles]; all for everything. Default: .bassia.toml [context] default, else everything (stacked with -on: the parent's; with -workspace: that workspace's, which -context changes)."),
 					Value("lease-wait", "seconds", "Wait this long in line for the leases (default 0)."),
 					Flag("detach", "Run in the background and return at once with the run id."),
 					Rest("run", "command", "Run this command instead of the agent with a prompt."),
@@ -217,7 +236,7 @@ internal static class CommandTable
 			Cmd("replay", "Rebase by replay: run a workspace's recorded task again on mainline's head, in a new workspace with the same ChangeId.",
 				[Value("id", "run|workspace", "The run or workspace to replay.", Required: true), Flag("land", "Land the replay when the agent succeeds."),
 					List("lease", "prefix,...", "Lease these prefixes for the replay."), Value("lease-wait", "seconds", "Wait this long for the leases."),
-					List("load", "rule,...", "What the replay loads (default: what the original loaded here): paths from the root such as api/, *.md, !api/testdata/, or @profile from .bassia.toml [load.profiles]; all for everything. Default: workspace.load, else .bassia.toml [load] default, else everything."),
+					List("context", "rule,...", "Which paths the replay's workspace contains (default: the original's context-spec): paths from the root such as api/, *.md, !api/testdata/, or @profile; all for everything."),
 					Value("run-id", "id", "", Hidden: true)],
 				["bassia agent replay fix-login -land"], AgentCommands.ReplayAsync, Positional: "id"),
 			Cmd("job", "Run an agentic job in a container: clone the server, then start or replay a run (what Bassia Studio's cloud runs execute).",

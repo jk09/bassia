@@ -53,29 +53,30 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 	/// <summary>Creates a workspace (on mainline, or stacked on <paramref name="on"/>) and checks it out into <paramref name="directory"/>.</summary>
 	public async Task<(WorkspaceState State, LocalWorkspace Local)> CreateAsync(string name, string directory, string? on = null, string intent = "",
-		ReplayRecipe? recipe = null, ChangeId? changeId = null, string? replayOf = null, LoadRules? load = null, CancellationToken ct = default)
+		ReplayRecipe? recipe = null, ChangeId? changeId = null, string? replayOf = null, ContextSpec? context = null, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		CheckDirectory(directory);
-		var state = await Service.CreateAsync(name, agent, on, intent, recipe, changeId, directory, Host, replayOf, ct);
-		var local = await CheckOutAsync(state, directory, load, ct);
+		var state = await Service.CreateAsync(name, agent, on, intent, recipe, changeId, directory, Host, replayOf, context, ct);
+		var local = await CheckOutAsync(state, directory, ct);
 		return (state, local);
 	}
 
-	public async Task<(WorkspaceState State, LocalWorkspace Local)> CloneAsync(string source, string name, string directory, LoadRules? load = null,
+	public async Task<(WorkspaceState State, LocalWorkspace Local)> CloneAsync(string source, string name, string directory, ContextSpec? context = null,
 		CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		CheckDirectory(directory);
-		var state = await Service.CloneAsync(source, name, agent, directory, Host, ct);
-		return (state, await CheckOutAsync(state, directory, load, ct));
+		var state = await Service.CloneAsync(source, name, agent, directory, Host, context, ct);
+		return (state, await CheckOutAsync(state, directory, ct));
 	}
 
 	/// <summary>
 	/// Writes a workspace's working tree into <paramref name="directory"/> and makes it the workspace's local directory:
-	/// the paths <paramref name="load"/> selects (everything by default), with only their content fetched and cached.
+	/// the paths its context-spec contains, with only their content fetched and cached; directories outside the context
+	/// appear empty at its edge.
 	/// </summary>
-	public async Task<LocalWorkspace> CheckOutAsync(WorkspaceState state, string directory, LoadRules? load = null, CancellationToken ct = default)
+	public async Task<LocalWorkspace> CheckOutAsync(WorkspaceState state, string directory, CancellationToken ct = default)
 	{
 		directory = Path.GetFullPath(directory);
 		Directory.CreateDirectory(directory);
@@ -85,7 +86,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		}
 
 		var local = new LocalWorkspace(state.Id, directory, StateFile(state.Id), providers(directory, state.Id));
-		local.State.Rules = load ?? LoadRules.All;
+		local.State.Context = ContextSpec.Of(state.Record.Context);
 		var working = await repo.Objects.ReadCommitAsync(state.Record.Working, ct);
 		await local.Provider.UpdateAsync(local.State, working.Tree, ct);
 		local.Save();
@@ -126,13 +127,15 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		}
 
 		var policy = await PolicyAsync(local, ct);
-		var scan = await local.Provider.ScanAsync(local.State, policy, true, ct);
+		// The record's context-spec is the boundary, even when another client changed it and this folder is not in step yet.
+		var scan = await local.Provider.ScanAsync(local.State, policy, true, ct, ContextSpec.Of(state.Record.Context));
 		var diskTree = scan.Changes.Count == 0 ? local.State.Tree : await repo.Trees.EditAsync(local.State.Tree, scan.Changes, ct);
 		var current = state;
 		var working = await repo.Objects.ReadCommitAsync(current.Record.Working, ct);
 		if (diskTree == working.Tree)
 		{
 			local.State.Tree = diskTree;
+			await ApplyContextAsync(local, current, ct);
 			local.Save();
 			return new SnapshotResult(current, scan.Changes, scan.Hashed, true);
 		}
@@ -147,21 +150,29 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 			await local.Provider.UpdateAsync(local.State, final, ct);
 		}
 
+		await ApplyContextAsync(local, updated, ct);
 		local.Save();
 		return new SnapshotResult(updated, scan.Changes, scan.Hashed, true);
 	}
 
 	/// <summary>
-	/// Changes what the workspace's folder loads: snapshots it first (so edits are kept on the workspace), then writes
-	/// what the new rules add and removes what they drop. Paths not loaded stay in the workspace's tree, unchanged.
+	/// Changes the workspace's context-spec: snapshots its folder here first (a change outside the current context is
+	/// refused as always), records the new spec as an operation (refused if it leaves out a path the workspace changed),
+	/// then writes what the new spec adds to the folder and removes what it drops. Paths outside the context stay in the
+	/// workspace's tree, unchanged.
 	/// </summary>
-	public async Task<(WorkspaceState State, LocalWorkspace Local, LoadResult Result)> LoadAsync(WorkspaceState state, LoadRules rules, CancellationToken ct = default)
+	public async Task<(WorkspaceState State, ContextResult? Result)> SetContextAsync(WorkspaceState state, ContextSpec context, CancellationToken ct = default)
 	{
 		state = (await SnapshotAsync(state, null, ct)).Workspace;
-		var local = Local(state) ?? throw new VersionException($"Workspace '{state.Name}' has no folder on this machine; check it out first.");
-		var result = await local.Provider.LoadAsync(local.State, rules, ct);
-		local.Save();
-		return (state, local, result);
+		state = await Service.SetContextAsync(state.Id, context, agent, ct);
+		return (state, await UpdateDirectoryAsync(state, ct));
+	}
+
+	/// <summary>Brings the folder's context in step with the record's, if it differs (after a change here or elsewhere, or an undo).</summary>
+	private static async Task<ContextResult?> ApplyContextAsync(LocalWorkspace local, WorkspaceState state, CancellationToken ct)
+	{
+		var context = ContextSpec.Of(state.Record.Context);
+		return local.State.Context.Equals(context) ? null : await local.Provider.ApplyContextAsync(local.State, context, ct);
 	}
 
 	/// <summary>Snapshots, then rebases onto the newest base and updates the directory.</summary>
@@ -209,20 +220,26 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		return result;
 	}
 
-	/// <summary>Makes the directory show the workspace's working tree (after an operation changed it).</summary>
-	public async Task UpdateDirectoryAsync(WorkspaceState state, CancellationToken ct = default)
+	/// <summary>
+	/// Makes the directory show the workspace's working tree and context-spec (after an operation changed either); what
+	/// bringing the context in step did, if it had to.
+	/// </summary>
+	public async Task<ContextResult?> UpdateDirectoryAsync(WorkspaceState state, CancellationToken ct = default)
 	{
 		if (Local(state) is not { } local)
 		{
-			return;
+			return null;
 		}
 
 		var tree = (await repo.Objects.ReadCommitAsync(state.Record.Working, ct)).Tree;
 		if (tree != local.State.Tree)
 		{
 			await local.Provider.UpdateAsync(local.State, tree, ct);
-			local.Save();
 		}
+
+		var result = await ApplyContextAsync(local, state, ct);
+		local.Save();
+		return result;
 	}
 
 	/// <summary>Removes the workspace's directory and its tree state from this machine.</summary>

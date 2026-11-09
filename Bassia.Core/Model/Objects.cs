@@ -158,7 +158,8 @@ public static class WorkspaceStatus
 
 /// <summary>
 /// A workspace: its base (a mainline commit at <see cref="BaseSeq"/>, or the working commit of the parent workspace
-/// it is stacked on), its working commit, and what happened to it: the agentic run working in it and its last landing.
+/// it is stacked on), its working commit, its context-spec (the paths it contains; null: the whole monorepo), and what
+/// happened to it: the agentic run working in it and its last landing.
 /// </summary>
 public sealed record WorkspaceRecord(
 	string Id,
@@ -175,7 +176,8 @@ public sealed record WorkspaceRecord(
 	RunRecord? Run = null,
 	LandRecord? LastLand = null,
 	string? ReplayOf = null,
-	DateTimeOffset? Closed = null);
+	DateTimeOffset? Closed = null,
+	IReadOnlyList<string>? Context = null);
 
 /// <summary>An agentic run working in a workspace.</summary>
 public sealed record RunRecord(

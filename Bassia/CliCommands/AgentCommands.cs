@@ -21,7 +21,7 @@ internal static class AgentCommands
 
 		return new AgentRunOptions(prompt, command, invocation.Get("workspace"), invocation.Get("name"), invocation.Get("on"), invocation.Get("model"),
 			invocation.Has("land"), invocation.Has("keep"), invocation.List("lease"), TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"),
-			Load: invocation.Has("load") ? invocation.List("load") : null);
+			Context: invocation.Has("context") ? invocation.List("context") : null);
 	}
 
 	public static async Task<int> StartAsync(Invocation invocation)
@@ -82,9 +82,9 @@ internal static class AgentCommands
 			args.AddRange(["-lease", string.Join(',', leases)]);
 		}
 
-		if (invocation.List("load") is { Count: > 0 } load)
+		if (invocation.List("context") is { Count: > 0 } context)
 		{
-			args.AddRange(["-load", string.Join(',', load)]);
+			args.AddRange(["-context", string.Join(',', context)]);
 		}
 
 		if (invocation.Get("prompt") is { } prompt)
@@ -231,8 +231,8 @@ internal static class AgentCommands
 		var name = await monorepo.Repo.FreeWorkspaceNameAsync($"{original.Name.Split("-replay")[0]}-replay{DateTimeOffset.UtcNow:HHmmss}");
 		var options = new AgentRunOptions(recipe.Prompt, recipe.Command, null, name, null, recipe.Model, invocation.Has("land"), false, invocation.List("lease"),
 			TimeSpan.FromSeconds(invocation.Int("lease-wait", 0, 0)), invocation.Get("run-id"), ReplayOf: original.Id, ChangeId: working.ChangeId,
-			// A replay loads what the original loaded here, unless told otherwise.
-			Load: invocation.Has("load") ? invocation.List("load") : monorepo.Workspaces.Local(original)?.State.Rules is { IsAll: false } previous ? previous.Patterns : null);
+			// A replay contains what the original contained, unless told otherwise.
+			Context: invocation.Has("context") ? invocation.List("context") : null);
 		await monorepo.Workspaces.Service.SetStatusAsync(original.Id, WorkspaceStatus.Replaced, "replaced by a replay", monorepo.User);
 		var result = await runner.RunAsync(options, Console.WriteLine);
 		var data = await WorkspaceAsync(monorepo.Repo, result.Workspace);

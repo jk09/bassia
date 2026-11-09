@@ -36,7 +36,7 @@ public sealed class NewMonorepoTests(ITestOutputHelper output) : IDisposable
 		temp.Dispose();
 	}
 
-	/// <summary>One agentic edit: its workspace, load rules (or none), the file it edits, the line, and how (write, append, first: replace line 1).</summary>
+	/// <summary>One agentic edit: its workspace, context-spec (or none), the file it edits, the line, and how (write, append, first: replace line 1).</summary>
 	private sealed record Edit(string Name, string? Load, string File, string Line, string Mode);
 
 	[PostgresFact]
@@ -63,7 +63,7 @@ public sealed class NewMonorepoTests(ITestOutputHelper output) : IDisposable
 			paths = ["*.md", "**/*.md"]
 			policy = "textmerge"
 
-			[load.profiles]
+			[context.profiles]
 			api = ["*", "api/"]
 			web = ["*", "web/"]
 			cli = ["*", "cli/"]
@@ -92,7 +92,7 @@ public sealed class NewMonorepoTests(ITestOutputHelper output) : IDisposable
 		var clock = Stopwatch.StartNew();
 		var starts = await Task.WhenAll(edits.Select(edit => BassiaAsync(Root,
 			[
-				"agent", "start", "-name", edit.Name, "-land", "-detach", .. edit.Load is { } load ? new[] { "-load", load } : [],
+				"agent", "start", "-name", edit.Name, "-land", "-detach", .. edit.Load is { } load ? new[] { "-context", load } : [],
 				"-run", .. AgentCommand(agent, barrier, edits.Count, edit)
 			])));
 		foreach (var (edit, start) in edits.Zip(starts))

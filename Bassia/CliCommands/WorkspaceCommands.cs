@@ -24,8 +24,9 @@ internal static class WorkspaceCommands
 			await monorepo.Workspaces.SnapshotAsync(await monorepo.Repo.ResolveWorkspaceAsync(on));
 		}
 
-		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "",
-			load: await monorepo.ResolveLoadAsync(LoadSwitch(invocation)));
+		// Stacked: the parent's context-spec unless -context is given (the service inherits it).
+		var context = invocation.Get("on") is null || ContextSwitch(invocation) is not null ? await monorepo.ResolveContextAsync(ContextSwitch(invocation)) : null;
+		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "", context: context);
 		var data = await WorkspaceAsync(monorepo.Repo, state);
 		var files = Materialization(local, data);
 		return Ok(invocation, (state.Record.Parent is null
@@ -40,7 +41,8 @@ internal static class WorkspaceCommands
 		await monorepo.Workspaces.SnapshotAsync(source);
 		var name = invocation.Require("name");
 		var path = invocation.Get("path") is { } given ? Path.GetFullPath(given) : monorepo.DefaultWorkspacePath(name);
-		var (state, local) = await monorepo.Workspaces.CloneAsync(source.Id, name, path, await monorepo.ResolveLoadAsync(LoadSwitch(invocation)));
+		var (state, local) = await monorepo.Workspaces.CloneAsync(source.Id, name, path,
+			ContextSwitch(invocation) is { } given2 ? await monorepo.ExpandContextAsync(given2) : null);
 		var data = await WorkspaceAsync(monorepo.Repo, state);
 		return Ok(invocation, $"Cloned workspace '{source.Name}' as '{name}' in '{local.Root}': same base and work, a new change." + Materialization(local, data), data);
 	}
@@ -55,46 +57,70 @@ internal static class WorkspaceCommands
 			return Fail(invocation, $"'{path}' is not empty; give an empty folder with -path.");
 		}
 
-		var local = await monorepo.Workspaces.CheckOutAsync(state, path, await monorepo.ResolveLoadAsync(LoadSwitch(invocation)));
+		var local = await monorepo.Workspaces.CheckOutAsync(state, path);
 		var data = await WorkspaceAsync(monorepo.Repo, (await monorepo.Repo.FindWorkspaceAsync(state.Id))!);
 		return Ok(invocation, $"Checked out workspace '{state.Name}' into '{local.Root}'." + Materialization(local, data), data);
 	}
 
-	/// <summary>The -load switch's rules, or null when it was not given (then the defaults apply).</summary>
-	private static IReadOnlyList<string>? LoadSwitch(Invocation invocation) => invocation.Has("load") ? invocation.List("load") : null;
+	/// <summary>The -context switch's rules, or null when it was not given (then the defaults apply).</summary>
+	private static IReadOnlyList<string>? ContextSwitch(Invocation invocation) => invocation.Has("context") ? invocation.List("context") : null;
 
 	/// <summary>
-	/// <c>bassia workspace load [&lt;workspace&gt;] -load &lt;rules&gt;</c>: changes what the workspace's folder holds and caches.
-	/// Without -load it reports the rules in force.
+	/// <c>bassia workspace context [&lt;workspace&gt;] [-set|-add|-remove &lt;rules&gt;]</c>: shows or changes the workspace's
+	/// context-spec, the paths it contains. A change is an operation of the workspace (undo reverts it); the folder here
+	/// follows it.
 	/// </summary>
-	public static async Task<int> LoadAsync(Invocation invocation)
+	public static async Task<int> ContextAsync(Invocation invocation)
 	{
 		using var monorepo = Monorepo.Current();
 		var state = await monorepo.WorkspaceAsync(invocation.Get("workspace"));
-		var current = monorepo.Workspaces.Local(state) ?? throw new MonorepoException($"Workspace '{state.Name}' has no folder on this machine; 'bassia workspace checkout {state.Name}' makes one.");
-		if (LoadSwitch(invocation) is null)
+		var current = Core.Workspaces.ContextSpec.Of(state.Record.Context);
+		var edits = new[] { "set", "add", "remove" }.Where(invocation.Has).ToList();
+		if (edits.Count > 1)
 		{
-			var shown = await WorkspaceAsync(monorepo.Repo, state);
-			shown["load"] = current.State.Rules.IsAll ? new List<string> { "all" } : current.State.Rules.Patterns.ToList();
-			shown["files_loaded"] = current.State.Entries.Count;
-			return Ok(invocation, $"Workspace '{state.Name}' loads {current.State.Rules} ({current.State.Entries.Count} file(s) in '{current.Root}').", shown);
+			return Fail(invocation, "Give one of -set, -add or -remove.");
 		}
 
-		var rules = await monorepo.ResolveLoadAsync(LoadSwitch(invocation));
-		var (after, local, result) = await monorepo.Workspaces.LoadAsync(state, rules);
+		if (edits.Count == 0)
+		{
+			var shown = await WorkspaceAsync(monorepo.Repo, state);
+			shown["paths_in_context"] = await PathsInContextAsync(monorepo, state, current);
+			return Ok(invocation, $"Workspace '{state.Name}' contains {current} ({shown["paths_in_context"]} file(s) of its tree).", shown);
+		}
+
+		var next = edits[0] switch
+		{
+			"set" => await monorepo.ExpandContextAsync(invocation.List("set")),
+			"add" => current.IsAll ? current : current.Add((await monorepo.ExpandContextAsync(invocation.List("add"))).Patterns),
+			_ => current.Remove(invocation.List("remove"))
+		};
+		var (after, result) = await monorepo.Workspaces.SetContextAsync(state, next);
 		var data = await WorkspaceAsync(monorepo.Repo, after);
-		data["load"] = rules.IsAll ? new List<string> { "all" } : rules.Patterns.ToList();
-		data["files_loaded"] = local.State.Entries.Count;
-		data["files_added"] = result.Loaded;
-		data["files_removed"] = result.Unloaded;
-		return Ok(invocation, $"Workspace '{state.Name}' now loads {rules}: {result.Loaded} file(s) added, {result.Unloaded} removed, {local.State.Entries.Count} in '{local.Root}'.", data);
+		data["paths_in_context"] = await PathsInContextAsync(monorepo, after, next);
+		if (result is not null)
+		{
+			data["files_added"] = result.Added;
+			data["files_removed"] = result.Removed;
+		}
+
+		var folder = result is null ? "" : $" Its folder here: {result.Added} file(s) added, {result.Removed} removed.";
+		return Ok(invocation, current.Equals(next)
+			? $"Workspace '{state.Name}' already contains {next}."
+			: $"Workspace '{state.Name}' now contains {next} ({data["paths_in_context"]} file(s) of its tree).{folder} 'bassia workspace undo' reverts it.", data);
 	}
 
-	/// <summary>How a new folder's files were made: block-cloned from the clone cache (Dev Drive), or written; and what it loads.</summary>
+	/// <summary>How many files of the workspace's working tree its context-spec contains (reads trees in context only).</summary>
+	private static async Task<int> PathsInContextAsync(Monorepo monorepo, WorkspaceState state, Core.Workspaces.ContextSpec context)
+	{
+		var tree = (await monorepo.Repo.Objects.ReadCommitAsync(state.Record.Working)).Tree;
+		var all = await monorepo.Repo.Trees.DiffAsync(null, tree, "", context.IsAll ? null : context.MayContainUnder);
+		return all.Count(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && context.Contains(change.Path));
+	}
+
+	/// <summary>How a new folder's files were made: block-cloned from the clone cache (Dev Drive), or written; and what it contains.</summary>
 	private static string Materialization(Core.Workspaces.LocalWorkspace local, Dictionary<string, object?> data)
 	{
-		data["load"] = local.State.Rules.IsAll ? new List<string> { "all" } : local.State.Rules.Patterns.ToList();
-		data["files_loaded"] = local.State.Entries.Count;
+		data["files_in_folder"] = local.State.Entries.Count;
 		if (local.Provider is not Core.Workspaces.CheckoutProvider provider)
 		{
 			return "";
@@ -102,8 +128,8 @@ internal static class WorkspaceCommands
 
 		data["files_cloned"] = provider.Materialized;
 		data["files_written"] = provider.Written;
-		var loads = local.State.Rules.IsAll ? "" : $" It loads {local.State.Rules} ({local.State.Entries.Count} file(s)); 'bassia workspace load -load <rules>' changes that.";
-		return (provider.Materialized > 0 ? $" {provider.Materialized} file(s) cloned from the clone cache, {provider.Written} written." : "") + loads;
+		var contains = local.State.Context.IsAll ? "" : $" It contains {local.State.Context} ({local.State.Entries.Count} file(s)); 'bassia workspace context -add <rules>' widens that.";
+		return (provider.Materialized > 0 ? $" {provider.Materialized} file(s) cloned from the clone cache, {provider.Written} written." : "") + contains;
 	}
 
 	public static async Task<int> ListAsync(Invocation invocation)

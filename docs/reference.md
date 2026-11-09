@@ -160,7 +160,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | --- | --- |
 | Monorepo | `init [-path <dir>] [-postgres <connection>]`, `clone -from <url> [-path <dir>] [-token <t>] [-postgres <connection>]`, `status`, `version`, `help` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>`, `config unset -key <k>` |
-| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-load <rules>]`, `workspace clone -from <w> -name <n> [-load <rules>]`, `workspace checkout <w> [-load <rules>]`, `workspace load [<w>] [-load <rules>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
+| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>]`, `workspace clone -from <w> -name <n> [-context <rules>]`, `workspace checkout <w>`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
 | Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]`, `agent job` (in a container: clone, then start or replay from `BASSIA_JOB_ARGS`) |
@@ -199,47 +199,60 @@ workspace's root holds a `.bassia-workspace` marker naming it, which is never sn
 - **Close.** `workspace close [-abandon] [-remove]` ends a workspace; its operations stay recoverable until
   `gc.retention_days` after it closed.
 
-## Load rules: what a workspace fetches, caches and holds
+## Context-specs: what a workspace contains
 
-A workspace's folder need not hold the whole monorepo. Its **load rules** select the paths it holds, like the load rules
-of a ClearCase snapshot view's config spec. The client fetches the content of those paths only, and caches it in
-`.bassia/cache`, shared by all workspaces of the client. It never reads the trees below a directory nothing of which is
-loaded. Many clients can then each run agents on their own part of a large monorepo, each downloading only that part.
+A workspace need not contain the whole monorepo. Its **context-spec** selects the paths it contains, like a ClearCase
+config spec: an agentic run in it sees, reads and changes only those. The spec is stored on the workspace's record, so
+every client, Bassia Studio and a replay see the same one. The client fetches the content of those paths only, and
+caches it in `.bassia/cache`, shared by all workspaces of the client; it never reads the trees below a directory
+nothing of which is in context. Many clients can then each run agents on their own part of a large monorepo, each
+downloading only that part.
 
 ```sh
-bassia workspace create api-fix -load "*,api/,libs/shared/,!api/testdata/"   # top-level files, two projects, minus fixtures
-bassia agent start -load @api -prompt "..." -land                            # a profile from .bassia.toml
-bassia workspace load api-fix -load "*,api/,web/"                            # load more (or less) later
-bassia workspace load api-fix                                                # show the rules in force
+bassia workspace create api-fix -context "*,api/,libs/shared/,!api/testdata/"   # top-level files, two projects, minus fixtures
+bassia agent start -context @api -prompt "..." -land                            # a profile from .bassia.toml
+bassia workspace context api-fix -add web/                                      # widen it later (an operation: undo reverts it)
+bassia workspace context api-fix -set @web                                      # replace it
+bassia workspace context api-fix                                                # show it, and how many files it contains
 ```
 
 - **Rules** are paths from the root of the tree. They are tried in order, and the last rule that matches a path
   decides:
-  - `api` or `api/` loads that directory and everything below it; a literal path without a slash may also name a file.
-  - `*`, `*.md`, `docs/*.md` load the files matching the glob at that depth. `*` stays within one name and `**`
+  - `api` or `api/` contains that directory and everything below it; a literal path without a slash may also name a
+    file.
+  - `*`, `*.md`, `docs/*.md` contain the files matching the glob at that depth. `*` stays within one name and `**`
     crosses folders (`**/*.proto`).
-  - `src/*/`, with a trailing slash, loads the matching directories whole.
+  - `src/*/`, with a trailing slash, contains the matching directories whole.
   - `!pattern` excludes what it matches.
 
-  `all`, or no rules, loads everything. `.bassia.toml` is always loaded.
-- **Defaults**, from first to last: `-load` on `workspace create|clone|checkout` and `agent start|replay`; this
-  machine's `workspace.load` setting; mainline's `.bassia.toml` `[load] default`; everything. `@name` expands to a
-  profile of `.bassia.toml`, and a replay loads what the original loaded.
+  `all`, or no rules, is everything. `.bassia.toml` is always in context. `@name` expands to a profile of
+  `.bassia.toml`; the workspace records the expanded rules.
+- **Defaults**, from first to last: `-context` on `workspace create|clone` and `agent start|replay`; the source's spec
+  for a stacked (`-on`) or cloned workspace and for a replay; mainline's `.bassia.toml` `[context] default`; everything.
 
   ```toml
-  [load]
+  [context]
   default = ["*"]
-  [load.profiles]
+  [context.profiles]
   api = ["*", "api/", "!api/testdata/"]
   web = ["*", "web/"]
   ```
-- **What is not loaded stays as it is.** The workspace's tree still holds everything. A snapshot never reads an
-  unloaded path as deleted, and sync and landing carry unloaded paths along unchanged. A directory that is not loaded
-  shows as an empty folder, so an agent sees the monorepo's shape. A file an agent creates there is added like any
-  other.
-- **Changing the rules.** `workspace load` snapshots first, so edits to paths the new rules drop stay on the workspace.
-  It then removes those paths from the folder, and writes the paths the new rules add.
-- Results of `workspace create|clone|checkout|load` report `load` (the rules) and `files_loaded`.
+- **The boundary.** A snapshot that finds a path outside the context created, changed or deleted fails, names the
+  paths and snapshots nothing; `status`, `check`, `land` and every other command that snapshots fail the same way, and
+  so do Studio's edits. A run whose agent changed such a path fails, and nothing of its last edits is taken. Widen the
+  context (`workspace context -add <rule>`) or undo those changes. A run sees its spec in `BASSIA_CONTEXT`.
+- **What is outside stays as it is.** The workspace's tree still holds everything: sync and landing carry paths
+  outside the context along unchanged. A directory outside the context shows as an empty folder, so an agent sees the
+  monorepo's shape; files outside it at in-context levels are not shown.
+- **Changing the spec** (`workspace context -set|-add|-remove`, or Studio's workspace page) is an operation of the
+  workspace: `workspace log` lists it, `workspace undo` reverts it. It snapshots first; a spec that leaves out a path
+  the workspace changed against its base is refused, naming the paths. Every client's folder follows the record: on
+  the next command there, files the new spec drops leave the folder and files it adds are written.
+- Results report `context` (the rules; `all` for everything) for every workspace, `files_in_folder` when a folder is
+  made, and `paths_in_context` from `workspace context`.
+- **Load rules are gone.** Context-specs replaced them: `-load`, `workspace load` and the `workspace.load` setting
+  fail and name the replacement. A `[load]` table in `.bassia.toml` is no longer read (landings are unaffected); a new
+  workspace without `-context` asks to rename it to `[context]`.
 
 ## Workspaces on a Dev Drive (Windows)
 
@@ -540,18 +553,18 @@ Delivered in slices (feature record `bassia-681e8902`):
 - **Mainline log**: the landings by seq, paged; a landing's commit, change id, intent, recipe and its diff, **unified
   or side by side**.
 - **Workspaces**: open (or all) workspaces; **new workspace** on mainline, stacked on one, or cloned from one. A
-  workspace's page has the actions **Check** (dry-run landing), **Land**, **Sync**, **Undo**, **Describe**, **Close** and
-  **Abandon**, the landing outcome with conflicting paths and policies, its stored conflicts (keep the workspace's side,
+  workspace's page shows its **context-spec** (with **Change**) and has the actions **Check** (dry-run landing),
+  **Land**, **Sync**, **Undo**, **Describe**, **Close** and **Abandon**, the landing outcome with conflicting paths and policies, its stored conflicts (keep the workspace's side,
   take mainline's, or edit the merged text with markers), its changes and its operation log with **Restore**.
 - **Files** of a workspace: browse its working tree, edit text in the browser, add, rename, delete and download files.
   Every save is a snapshot (an operation, so undo works); a save is refused, with the text kept, when the file changed
-  since it was opened.
+  since it was opened, or when the path is outside the workspace's context-spec.
 - **Conflicts**: from the server's live conflict overview, every open workspace that cannot land now and why, the open
   workspaces that overlap on a path, and the hot paths; it refreshes as the server reconciles.
 - **Leases**: live leases; acquire (exclusive or intent) for a workspace, release.
 
 - **Agentic runs**: every run (those started here and those recorded on workspaces by the CLI); **New run** with a
-  prompt or a command, in a new workspace (on mainline or stacked) or an existing one, with leases, load rules and
+  prompt or a command, in a new workspace (on mainline or stacked) or an existing one, with leases, a context-spec and
   land-when-done; a run's page streams its **output live** and offers **Stop**, **Land**, **Replay on mainline** (the
   recorded task again on the newest mainline, same change) and **Discard**.
 
@@ -613,7 +626,6 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 | `server.token` (`BASSIA_SERVER_TOKEN`) | | The server's shared token. |
 | `merge.semantic_driver` | `weave-driver` | The driver of the semantic policy, git merge-driver style (`%O %A %B`); `off` disables it. The release packages bundle it. |
 | `land.validate` | | A shell command a machine-merged tree must pass before it lands (local monorepo). |
-| `workspace.load` | | The load rules a new workspace gets on this machine when `-load` is not given (comma-separated, `@name` for a profile); empty: `.bassia.toml` `[load] default`, else everything. |
 | `workspace.clone` | `auto` | On Windows, block-clone workspace files from `.bassia/clones` on a Dev Drive (or another block-cloning ReFS volume); `off` always writes them. |
 | `workspace.dir` | `workspaces` | Where new workspaces' folders go. |
 | `lease.ttl` | `600` | Seconds a lease lives unless renewed. |
@@ -685,7 +697,9 @@ Bassia has four projects; each depends only on the ones before it.
      `ConflictResolver` (the conflict policies), `GarbageCollector`.
    - `Workspaces`: `IWorkspaceProvider` - the plain-checkout `CheckoutProvider` (a ProjFS provider on Windows would
      implement the same interface), with an optional `IFileMaterializer` that creates files more cheaply than writing
-     them - its tree state, and `WorkspaceClient`, which snapshots and keeps folders in step.
+     them - its tree state, `ContextSpec` (a workspace's context-spec, stored on its record, and the boundary its
+     snapshots enforce), and `WorkspaceClient`, which snapshots and keeps folders in step with the record's tree and
+     context.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), the store implementations that need more than the core
    may use (`Stores`: `PostgresState` (`bassia-server` and local monorepos) for heads, path index and leases and `PostgresTreeStore` for trees; `S3ObjectStore` and
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
@@ -794,9 +808,9 @@ fresh workspace, the blobs in the container and a scrub. Without Azurite it chec
 (a token that can read it). Without the secret, `scripts/Use-ExampleRepository.ps1` imports a local stand-in with the
 same files and adds a warning to the run.
 `NewMonorepoTests` (needs PostgreSQL) is a developer's first session on a local monorepo. It runs `bassia init`, then
-one landing lays out three projects with a load profile each, `textmerge` for Markdown and `replay` for code. Seven
+one landing lays out three projects with a context profile each, `textmerge` for Markdown and `replay` for code. Seven
 agents then start at once with `agent start -land -detach`, each its own process and workspace, and `agent wait`
-follows them. A barrier proves the runs overlap. The project agents load only their project and land; two edits to the
+follows them. A barrier proves the runs overlap. The project agents contain only their project and land; two edits to the
 same source file end in a landing and a replay with the original change id; two edits to the README are text-merged.
 The agent's arguments carry quotes, `$` and a backslash, which must reach it unchanged.
 `GitInteropTests` imports several repositories with interleaved history and exports mainline back, incrementally.

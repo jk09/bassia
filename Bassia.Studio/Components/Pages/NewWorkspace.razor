@@ -3,7 +3,7 @@
 
 <PageTitle>New workspace · Bassia Studio</PageTitle>
 <h1>New workspace</h1>
-<p class="muted">A workspace is a unit of work over the whole monorepo: on mainline, stacked on another workspace (it lands after it), or a clone of one (same base and work, a new change).</p>
+<p class="muted">A workspace is a unit of work over the monorepo, or the part of it its context-spec contains: on mainline, stacked on another workspace (it lands after it), or a clone of one (same base and work, a new change).</p>
 <Banner Notice="@Notice" Error="@Error" />
 @if (!User.CanChange)
 {
@@ -32,6 +32,7 @@ else
 				</select>
 			</label>
 		}
+		<label>Context: the paths it contains <input @bind="context" placeholder="@(mode == "main" ? "(the default: everything, or .bassia.toml [context] default) e.g. api/, *.md, @profile" : "(the same as the workspace it starts from)")" /></label>
 		@if (mode != "clone")
 		{
 			<label>Intent <textarea @bind="intent" rows="3" placeholder="What this change is for (the landing's message)"></textarea></label>
@@ -49,6 +50,7 @@ else
 	private string mode = "main";
 	private string source = "";
 	private string intent = "";
+	private string context = "";
 	private IReadOnlyList<WorkspaceState> open = [];
 
 	protected override async Task LoadAsync()
@@ -72,7 +74,8 @@ else
 			throw new VersionException("Choose the workspace to start from.");
 		}
 
-		var state = mode == "clone" ? await Actions.CloneAsync(source, name) : await Actions.CreateAsync(name, intent, mode == "on" ? source : null);
+		var rules = context.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		var state = mode == "clone" ? await Actions.CloneAsync(source, name, rules) : await Actions.CreateAsync(name, intent, mode == "on" ? source : null, rules);
 		Navigation.NavigateTo($"/workspaces/{Uri.EscapeDataString(state.Id)}/files");
 		return null;
 	}, reload: false);
