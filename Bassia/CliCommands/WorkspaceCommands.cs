@@ -26,7 +26,8 @@ internal static class WorkspaceCommands
 
 		// Stacked: the parent's context-spec unless -context is given (the service inherits it).
 		var context = invocation.Get("on") is null || ContextSwitch(invocation) is not null ? await monorepo.ResolveContextAsync(ContextSwitch(invocation)) : null;
-		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "", context: context);
+		var (state, local) = await monorepo.Workspaces.CreateAsync(name, path, invocation.Get("on"), invocation.Get("intent") ?? "", context: context,
+			lazy: monorepo.IsLazy(invocation.Get("materialize")));
 		var data = await WorkspaceAsync(monorepo.Repo, state);
 		var files = Materialization(local, data);
 		return Ok(invocation, (state.Record.Parent is null
@@ -42,7 +43,7 @@ internal static class WorkspaceCommands
 		var name = invocation.Require("name");
 		var path = invocation.Get("path") is { } given ? Path.GetFullPath(given) : monorepo.DefaultWorkspacePath(name);
 		var (state, local) = await monorepo.Workspaces.CloneAsync(source.Id, name, path,
-			ContextSwitch(invocation) is { } given2 ? await monorepo.ExpandContextAsync(given2) : null);
+			ContextSwitch(invocation) is { } given2 ? await monorepo.ExpandContextAsync(given2) : null, monorepo.IsLazy(invocation.Get("materialize")));
 		var data = await WorkspaceAsync(monorepo.Repo, state);
 		return Ok(invocation, $"Cloned workspace '{source.Name}' as '{name}' in '{local.Root}': same base and work, a new change." + Materialization(local, data), data);
 	}
@@ -57,7 +58,7 @@ internal static class WorkspaceCommands
 			return Fail(invocation, $"'{path}' is not empty; give an empty folder with -path.");
 		}
 
-		var local = await monorepo.Workspaces.CheckOutAsync(state, path);
+		var local = await monorepo.Workspaces.CheckOutAsync(state, path, monorepo.IsLazy(invocation.Get("materialize")));
 		var data = await WorkspaceAsync(monorepo.Repo, (await monorepo.Repo.FindWorkspaceAsync(state.Id))!);
 		return Ok(invocation, $"Checked out workspace '{state.Name}' into '{local.Root}'." + Materialization(local, data), data);
 	}
@@ -121,9 +122,16 @@ internal static class WorkspaceCommands
 	private static string Materialization(Core.Workspaces.LocalWorkspace local, Dictionary<string, object?> data)
 	{
 		data["files_in_folder"] = local.State.Entries.Count;
+		data["materialize"] = local.IsLazy ? Core.Workspaces.Materialize.Lazy : Core.Workspaces.Materialize.Full;
 		if (local.Provider is not Core.Workspaces.CheckoutProvider provider)
 		{
 			return "";
+		}
+
+		if (local.IsLazy)
+		{
+			data["files_placeholders"] = provider.Placeholders;
+			return $" Lazy: {provider.Placeholders} file(s) are placeholders, fetched when first read or changed.";
 		}
 
 		data["files_cloned"] = provider.Materialized;
@@ -394,10 +402,73 @@ internal static class WorkspaceCommands
 		if (invocation.Has("remove"))
 		{
 			removed = monorepo.Workspaces.Local(state) is not null;
-			monorepo.Workspaces.RemoveDirectory(state);
+			await monorepo.Workspaces.RemoveDirectoryAsync(state);
+		}
+		else
+		{
+			// A closed workspace's lazy folder is no longer served; its files stay in the backing directory.
+			await monorepo.Workspaces.UnmountAsync(state);
 		}
 
 		return Ok(invocation, $"Workspace '{state.Name}' is {closed.Record.Status}{(removed ? " and its folder is removed" : "")}. Its operations stay recoverable until retention ends.",
 			await WorkspaceAsync(monorepo.Repo, closed));
+	}
+
+	/// <summary><c>bassia workspace mount [&lt;workspace&gt;]</c>: serves a lazy folder again (after a restart).</summary>
+	public static async Task<int> MountAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var state = await monorepo.WorkspaceAsync(invocation.Get("workspace"));
+		var local = monorepo.Workspaces.Local(state) ?? throw new MonorepoException($"Workspace '{state.Name}' has no folder on this machine; 'bassia workspace checkout {state.Name}' makes one.");
+		if (!local.IsLazy)
+		{
+			return Ok(invocation, $"Workspace '{state.Name}' has a full folder in '{local.Root}'; there is nothing to mount.", await WorkspaceAsync(monorepo.Repo, state));
+		}
+
+		await monorepo.Workspaces.MountAsync(state);
+		return Ok(invocation, $"The lazy folder of workspace '{state.Name}' is served at '{local.Root}'.", await WorkspaceAsync(monorepo.Repo, state));
+	}
+
+	/// <summary><c>bassia workspace unmount [&lt;workspace&gt;]</c>: stops serving a lazy folder.</summary>
+	public static async Task<int> UnmountAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var state = await monorepo.WorkspaceAsync(invocation.Get("workspace"));
+		await monorepo.Workspaces.UnmountAsync(state);
+		return Ok(invocation, $"Workspace '{state.Name}''s lazy folder is not served now ('bassia workspace mount' serves it again).", await WorkspaceAsync(monorepo.Repo, state));
+	}
+
+	/// <summary>
+	/// <c>bassia workspace serve &lt;workspace&gt;</c> (internal): serves a lazy folder in the foreground until it is
+	/// unmounted, hydrating placeholders as they are first used. <c>workspace mount</c> starts it in the background.
+	/// </summary>
+	public static async Task<int> ServeAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var state = await monorepo.Repo.ResolveWorkspaceAsync(invocation.Require("workspace"));
+		var local = monorepo.Workspaces.Local(state) is { IsLazy: true } found
+			? found
+			: throw new MonorepoException($"Workspace '{state.Name}' has no lazy folder on this machine.");
+		var logFile = Lazy.LazyFolders.LogFile(monorepo, state.Id);
+		await using var log = new StreamWriter(logFile, append: true) { AutoFlush = true };
+		void Log(string line)
+		{
+			lock (log)
+			{
+				log.WriteLine($"{DateTimeOffset.UtcNow:O} {line}");
+			}
+		}
+
+		var hydrator = new Lazy.Hydrator(monorepo.Repo, local, Log);
+		if (OperatingSystem.IsWindows())
+		{
+			throw new MonorepoException("ProjFS lazy folders are not available yet.");
+		}
+
+		var server = new Lazy.FuseServer(local.Files, hydrator.Hydrate, Log);
+		var exit = server.Run(local.Root);
+		return exit == 0
+			? Ok(invocation, $"Served '{local.Root}' until it was unmounted; {server.Hydrated} placeholder(s) hydrated.", new Dictionary<string, object?> { ["hydrated"] = server.Hydrated })
+			: Fail(invocation, $"The FUSE loop of '{local.Root}' ended with {exit}.");
 	}
 }

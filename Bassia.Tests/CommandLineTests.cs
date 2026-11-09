@@ -156,7 +156,7 @@ public sealed class CommandLineTests
 	[Fact]
 	public void TheUsageLine_ListsRequiredSwitchesFirst_ThenOptionalOnes_ThenTheRestOfLine()
 	{
-		Assert.Equal("bassia workspace create -name <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rule,...>]",
+		Assert.Equal("bassia workspace create -name <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rule,...>] [-materialize <full|lazy>]",
 			CommandTable.Find("workspace")!.FindChild("create")!.UsageLine);
 		Assert.Equal("bassia agent show -id <run-id>", CommandTable.Find("agent")!.FindChild("show")!.UsageLine);
 		Assert.Equal("bassia feedback send [-kind <bug|idea|question>] [-yes] <message...>", CommandTable.Find("feedback")!.FindChild("send")!.UsageLine);

@@ -46,8 +46,16 @@ jobs:
       BASSIA_TEST_AZURE_BLOB: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
       # AzuriteIntegrationTests fails instead of checking nothing when Azurite is missing.
       BASSIA_TEST_REQUIRE_AZURITE: '1'
+      # LazyFolderTests mount real FUSE file systems, and fail instead of checking nothing when FUSE is missing.
+      BASSIA_TEST_REQUIRE_FUSE: '1'
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install FUSE 3 (lazy workspace folders)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q fuse3
+          ls -l /dev/fuse
 
       - name: Install the .NET SDK
         if: runner.os != 'Windows'

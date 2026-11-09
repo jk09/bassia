@@ -59,22 +59,27 @@ Delivered in three phases, each a separate pull request against this record.
 - [x] Studio shows and edits a workspace's context-spec (and refuses its own edits outside it); a run sees its spec
       in `BASSIA_CONTEXT`, and a run whose agent changed a path outside it fails and lands nothing.
 
-### Phase 2 - lazy materialization through a virtual file system
+### Phase 2a - lazy materialization through FUSE (Linux, macOS)
 
-- [ ] A client-side file system provider abstraction (in the `Bassia` frontend, not `Bassia.Core`) projects a
-      workspace folder: listings come from trees (in-context entries, plus empty out-of-context directories); a
-      file's content is fetched (through the client's cache) and written on first open, never before.
+- [x] A virtual file system abstraction (`ILazyFolders` in the core, implemented in the `Bassia` frontend) projects a
+      lazy folder: its files and placeholders live in a backing directory; listings and sizes come from there, and a
+      placeholder is hydrated (fetched through the client's cache) just before it is first opened or changed, never
+      before.
+- [x] Linux and macOS: a FUSE provider (libfuse 3) mounts the workspace folder, served by a per-workspace
+      `bassia workspace serve` process that `workspace create|clone|checkout` starts, `agent start` ensures, and
+      `workspace close` stops; `bassia workspace mount|unmount` manage it explicitly.
+- [x] Snapshots read the backing directory; an untouched or only read placeholder is never hashed or taken as
+      deleted, and edits, new files, renames and deletions through the mount are snapshotted.
+- [x] Where no provider is available (driver or library missing), a lazy folder is refused with the reason; full
+      materialization (`-materialize full`, the default `workspace.materialize`) works as before.
+- [x] A test proves laziness: through a real FUSE mount, reading one file of a lazy folder fetches exactly that file's
+      content, and nothing else's.
+
+### Phase 2b - lazy materialization through ProjFS (Windows)
+
 - [ ] Windows: a ProjFS provider (the `Client-ProjFS` optional feature) backs the workspace folder; placeholders
       hydrate on first read, and writes mark the path modified for the next snapshot.
-- [ ] Linux and macOS: a FUSE provider (libfuse 3 on Linux; macFUSE or FUSE-T on macOS) mounts the workspace folder,
-      served by a per-workspace `bassia` process that `workspace create|checkout` starts and `workspace close` stops;
-      `bassia workspace mount|unmount` manage it explicitly.
-- [ ] Snapshots read only hydrated or written paths (the provider reports them), so an unread file is never hashed,
-      fetched, or taken as deleted.
-- [ ] Where no provider is available (driver missing, no permission), checkout fails naming the missing component,
-      unless `-materialize full` is given, which writes every in-context file eagerly (phase 1 behavior).
-- [ ] A test proves laziness: reading one file of a large in-context directory fetches exactly that file's chunks
-      (counted on the object store).
+- [ ] The laziness test passes on Windows in CI.
 
 ### Phase 3 - documentation and live validation
 
@@ -121,6 +126,16 @@ Delivered in three phases, each a separate pull request against this record.
   rejected: it is the replay recipe.
 - **`-add` appends; `-remove` removes exact rules.** On `all`, `-add` keeps `all` (it already contains everything);
   narrowing from `all` uses `-set`.
+- **Lazy is opt-in (`workspace.materialize`, default `full`)** (phase 2a). A lazy folder needs a driver and a serving
+  process per folder; making it the default would make every machine without FUSE/ProjFS fail. Rejected: failing
+  checkout where no provider exists (the spec's first draft) and silently falling back (hides the cost).
+- **Placeholders live in a backing directory, and FUSE is a passthrough over it** (phase 2a). A placeholder is a
+  sparse file of the right size and mode with a modification time in the past; FUSE answers `getattr` with `lstat`
+  of the backing file (no `struct stat` layout in managed code) and hydrates in place, keeping size and time, so a
+  snapshot - which reads the backing directory, not the mount - sees an untouched or read placeholder as unchanged.
+  Rejected: an in-memory projection (listings would need the trees on every call, and a crash would lose edits).
+- **The FUSE binding is P/Invoke to libfuse 3's high-level API** with `UnmanagedCallersOnly` callbacks; no package
+  is needed. macOS (macFUSE) shares the code but is not tested in CI.
 - The context-spec lives on the workspace record, not in the client's tree state: it defines the workspace, so every
   client, Studio and a replay agree on it (unlike load rules, which were per checkout).
 
@@ -128,7 +143,8 @@ Delivered in three phases, each a separate pull request against this record.
 
 - [x] Specification agreed (open questions answered).
 - [x] Phase 1: context-spec on the workspace, load rules removed, boundary; docs and help updated with it.
-- [ ] Phase 2: ProjFS and FUSE providers, laziness test.
+- [x] Phase 2a: FUSE provider (Linux; macOS untested), laziness tests through real mounts, CI installs FUSE 3.
+- [ ] Phase 2b: ProjFS provider (Windows).
 - [ ] Phase 3: documentation, live validation.
 
 ## Validation
