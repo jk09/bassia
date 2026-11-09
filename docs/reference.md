@@ -560,6 +560,8 @@ tree. Until sign-in is configured it acts as one user with one role: `-user <nam
 default `studio`) and `-role reader|contributor|admin` (default `admin`). Readers only look; contributors change their
 own workspaces and leases; admins anyone's.
 
+For development, `-exit-button true` (or `BASSIA_STUDIO_EXIT_BUTTON=true`) adds an Exit button to the toolbar, shown to admins only, that stops Studio like Ctrl+C in the console. It is off by default.
+
 An unreachable server or a missing path is shown as a message on the page.
 
 Pages that show the monorepo's state (overview, log, workspaces, a workspace, conflicts, leases) refresh by
