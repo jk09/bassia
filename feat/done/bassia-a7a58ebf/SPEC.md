@@ -81,7 +81,7 @@ Delivered in three phases, each a separate pull request against this record.
       workspace folder (the virtualization root); a file is hydrated when first read, and changes stay in the folder,
       which snapshots read. A command that rewrites the backing directory asks the server to drop those paths from the
       folder, so it shows them anew.
-- [ ] The laziness and CLI tests pass on Windows in CI (`Dev Drive (Windows)` job, with ProjFS enabled).
+- [x] The laziness and CLI tests pass on Windows in CI (`Dev Drive (Windows)` job, with ProjFS enabled).
 
 ### Phase 3 - documentation and live validation
 
@@ -152,7 +152,8 @@ Delivered in three phases, each a separate pull request against this record.
 - [x] Specification agreed (open questions answered).
 - [x] Phase 1: context-spec on the workspace, load rules removed, boundary; docs and help updated with it.
 - [x] Phase 2a: FUSE provider (Linux; macOS untested), laziness tests through real mounts, CI installs FUSE 3.
-- [ ] Phase 2b: ProjFS provider (Windows) - implemented; awaiting CI on Windows.
+- [x] Phase 2b: ProjFS provider (Windows), verified in CI (which found a test fake that mounted twice, a log file
+      locked against readers, and a server that reported itself serving before ProjFS virtualized the folder).
 - [x] Phase 3: documentation, live validation (see Validation; it also found that a landed workspace's lazy folder
       kept being served, now unmounted on landing).
 
