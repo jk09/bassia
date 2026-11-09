@@ -77,6 +77,9 @@ public sealed record StudioOptions
 	/// <summary>The Entra ID instance (sovereign clouds differ).</summary>
 	public string EntraInstance { get; init; } = "https://login.microsoftonline.com/";
 
+	/// <summary>Development aid: shows an Exit button in the toolbar that stops Studio (instead of Ctrl+C in the console). Off by default.</summary>
+	public bool ExitButton { get; init; }
+
 	public bool UsesEntra => Auth.Equals("entra", StringComparison.OrdinalIgnoreCase);
 
 	/// <summary>The command line of <see cref="Bassia"/>, split on spaces (quotes keep spaces in a part).</summary>
@@ -157,6 +160,7 @@ public sealed record StudioOptions
 			AcaSecrets = Get("aca-secrets") ?? defaults.AcaSecrets,
 			AcaCpu = Get("aca-cpu") is { } cpu ? double.Parse(cpu, System.Globalization.CultureInfo.InvariantCulture) : defaults.AcaCpu,
 			AcaMemory = Get("aca-memory") ?? defaults.AcaMemory,
+			ExitButton = Get("exit-button") is { } exit && (exit.Equals("true", StringComparison.OrdinalIgnoreCase) || exit == "1" || exit.Equals("on", StringComparison.OrdinalIgnoreCase)),
 			Auth = Get("auth") ?? defaults.Auth,
 			EntraTenant = Get("entra-tenant"),
 			EntraClientId = Get("entra-client-id"),
