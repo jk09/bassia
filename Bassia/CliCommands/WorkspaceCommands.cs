@@ -462,7 +462,10 @@ internal static class WorkspaceCommands
 		var hydrator = new Lazy.Hydrator(monorepo.Repo, local, Log);
 		if (OperatingSystem.IsWindows())
 		{
-			throw new MonorepoException("ProjFS lazy folders are not available yet.");
+			var projfs = new Lazy.ProjFsServer(local.Files, local.Root, Lazy.ProjFsServer.ControlDirectory(local.StateFile), hydrator.Hydrate, Log);
+			projfs.Run();
+			return Ok(invocation, $"Served '{local.Root}' until it was stopped; {projfs.Hydrated} placeholder(s) hydrated.",
+				new Dictionary<string, object?> { ["hydrated"] = projfs.Hydrated });
 		}
 
 		var server = new Lazy.FuseServer(local.Files, hydrator.Hydrate, Log);

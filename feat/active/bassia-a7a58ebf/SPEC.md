@@ -77,9 +77,11 @@ Delivered in three phases, each a separate pull request against this record.
 
 ### Phase 2b - lazy materialization through ProjFS (Windows)
 
-- [ ] Windows: a ProjFS provider (the `Client-ProjFS` optional feature) backs the workspace folder; placeholders
-      hydrate on first read, and writes mark the path modified for the next snapshot.
-- [ ] The laziness test passes on Windows in CI.
+- [x] Windows: a ProjFS provider (the `Client-ProjFS` optional feature) projects the backing directory into the
+      workspace folder (the virtualization root); a file is hydrated when first read, and changes stay in the folder,
+      which snapshots read. A command that rewrites the backing directory asks the server to drop those paths from the
+      folder, so it shows them anew.
+- [ ] The laziness and CLI tests pass on Windows in CI (`Dev Drive (Windows)` job, with ProjFS enabled).
 
 ### Phase 3 - documentation and live validation
 
@@ -136,6 +138,12 @@ Delivered in three phases, each a separate pull request against this record.
   Rejected: an in-memory projection (listings would need the trees on every call, and a crash would lose edits).
 - **The FUSE binding is P/Invoke to libfuse 3's high-level API** with `UnmanagedCallersOnly` callbacks; no package
   is needed. macOS (macFUSE) shares the code but is not tested in CI.
+- **ProjFS through the pure C# `Microsoft.Windows.ProjFS` package (2.1)** (phase 2b), projecting the same backing
+  directory as FUSE. Unlike FUSE, ProjFS keeps writes in the virtualization root, so on Windows snapshots read the
+  folder (and need it served), and tree changes under it go to the server as refresh requests in a control directory
+  (`<id>.projfs/requests`), which deletes the on-disk state of those paths; a lock file held while serving tells
+  whether it runs. Rejected: projecting from the tree state directly (two sources of truth for listings) and IPC over
+  named pipes (a file protocol also queues requests while no server runs).
 - The context-spec lives on the workspace record, not in the client's tree state: it defines the workspace, so every
   client, Studio and a replay agree on it (unlike load rules, which were per checkout).
 
@@ -144,7 +152,7 @@ Delivered in three phases, each a separate pull request against this record.
 - [x] Specification agreed (open questions answered).
 - [x] Phase 1: context-spec on the workspace, load rules removed, boundary; docs and help updated with it.
 - [x] Phase 2a: FUSE provider (Linux; macOS untested), laziness tests through real mounts, CI installs FUSE 3.
-- [ ] Phase 2b: ProjFS provider (Windows).
+- [ ] Phase 2b: ProjFS provider (Windows) - implemented; awaiting CI on Windows.
 - [ ] Phase 3: documentation, live validation.
 
 ## Validation

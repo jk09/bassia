@@ -47,7 +47,7 @@ jobs:
       # AzuriteIntegrationTests fails instead of checking nothing when Azurite is missing.
       BASSIA_TEST_REQUIRE_AZURITE: '1'
       # LazyFolderTests mount real FUSE file systems, and fail instead of checking nothing when FUSE is missing.
-      BASSIA_TEST_REQUIRE_FUSE: '1'
+      BASSIA_TEST_REQUIRE_LAZY: '1'
     steps:
       - uses: actions/checkout@v5
 
@@ -160,6 +160,19 @@ jobs:
 
       - name: Test block cloning
         run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName~DevDrive|FullyQualifiedName~CloneCache" --logger "console;verbosity=normal"
+
+      # Lazy workspace folders on Windows are served by ProjFS, an optional feature the runner does not enable.
+      - name: Enable ProjFS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart -All | Format-List
+          Get-Item "$env:WINDIR\System32\ProjectedFSLib.dll" | Select-Object FullName, Length
+
+      - name: Test lazy folders (ProjFS)
+        env:
+          BASSIA_TEST_REQUIRE_LAZY: '1'
+        run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName~LazyFolder" --logger "console;verbosity=normal"
 
   local-cloud:
     name: Local cloud (${{ matrix.mode }}, ${{ matrix.os }})

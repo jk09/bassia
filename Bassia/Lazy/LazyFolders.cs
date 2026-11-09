@@ -92,6 +92,19 @@ internal sealed class FuseFolders(Monorepo monorepo) : ILazyFolders
 
 	public bool IsMounted(LocalWorkspace local) => MountPoints().Contains(Path.GetFullPath(local.Root).TrimEnd('/'));
 
+	public bool ScansFolder => false;
+
+	public Task RefreshAsync(LocalWorkspace local, IReadOnlyList<string> paths, CancellationToken ct = default) => Task.CompletedTask;
+
+	public async Task RemoveFolderAsync(LocalWorkspace local, CancellationToken ct = default)
+	{
+		await UnmountAsync(local, ct);
+		if (Directory.Exists(local.Root))
+		{
+			Directory.Delete(local.Root, true);
+		}
+	}
+
 	/// <summary>The mount points of this machine: /proc/self/mountinfo on Linux, mount(8) on macOS.</summary>
 	private static HashSet<string> MountPoints()
 	{
@@ -150,16 +163,77 @@ internal sealed class FuseFolders(Monorepo monorepo) : ILazyFolders
 	}
 }
 
-/// <summary>Lazy folders on Windows (ProjFS): not built yet.</summary>
+/// <summary>
+/// Lazy folders on Windows: a ProjFS provider per folder, in a background <c>bassia workspace serve</c> process that
+/// holds a lock file while it serves, and takes refresh requests and a stop file from its control directory.
+/// </summary>
 internal sealed class ProjFsFolders(Monorepo monorepo) : ILazyFolders
 {
-	public string? Unavailable => "ProjFS lazy folders are not available yet";
+	private string? unavailable;
+	private bool checkedAvailability;
 
-	public Task MountAsync(LocalWorkspace local, CancellationToken ct = default) => throw new NotSupportedException(Unavailable);
+	public string? Unavailable
+	{
+		get
+		{
+			if (!checkedAvailability)
+			{
+				unavailable = ProjFsServer.Unavailable();
+				checkedAvailability = true;
+			}
 
-	public Task UnmountAsync(LocalWorkspace local, CancellationToken ct = default) => Task.CompletedTask;
+			return unavailable;
+		}
+	}
 
-	public bool IsMounted(LocalWorkspace local) => false;
+	public bool ScansFolder => true;
 
-	internal Monorepo Monorepo => monorepo;
+	private static string Control(LocalWorkspace local) => ProjFsServer.ControlDirectory(local.StateFile);
+
+	public async Task MountAsync(LocalWorkspace local, CancellationToken ct = default)
+	{
+		if (!IsMounted(local))
+		{
+			await LazyFolders.StartServerAsync(monorepo, local, () => IsMounted(local), ct);
+		}
+	}
+
+	public Task UnmountAsync(LocalWorkspace local, CancellationToken ct = default) => ProjFsControl.StopAsync(Control(local), ct);
+
+	/// <summary>Served while the server holds its lock file.</summary>
+	public bool IsMounted(LocalWorkspace local) => ProjFsControl.IsServing(Control(local));
+
+	public Task RefreshAsync(LocalWorkspace local, IReadOnlyList<string> paths, CancellationToken ct = default) =>
+		ProjFsControl.RefreshAsync(Control(local), paths, ct);
+
+	public async Task RemoveFolderAsync(LocalWorkspace local, CancellationToken ct = default)
+	{
+		// A virtualization root is emptied while it is served (its placeholders need the provider), then removed.
+		if (Directory.Exists(local.Root))
+		{
+			await MountAsync(local, ct);
+			foreach (var entry in new DirectoryInfo(local.Root).EnumerateFileSystemInfos())
+			{
+				if (entry is DirectoryInfo directory)
+				{
+					directory.Delete(true);
+				}
+				else
+				{
+					entry.Delete();
+				}
+			}
+		}
+
+		await UnmountAsync(local, ct);
+		if (Directory.Exists(local.Root))
+		{
+			Directory.Delete(local.Root, true);
+		}
+
+		if (Directory.Exists(Control(local)))
+		{
+			Directory.Delete(Control(local), true);
+		}
+	}
 }

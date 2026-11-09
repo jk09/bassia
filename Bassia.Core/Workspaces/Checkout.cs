@@ -151,6 +151,17 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 	/// <summary>Files written as placeholders by this provider.</summary>
 	public int Placeholders { get; private set; }
 
+	/// <summary>The paths (files and directories) this provider wrote or removed since <see cref="TakeChanged"/>.</summary>
+	private readonly List<string> changed = [];
+
+	/// <summary>The paths written or removed since the last call, for a virtual file system to show again.</summary>
+	public IReadOnlyList<string> TakeChanged()
+	{
+		var paths = changed.Distinct(StringComparer.Ordinal).ToList();
+		changed.Clear();
+		return paths;
+	}
+
 	/// <summary>The modification time of placeholders: in the past, so a snapshot trusts it (no racy re-hash).</summary>
 	private readonly DateTime placeholderTime = new(DateTime.UtcNow.AddMinutes(-1).Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc);
 
@@ -181,12 +192,14 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 					emptied.Add(change.Path);
 				}
 
+				changed.Add(change.Path);
 				continue;
 			}
 
 			if (state.Entries.Remove(change.Path))
 			{
 				Delete(change.Path);
+				changed.Add(change.Path);
 				emptied.Add(PathNames.Parent(change.Path));
 			}
 		}
@@ -197,6 +210,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		foreach (var change in written)
 		{
 			state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
+			changed.Add(change.Path);
 		}
 
 		RemoveEmptyDirectories(emptied);
@@ -211,6 +225,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 		{
 			Delete(path);
 			state.Entries.Remove(path);
+			changed.Add(path);
 		}
 
 		RemoveEmptyDirectories(dropped.Select(PathNames.Parent));
@@ -221,7 +236,11 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			var all = await repo.Trees.DiffAsync(null, state.Tree, "", context.IsAll ? null : context.MayContainUnder, ct);
 			foreach (var change in all.Where(change => change.New?.Kind == EntryKind.Tree))
 			{
-				Directory.CreateDirectory(Full(change.Path));
+				if (!Directory.Exists(Full(change.Path)))
+				{
+					Directory.CreateDirectory(Full(change.Path));
+					changed.Add(change.Path);
+				}
 			}
 
 			var adding = all.Where(change => change.New is { } leaf && leaf.Kind != EntryKind.Tree && context.Contains(change.Path) && !state.Entries.ContainsKey(change.Path)).ToList();
@@ -229,6 +248,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 			foreach (var change in adding)
 			{
 				state.Entries[change.Path] = await WriteAsync(change.Path, change.New!, ct);
+				changed.Add(change.Path);
 				added++;
 			}
 		}
@@ -390,6 +410,7 @@ public sealed class CheckoutProvider(string root, Repository repo) : IWorkspaceP
 				}
 
 				Directory.Delete(full);
+				changed.Add(dir);
 			}
 		}
 	}

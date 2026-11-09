@@ -27,6 +27,7 @@
     <PackageReference Include="AWSSDK.S3" Version="4.0.104.7" />
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.30.1" />
+    <PackageReference Include="Microsoft.Windows.ProjFS" Version="2.1.0" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="System.CommandLine" Version="2.0.14" />
     <PackageReference Include="Tomlyn.Signed" Version="2.10.1" />

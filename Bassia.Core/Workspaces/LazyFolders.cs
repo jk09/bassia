@@ -18,6 +18,21 @@ public interface ILazyFolders
 
 	/// <summary>Whether the folder is projected now.</summary>
 	bool IsMounted(LocalWorkspace local);
+
+	/// <summary>
+	/// Whether snapshots read the projected folder (and need it served) rather than the backing directory: ProjFS
+	/// keeps changes in the folder itself; FUSE passes them through to the backing directory.
+	/// </summary>
+	bool ScansFolder { get; }
+
+	/// <summary>
+	/// Tells the server that these paths of the backing directory changed under it (a sync, an undo, a context change),
+	/// so the folder shows them again; returns once it does. FUSE shows the backing directory as it is: nothing to do.
+	/// </summary>
+	Task RefreshAsync(LocalWorkspace local, IReadOnlyList<string> paths, CancellationToken ct = default);
+
+	/// <summary>Stops serving the folder and removes it (not the backing directory).</summary>
+	Task RemoveFolderAsync(LocalWorkspace local, CancellationToken ct = default);
 }
 
 /// <summary>How a workspace folder gets its files: written in full, or as placeholders hydrated on first use.</summary>

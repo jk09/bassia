@@ -13,7 +13,7 @@ using static Bassia.Tests.TestEnvironment;
 
 /// <summary>
 /// Lazy workspace folders: placeholders written without fetching any content, hydrated on first use - by the helper
-/// on every platform, and through a real FUSE mount on Linux (BASSIA_TEST_REQUIRE_FUSE=1 makes a missing FUSE fail).
+/// on every platform, and through a real FUSE mount on Linux (ProjFS on Windows; BASSIA_TEST_REQUIRE_LAZY=1 makes a missing one fail).
 /// </summary>
 [Collection("fuse")]
 public sealed class LazyFolderTests : IDisposable
@@ -113,45 +113,88 @@ public sealed class LazyFolderTests : IDisposable
 		Assert.Null(await repo.Repo.OpenWorkspaceNamedAsync("lazy"));
 	}
 
-	private static bool FuseHere()
+	/// <summary>Whether this machine has the virtual file system for lazy folders (FUSE, or ProjFS on Windows).</summary>
+	private static bool LazyHere()
 	{
-		var why = FuseServer.Unavailable();
-		if (why is not null && Environment.GetEnvironmentVariable("BASSIA_TEST_REQUIRE_FUSE") == "1")
+		var why = OperatingSystem.IsWindows() ? ProjFsServer.Unavailable() : FuseServer.Unavailable();
+		if (why is not null && Environment.GetEnvironmentVariable("BASSIA_TEST_REQUIRE_LAZY") == "1")
 		{
-			Assert.Fail($"FUSE is required here but unavailable: {why}");
+			Assert.Fail($"Lazy folders are required here but unavailable: {why}");
 		}
 
 		return why is null;
 	}
 
-	[Fact]
-	public async Task ThroughFuse_ReadingAFileHydratesOnlyIt_AndWritesAreSnapshotted()
+	/// <summary>A FUSE or ProjFS server for one folder, in this process.</summary>
+	private sealed class InProcessServer
 	{
-		if (!FuseHere())
+		private readonly CancellationTokenSource stop = new();
+		private Thread? thread;
+		private Func<int>? hydrated;
+
+		public string? Control { get; private set; }
+
+		public string? Root { get; private set; }
+
+		public int Hydrated => hydrated?.Invoke() ?? 0;
+
+		public async Task StartAsync(Repository repo, LocalWorkspace local)
+		{
+			Root = local.Root;
+			var hydrator = new Hydrator(repo, local);
+			if (OperatingSystem.IsWindows())
+			{
+				Control = ProjFsServer.ControlDirectory(local.StateFile);
+				var server = new ProjFsServer(local.Files, local.Root, Control, hydrator.Hydrate);
+				hydrated = () => server.Hydrated;
+				thread = new Thread(() => server.Run(stop.Token)) { IsBackground = true };
+				thread.Start();
+				await WaitAsync(() => ProjFsControl.IsServing(Control));
+			}
+			else
+			{
+				var server = new FuseServer(local.Files, hydrator.Hydrate);
+				hydrated = () => server.Hydrated;
+				thread = new Thread(() => server.Run(local.Root)) { IsBackground = true };
+				thread.Start();
+				await WaitAsync(() => IsMountPoint(local.Root));
+			}
+		}
+
+		public Task RefreshAsync(IReadOnlyList<string> paths) => Control is null ? Task.CompletedTask : ProjFsControl.RefreshAsync(Control, paths);
+
+		public void Stop()
+		{
+			stop.Cancel();
+			if (Root is not null)
+			{
+				Unmount(Root);
+			}
+
+			thread?.Join(TimeSpan.FromSeconds(20));
+		}
+	}
+
+	[Fact]
+	public async Task ThroughTheVirtualFileSystem_ReadingAFileHydratesOnlyIt_AndChangesAreSnapshotted()
+	{
+		if (!LazyHere())
 		{
 			return;
 		}
 
-		Thread? thread = null;
-		FuseServer? server = null;
-		LocalWorkspace? mounted = null;
+		var server = new InProcessServer();
 		Repository? repository = null;
-		var (repo, store, client, _) = await SetupAsync(async local =>
-		{
-			mounted = local;
-			var hydrator = new Hydrator(repository!, local);
-			server = new FuseServer(local.Files, hydrator.Hydrate);
-			thread = new Thread(() => server.Run(local.Root)) { IsBackground = true };
-			thread.Start();
-			await WaitAsync(() => IsMountPoint(local.Root));
-		});
+		var (repo, store, client, lazy) = await SetupAsync(local => server.StartAsync(repository!, local));
 		repository = repo.Repo;
+		lazy.ScansFolder = OperatingSystem.IsWindows();
+		lazy.Refresh = (_, paths) => server.RefreshAsync(paths);
 		var big = await ContentIdsAsync(repo.Repo, "api/src/big.cs");
-		var server_ = await ContentIdsAsync(repo.Repo, "api/src/server.cs");
+		var serverFile = await ContentIdsAsync(repo.Repo, "api/src/server.cs");
 		repo.Repo.Objects.ClearCache();
 		store.Reads.Clear();
 
-		var (state, local) = await client.CreateAsync("fuse", temp.Combine("ws"), context: ContextSpec.Parse(["*,api/"]), lazy: true);
+		var (state, local) = await client.CreateAsync("vfs", temp.Combine("ws"), context: ContextSpec.Parse(["*,api/"]), lazy: true);
 		try
 		{
 			var root = local.Root;
@@ -161,14 +204,15 @@ public sealed class LazyFolderTests : IDisposable
 			Assert.Equal(Files["api/src/big.cs"]!.Length, new FileInfo(Path.Combine(root, "api", "src", "big.cs")).Length);
 			Assert.Empty(store.Reads.Intersect(big));
 
-			// Reading one file fetches exactly its content.
+			// Reading one file fetches exactly its content; a snapshot after it sees no change.
 			Assert.Equal(Files["api/src/server.cs"], await File.ReadAllTextAsync(Path.Combine(root, "api", "src", "server.cs")));
-			Assert.NotEmpty(store.Reads.Intersect(server_));
+			Assert.NotEmpty(store.Reads.Intersect(serverFile));
 			Assert.Empty(store.Reads.Intersect(big));
-			Assert.Equal(1, server!.Hydrated);
+			Assert.Equal(1, server.Hydrated);
 			Assert.False((await client.SnapshotAsync(state)).Changed);
+			Assert.Empty(store.Reads.Intersect(big));
 
-			// Writing through the mount: an edit of a placeholder keeps the rest of its content, a new file is added.
+			// Changes through the folder: an edit of a placeholder keeps the rest of its content, a new file, a rename.
 			await File.AppendAllTextAsync(Path.Combine(root, "api", "src", "big.cs"), "// more\n");
 			await File.WriteAllTextAsync(Path.Combine(root, "api", "new.cs"), "class New {}\n");
 			File.Move(Path.Combine(root, "README.md"), Path.Combine(root, "README.txt"));
@@ -179,24 +223,32 @@ public sealed class LazyFolderTests : IDisposable
 			Assert.Equal("# acme\n", working["README.txt"]);
 			Assert.Equal("app();\n", working["web/app.js"]);
 
+			// A sync changes a file the folder already read: the folder shows the new content.
+			await repo.CommitAsync(new Dictionary<string, string?> { ["api/src/server.cs"] = "class Server2 {}\n" }, "other");
+			var synced = await client.SyncAsync(snapshot.Workspace);
+			Assert.Empty(synced.Conflicts);
+			Assert.Equal("class Server2 {}\n", await File.ReadAllTextAsync(Path.Combine(root, "api", "src", "server.cs")));
+			Assert.False((await client.SnapshotAsync(synced.Workspace)).Changed);
+
 			// A change outside the context is refused, as in a full folder.
 			await File.WriteAllTextAsync(Path.Combine(root, "web", "x.js"), "x\n");
-			await Assert.ThrowsAsync<ContextBoundaryException>(() => client.SnapshotAsync(snapshot.Workspace));
+			await Assert.ThrowsAsync<ContextBoundaryException>(() => client.SnapshotAsync(synced.Workspace));
 		}
 		finally
 		{
-			Unmount(local.Root);
-			thread?.Join(TimeSpan.FromSeconds(10));
+			server.Stop();
 		}
 
-		Assert.False(IsMountPoint(local.Root));
-		Assert.NotNull(mounted);
+		if (!OperatingSystem.IsWindows())
+		{
+			Assert.False(IsMountPoint(local.Root));
+		}
 	}
 
 	[Fact]
 	public async Task TheCli_ServesALazyFolderInTheBackground_AndRemovesIt()
 	{
-		if (!FuseHere() || Environment.GetEnvironmentVariable("BASSIA_TEST_POSTGRES") is not { Length: > 0 })
+		if (!LazyHere() || Environment.GetEnvironmentVariable("BASSIA_TEST_POSTGRES") is not { Length: > 0 })
 		{
 			return;
 		}
@@ -211,35 +263,48 @@ public sealed class LazyFolderTests : IDisposable
 
 		var created = await OkAsync(root, "workspace", "create", "lazy", "-materialize", "lazy");
 		var folder = Path.Combine(root, "workspaces", "lazy");
+		var id = (string)created["id"];
+		bool Served() => OperatingSystem.IsWindows()
+			? ProjFsControl.IsServing(Path.Combine(root, ".bassia", "workspaces", id + ".projfs"))
+			: IsMountPoint(folder);
 		try
 		{
 			Assert.Equal("lazy", created["materialize"]);
 			Assert.Equal(2L, created["files_placeholders"]);
-			Assert.True(IsMountPoint(folder));
+			Assert.True(Served());
 			Assert.Equal("a\n", await File.ReadAllTextAsync(Path.Combine(folder, "api", "a.cs")));
 			await File.WriteAllTextAsync(Path.Combine(folder, "api", "c.cs"), "c\n");
 			var status = await OkAsync(folder, "workspace", "status");
 			Assert.Contains("1 added", (string)status["message"]);
 
 			await OkAsync(root, "workspace", "unmount", "lazy");
-			Assert.False(IsMountPoint(folder));
+			Assert.False(Served());
 			await OkAsync(root, "workspace", "mount", "lazy");
-			Assert.True(IsMountPoint(folder));
+			Assert.True(Served());
 			Assert.Equal("b\n", await File.ReadAllTextAsync(Path.Combine(folder, "api", "b.cs")));
-			Assert.Contains("hydrated api/b.cs", await File.ReadAllTextAsync(Path.Combine(root, ".bassia", "workspaces", (string)created["id"] + ".mount.log")));
+			Assert.Contains("hydrated api/b.cs", await File.ReadAllTextAsync(Path.Combine(root, ".bassia", "workspaces", id + ".mount.log")));
+			Assert.Equal("c\n", await File.ReadAllTextAsync(Path.Combine(folder, "api", "c.cs")));
 
 			await OkAsync(root, "workspace", "close", "lazy", "-remove");
-			Assert.False(IsMountPoint(folder));
+			Assert.False(Served());
 			Assert.False(Directory.Exists(folder));
 		}
 		finally
 		{
-			Unmount(folder);
+			if (Served())
+			{
+				await OkAsync(root, "workspace", "unmount", "lazy");
+			}
 		}
 	}
 
 	private static bool IsMountPoint(string path)
 	{
+		if (!OperatingSystem.IsLinux())
+		{
+			return false;
+		}
+
 		var full = Path.GetFullPath(path).TrimEnd('/');
 		return File.ReadLines("/proc/self/mountinfo").Any(line => line.Split(' ') is { Length: > 4 } fields && fields[4] == full);
 	}
@@ -264,6 +329,8 @@ public sealed class LazyFolderTests : IDisposable
 
 	internal sealed class FakeLazyFolders(Func<LocalWorkspace, Task>? mount) : ILazyFolders
 	{
+		public Func<LocalWorkspace, IReadOnlyList<string>, Task>? Refresh { get; set; }
+
 		public int Mounts { get; private set; }
 
 		public int Unmounts { get; private set; }
@@ -286,6 +353,22 @@ public sealed class LazyFolderTests : IDisposable
 		}
 
 		public bool IsMounted(LocalWorkspace local) => false;
+
+		public bool ScansFolder { get; set; }
+
+		public Task RefreshAsync(LocalWorkspace local, IReadOnlyList<string> paths, CancellationToken ct = default) =>
+			Refresh?.Invoke(local, paths) ?? Task.CompletedTask;
+
+		public Task RemoveFolderAsync(LocalWorkspace local, CancellationToken ct = default)
+		{
+			Unmounts++;
+			if (Directory.Exists(local.Root))
+			{
+				Directory.Delete(local.Root, true);
+			}
+
+			return Task.CompletedTask;
+		}
 	}
 
 	/// <summary>An in-memory store that records the ids it is asked to read.</summary>

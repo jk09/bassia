@@ -270,17 +270,24 @@ bassia workspace mount big-fix                                         # serve i
 ```
 
 - **How.** The files and placeholders live in a backing directory (`.bassia/workspaces/<id>.files`), and a virtual
-  file system projects it at the workspace's folder. On Linux and macOS that is a FUSE file system served by a
-  background `bassia workspace serve <w>` process (log: `.bassia/workspaces/<id>.mount.log`); `workspace create`
-  and `checkout` start it, `agent start` makes sure it runs, and `workspace close` stops it (`-remove` also deletes the
-  backing directory). A placeholder is hydrated - its content fetched through the client's cache - just before it is
-  opened, truncated, renamed, linked, or has its mode or times set; listings and sizes never fetch anything.
-- **Snapshots** read the backing directory, never the mount, and treat an untouched or merely read placeholder as
-  unchanged; edits, new files and deletions through the folder are snapshotted as in a full folder, and the context
-  boundary applies the same way. `.bassia.toml` is always written in full.
-- **Requirements.** Linux: FUSE 3 (`apt install fuse3`, `/dev/fuse`); macOS: macFUSE with libfuse 3 (not tested in CI).
-  Windows uses ProjFS (see `bassia-a7a58ebf`, phase 2b). Where none is available, a lazy folder is refused with the
-  reason, and a full one works as always.
+  file system projects it at the workspace's folder, served by a background `bassia workspace serve <w>` process (log:
+  `.bassia/workspaces/<id>.mount.log`). `workspace create` and `checkout` start it, `agent start` and every snapshot
+  make sure it runs, and `workspace close` stops it (`-remove` also deletes the backing directory).
+  - On **Linux and macOS** it is a FUSE file system, a passthrough to the backing directory: a placeholder is hydrated -
+    its content fetched through the client's cache - just before it is opened, truncated, renamed, linked, or has its
+    mode or times set. Snapshots read the backing directory.
+  - On **Windows** it is a ProjFS provider: the folder is a virtualization root, a file's content is hydrated when it
+    is first read, and changes stay in the folder, which snapshots read. When a sync, undo or context change rewrites
+    the backing directory, the command asks the server to drop those paths from the folder so it shows them anew.
+
+  Listings and sizes never fetch anything.
+- **Snapshots** treat an untouched or merely read placeholder as unchanged; edits, new files, renames and deletions
+  through the folder are snapshotted as in a full folder, and the context boundary applies the same way.
+  `.bassia.toml` is always written in full.
+- **Requirements.** Linux: FUSE 3 (`apt install fuse3`, `/dev/fuse`). Windows: the Projected File System feature
+  (`Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart`, as an administrator). macOS:
+  macFUSE with libfuse 3 (not tested in CI). Where none is available, a lazy folder is refused with the reason, and a
+  full one works as always.
 - Results of `workspace create|clone|checkout` report `materialize` and, for a lazy folder, `files_placeholders`.
 
 ## Workspaces on a Dev Drive (Windows)
@@ -734,7 +741,8 @@ Bassia has four projects; each depends only on the ones before it.
      snapshots enforce), and `WorkspaceClient`, which snapshots and keeps folders in step with the record's tree and
      context.
 2. **`Bassia`** - the CLI: the commands (`Cli`, `CliCommands`), lazy folders (`Lazy`: `FuseServer`, a libfuse 3
-   passthrough over the backing directory that hydrates placeholders, served by `workspace serve`), the store implementations that need more than the core
+   passthrough over the backing directory that hydrates placeholders, and `ProjFsServer`, a ProjFS provider over it
+   (the `Microsoft.Windows.ProjFS` package), each served by `workspace serve`), the store implementations that need more than the core
    may use (`Stores`: `PostgresState` (`bassia-server` and local monorepos) for heads, path index and leases and `PostgresTreeStore` for trees; `S3ObjectStore` and
    `AzureBlobObjectStore`; the remote stores and landing of a client over HTTP, with batched reads and writes), `Monorepo` (a local monorepo or a client, giving every command the same core), agentic runs
    (`Agents`), git interop and the merge driver (`Interop`), Windows block cloning and the clone cache for Dev Drive

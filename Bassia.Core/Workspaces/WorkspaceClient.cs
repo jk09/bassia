@@ -30,6 +30,9 @@ public sealed class LocalWorkspace(string id, string root, string stateFile, IWo
 	/// <summary>Where the files really are: the backing directory of a lazy folder, else the folder.</summary>
 	public string Files => State.Backing ?? Root;
 
+	/// <summary>The provider that reads the folder for snapshots, when it is not <see cref="Provider"/> (a ProjFS folder keeps changes itself).</summary>
+	public IWorkspaceProvider? Scanner { get; init; }
+
 	public void Save() => State.Save(StateFile);
 }
 
@@ -151,7 +154,10 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 			return null;
 		}
 
-		return new LocalWorkspace(state.Id, path, StateFile(state.Id), providers(files, state.Id, tree.Backing is not null), tree);
+		return new LocalWorkspace(state.Id, path, StateFile(state.Id), providers(files, state.Id, tree.Backing is not null), tree)
+		{
+			Scanner = tree.Backing is not null && lazyFolders is { ScansFolder: true } ? providers(path, state.Id, false) : null
+		};
 	}
 
 	/// <summary>Where a lazy folder of workspace <paramref name="id"/> keeps its files and placeholders.</summary>
@@ -182,7 +188,13 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		var policy = await PolicyAsync(local, ct);
 		// The record's context-spec is the boundary, even when another client changed it and this folder is not in step yet.
-		var scan = await local.Provider.ScanAsync(local.State, policy, true, ct, ContextSpec.Of(state.Record.Context));
+		if (local.Scanner is not null)
+		{
+			// The folder holds the changes, and only a served folder lists its placeholders.
+			await lazyFolders!.MountAsync(local, ct);
+		}
+
+		var scan = await (local.Scanner ?? local.Provider).ScanAsync(local.State, policy, true, ct, ContextSpec.Of(state.Record.Context));
 		var diskTree = scan.Changes.Count == 0 ? local.State.Tree : await repo.Trees.EditAsync(local.State.Tree, scan.Changes, ct);
 		var current = state;
 		var working = await repo.Objects.ReadCommitAsync(current.Record.Working, ct);
@@ -191,6 +203,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 			local.State.Tree = diskTree;
 			await ApplyContextAsync(local, current, ct);
 			local.Save();
+			await RefreshAsync(local, ct);
 			return new SnapshotResult(current, scan.Changes, scan.Hashed, true);
 		}
 
@@ -206,6 +219,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		await ApplyContextAsync(local, updated, ct);
 		local.Save();
+		await RefreshAsync(local, ct);
 		return new SnapshotResult(updated, scan.Changes, scan.Hashed, true);
 	}
 
@@ -293,7 +307,17 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 
 		var result = await ApplyContextAsync(local, state, ct);
 		local.Save();
+		await RefreshAsync(local, ct);
 		return result;
+	}
+
+	/// <summary>Has a lazy folder's server show again what the provider just changed in the backing directory.</summary>
+	private async Task RefreshAsync(LocalWorkspace local, CancellationToken ct)
+	{
+		if (local.IsLazy && local.Provider is CheckoutProvider provider && provider.TakeChanged() is { Count: > 0 } paths && lazyFolders is not null)
+		{
+			await lazyFolders.RefreshAsync(local, paths, ct);
+		}
 	}
 
 	/// <summary>Removes the workspace's directory (and a lazy one's backing directory) and its tree state from this machine.</summary>
@@ -305,7 +329,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 			{
 				if (lazyFolders is not null)
 				{
-					await lazyFolders.UnmountAsync(local, ct);
+					await lazyFolders.RemoveFolderAsync(local, ct);
 				}
 
 				if (Directory.Exists(local.Files))
