@@ -367,7 +367,7 @@ internal sealed unsafe class FuseServer
 
 		private static readonly string[] Candidates = OperatingSystem.IsMacOS()
 			? ["/usr/local/lib/libfuse3.dylib", "/usr/local/lib/libfuse3.4.dylib", "libfuse3.dylib"]
-			: ["libfuse3.so.3", "libfuse3.so"];
+			: ["libfuse3.so.4", "libfuse3.so.3", "libfuse3.so"];
 
 		public static bool TryLoad() => Candidates.Any(candidate => NativeLibrary.TryLoad(candidate, out _));
 
@@ -396,7 +396,8 @@ internal sealed unsafe class FuseServer
 
 		public static void SetHandle(IntPtr fi, ulong handle) => *(ulong*)((byte*)fi + 16) = handle;
 
-		[DllImport(Library)]
+		/// <summary><c>fuse_new</c> of the 3.1 API, exported under this name by libfuse 3.1 to 3.18 (<c>fuse_new</c> itself is a macro or versioned).</summary>
+		[DllImport(Library, EntryPoint = "fuse_new_31")]
 		public static extern IntPtr fuse_new(FuseArgs* args, FuseOperations* ops, nuint size, IntPtr userData);
 
 		[DllImport(Library)]
