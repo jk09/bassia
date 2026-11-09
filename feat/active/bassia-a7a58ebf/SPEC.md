@@ -85,9 +85,9 @@ Delivered in three phases, each a separate pull request against this record.
 
 ### Phase 3 - documentation and live validation
 
-- [ ] `docs/reference.md` replaces "Load rules" with "Context-specs" (grammar, `[context]`, commands, the boundary, the
+- [x] `docs/reference.md` replaces "Load rules" with "Context-specs" (grammar, `[context]`, commands, the boundary, the
       file system providers and their requirements); `bassia help` lists the concept.
-- [ ] A live run on the local cloud whose context is one project of an imported monorepo: the client's cache holds
+- [x] A live run on the local cloud whose context is one project of an imported monorepo: the client's cache holds
       only the files the agent opened, and an edit outside the context is refused.
 
 ## Approach
@@ -153,7 +153,8 @@ Delivered in three phases, each a separate pull request against this record.
 - [x] Phase 1: context-spec on the workspace, load rules removed, boundary; docs and help updated with it.
 - [x] Phase 2a: FUSE provider (Linux; macOS untested), laziness tests through real mounts, CI installs FUSE 3.
 - [ ] Phase 2b: ProjFS provider (Windows) - implemented; awaiting CI on Windows.
-- [ ] Phase 3: documentation, live validation.
+- [x] Phase 3: documentation, live validation (see Validation; it also found that a landed workspace's lazy folder
+      kept being served, now unmounted on landing).
 
 ## Validation
 
@@ -162,3 +163,18 @@ Delivered in three phases, each a separate pull request against this record.
   test for the record round-trip.
 - A run on the local cloud (`bassia-local-cloud` skill) whose workspace's context is one project of an imported
   monorepo: the client's cache holds only what the agent opened.
+
+### Live validation (2026-11-09)
+
+On Linux, with Azurite (Blob Storage) and PostgreSQL behind a `bassia-server`, a git repository with `api/` (5 files
+and a 2 MB `testdata/big.bin`), `web/` and `docs/` was imported through one client (seq 1). A second, fresh client ran
+`agent start -context "src/api/,!src/api/testdata/" -materialize lazy -land` with a command that read and appended to
+`src/api/src/a1.cs`, listed `src/api/src` and `src/web`, and printed `BASSIA_CONTEXT`:
+
+- the run saw all five `api` files listed, `src/web` empty, and `BASSIA_CONTEXT=src/api/,!src/api/testdata/`; it
+  landed at seq 2 with exactly one changed path;
+- the server's log shows one hydration (`src/api/src/a1.cs`); the client's cache held 5.8 KB in 23 objects - trees and
+  `a1.cs`, none of `a2..a5.cs`, `web/`, `docs/` or the 2 MB fixture;
+- a run with `-context src/api/` writing `src/web/x.js` failed with the boundary refusal as its last line, and nothing
+  reached mainline.
+

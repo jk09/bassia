@@ -283,6 +283,11 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 		if (!request.DryRun && result.Outcome == LandOutcome.Landed && await repo.FindWorkspaceAsync(state.Id, ct) is { } after)
 		{
 			await UpdateDirectoryAsync(after, ct);
+			if (!after.IsOpen)
+			{
+				// A landed workspace's lazy folder is no longer served; 'workspace mount' serves it again.
+				await UnmountAsync(after, ct);
+			}
 		}
 
 		return result;

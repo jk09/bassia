@@ -285,6 +285,14 @@ public sealed class LazyFolderTests : IDisposable
 			Assert.Contains("hydrated api/b.cs", await File.ReadAllTextAsync(Path.Combine(root, ".bassia", "workspaces", id + ".mount.log")));
 			Assert.Equal("c\n", await File.ReadAllTextAsync(Path.Combine(folder, "api", "c.cs")));
 
+			// Landing ends the workspace and stops serving its folder.
+			await OkAsync(root, "workspace", "land", "lazy", "-keep");
+			Assert.True(Served());
+			await OkAsync(root, "workspace", "create", "landing", "-materialize", "lazy");
+			await File.WriteAllTextAsync(Path.Combine(root, "workspaces", "landing", "d.cs"), "d\n");
+			await OkAsync(root, "workspace", "land", "landing");
+			Assert.False(OperatingSystem.IsLinux() && IsMountPoint(Path.Combine(root, "workspaces", "landing")));
+
 			await OkAsync(root, "workspace", "close", "lazy", "-remove");
 			Assert.False(Served());
 			Assert.False(Directory.Exists(folder));
