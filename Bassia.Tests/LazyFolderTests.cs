@@ -309,7 +309,7 @@ public sealed class LazyFolderTests : IDisposable
 			await OkAsync(root, "workspace", "mount", "lazy");
 			Assert.True(Served());
 			Assert.Equal("b\n", await File.ReadAllTextAsync(Path.Combine(folder, "api", "b.cs")));
-			Assert.Contains("hydrated api/b.cs", await File.ReadAllTextAsync(Path.Combine(root, ".bassia", "workspaces", id + ".mount.log")));
+			Assert.Contains("hydrated api/b.cs", LazyFolders.ReadShared(Path.Combine(root, ".bassia", "workspaces", id + ".mount.log")));
 			Assert.Equal("c\n", await File.ReadAllTextAsync(Path.Combine(folder, "api", "c.cs")));
 
 			// Landing ends the workspace and stops serving its folder.

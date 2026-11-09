@@ -450,7 +450,8 @@ internal static class WorkspaceCommands
 			? found
 			: throw new MonorepoException($"Workspace '{state.Name}' has no lazy folder on this machine.");
 		var logFile = Lazy.LazyFolders.LogFile(monorepo, state.Id);
-		await using var log = new StreamWriter(logFile, append: true) { AutoFlush = true };
+		// Shared, so the log can be read (and the folder's state removed) while the server writes it (Windows locks otherwise).
+		await using var log = new StreamWriter(new FileStream(logFile, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { AutoFlush = true };
 		void Log(string line)
 		{
 			lock (log)

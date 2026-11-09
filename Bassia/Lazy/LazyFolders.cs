@@ -14,6 +14,14 @@ internal static class LazyFolders
 	/// <summary>The log of the process that serves a workspace's folder.</summary>
 	public static string LogFile(Monorepo monorepo, string workspace) => Path.Combine(monorepo.BassiaDir, "workspaces", workspace + ".mount.log");
 
+	/// <summary>Reads a file another process may be writing (the server's log).</summary>
+	public static string ReadShared(string file)
+	{
+		using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+		using var reader = new StreamReader(stream);
+		return reader.ReadToEnd();
+	}
+
 	/// <summary>Starts <c>bassia workspace serve</c> in the background and waits until <paramref name="mounted"/> says the folder is projected.</summary>
 	public static async Task StartServerAsync(Monorepo monorepo, LocalWorkspace local, Func<bool> mounted, CancellationToken ct)
 	{
@@ -25,7 +33,7 @@ internal static class LazyFolders
 		{
 			if (process.HasExited || clock.Elapsed > TimeSpan.FromSeconds(30))
 			{
-				var tail = File.Exists(log) ? string.Join(" | ", File.ReadLines(log).TakeLast(5)) : "";
+				var tail = File.Exists(log) ? string.Join(" | ", ReadShared(log).Split('\n', StringSplitOptions.RemoveEmptyEntries).TakeLast(5)) : "";
 				var output = process.HasExited ? (await process.StandardError.ReadToEndAsync(ct)).Trim() : "";
 				throw new MonorepoException($"The lazy folder '{local.Root}' could not be served{(process.HasExited ? $" (the server exited with {process.ExitCode})" : " in 30 s")}: " +
 					$"{(tail.Length > 0 ? tail : output.Length > 0 ? output : "no output")}.");
