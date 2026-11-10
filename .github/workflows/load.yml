@@ -1,0 +1,66 @@
+# Runs the load harness (Bassia.LoadTest, docs/reference.md "Load harness") on demand against a server it hosts on the
+# job's PostgreSQL, and keeps the report as an artifact. Not part of CI: a full scenario takes minutes to hours.
+name: Load
+
+on:
+  workflow_dispatch:
+    inputs:
+      arguments:
+        description: 'bassia-loadtest arguments, e.g. "run -scenario medium" or "sweep -closed 100,1000,10000"'
+        required: true
+        default: 'run -scenario medium'
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_CHANNEL: '10.0'
+  DOTNET_FEED: 'https://builds.dotnet.microsoft.com/dotnet'
+
+jobs:
+  load:
+    name: Load harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      BASSIA_TEST_POSTGRES: Host=127.0.0.1;Port=5432;Username=postgres;Password=postgres;Database=postgres
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the .NET SDK
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$DOTNET_CHANNEL/latest.version" | tr -d '\r' | sed '/^$/d' | tail -n 1)
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL --retry 3 "$DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-linux-x64.tar.gz" | tar -xz -C "$HOME/.dotnet"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: dotnet build Bassia.LoadTest --configuration Release
+
+      # The arguments come through the environment, never pasted into the script; they are split into words on purpose.
+      - name: Run
+        env:
+          LOAD_ARGUMENTS: ${{ inputs.arguments }}
+        run: |
+          set -f
+          dotnet Bassia.LoadTest/bin/Release/net10.0/bassia-loadtest.dll $LOAD_ARGUMENTS -out "$RUNNER_TEMP/loadtest" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-report
+          path: ${{ runner.temp }}/loadtest
+          if-no-files-found: ignore

@@ -94,19 +94,16 @@ Backfill, and repair after a crash, is the catch-up the path index already has: 
 - **Touched paths come from the candidate.** The server already computes them when it reconciles; a workspace that is
   not reconciled yet is found by its missing candidate instead.
 
-Open questions (to resolve before implementation):
+Confirmed by the user (were open questions):
 
-1. `CLAUDE.md` and the reference state that the core reaches storage through four traits (`ITreeStore` is in practice a
-   fifth). Is a further trait, `IWorkspaceIndex`, acceptable, or should the registry's methods join `IViewStore`?
-   Proposed: its own trait - it is derived data like `IPathIndex`, and remote, memory and PostgreSQL implementations
-   stay small.
-2. Writing the row in the head's transaction needs the head move and the summary in one store call. Proposed: the
-   PostgreSQL store implements both traits and offers one combined call that `Repository.CommitWorkspaceAsync` and
-   `/heads/advance` use; stores without it (memory) do the two steps under a lock. Alternative: write the row after
-   the head and let readers repair a stale row by comparing its head - simpler, but every reader pays a check.
-3. Should closed workspaces' touched paths be kept (for a later "who changed this path" view), or dropped when the
-   workspace closes? Proposed: dropped; the path index already answers that for landed changes.
-4. Paging of `workspace list -all` and of Studio's Workspaces page: is a page of 100, newest first, the right default?
+- **`IWorkspaceIndex` is a trait of its own**, beside `IPathIndex`: derived data, with memory, PostgreSQL and remote
+  implementations. `CLAUDE.md` and the reference's count of the core's traits are updated with it.
+- **The row is written in the head's transaction**, through one combined store call that
+  `Repository.CommitWorkspaceAsync` and `/heads/advance` use; stores without it (memory) do the two steps under a lock.
+  Rejected: writing the row afterwards and letting every reader check its head.
+- **Touched paths are dropped when a workspace closes**; the path index answers "who changed this path" for landed
+  changes.
+- **Lists of closed workspaces are paged**: 100 per page, newest first, in `workspace list -all` and Studio.
 
 ## Progress
 

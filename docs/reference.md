@@ -716,7 +716,7 @@ changes the outcome of the command. The choice is stored in `feedback.toml` in t
 
 ## Architecture
 
-Bassia has four projects; each depends only on the ones before it.
+Bassia has five projects; each depends only on the ones before it.
 
 1. **`Bassia.Core`** - the version core. It may not reference an HTTP client, a cloud SDK or a database driver (a test
    checks its references).
@@ -752,6 +752,8 @@ Bassia has four projects; each depends only on the ones before it.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
    disk, garbage collection), the store contract over memory and PostgreSQL, the CLI in-process on local monorepos, the
    server in-process with clients over HTTP (on PostgreSQL), and git interop.
+5. **`Bassia.LoadTest`** - `bassia-loadtest`, the load harness: it hosts a `bassia-server`, seeds a synthetic monorepo
+   and measures what each operation costs under many agents (see "Load harness").
 
 
 ### Trees
@@ -860,6 +862,78 @@ The agent's arguments carry quotes, `$` and a backslash, which must reach it unc
 pruning, status); `DevDriveTests` clone for real on the volume named by `BASSIA_TEST_DEVDRIVE_DIR` - the
 `Dev Drive (Windows)` CI job formats a VHD as a Dev Drive (plain ReFS where it cannot) for them; without the variable
 they check nothing.
+
+### Load harness
+
+`Bassia.LoadTest` (`bassia-loadtest`) measures how `bassia-server` behaves at a chosen scale. It is not part of
+`dotnet test`: CI runs only its smoke scenario, which fails when the harness breaks and never on timing. The `Load`
+workflow runs any scenario on demand and keeps the report as an artifact.
+
+```sh
+dotnet run --project Bassia.LoadTest -c Release -- run                                  # the small scenario
+dotnet run --project Bassia.LoadTest -c Release -- run -scenario medium -agents 100     # a scenario, with a parameter changed
+dotnet run --project Bassia.LoadTest -c Release -- sweep -closed 100,1000,10000         # one parameter at several values
+dotnet run --project Bassia.LoadTest -c Release -- smoke                                # seconds; what CI runs
+dotnet run --project Bassia.LoadTest -c Release -- compare before.toml after.toml       # what got slower or cheaper
+```
+
+A run has three parts. **Seeding** builds the state through the version core alone (trees, commits and landings written
+to the stores, no working folders): the monorepo's files as seq 1, then the history, one landing each, the closed
+workspaces that history leaves behind (the rest abandoned) and open workspaces with unlanded work. **The agents** then
+work in rounds against the server over HTTP, through the same remote stores a clone uses: in a round every agent
+creates a workspace, takes an intent lease and snapshots, all at once; then all land - agents with paths of their own
+at once, agents that meet on a shared file one after another in the order of their numbers, so the first lands and the
+others are refused, abandon their workspace and replay on a new one. Odd-numbered agents sync before they land. **The
+read operations** follow on the state that leaves, each on a client that has cached nothing (a job container that just
+started): listing open workspaces, resolving one by name, the conflict overview, mainline at seq 1, a log page in the
+middle of history and at the head, and - in a hosted server - the scan for stale workspaces the server makes after
+every landing, the reconciliation a node does at start, and a dry run of garbage collection.
+
+| Parameter | `small` | `medium` | `large` | Meaning |
+| --- | ---: | ---: | ---: | --- |
+| `-files` | 5,000 | 100,000 | 1,000,000 | Files in the seeded monorepo. |
+| `-fanout` | 50 | 100 | 100 | Entries per directory (files in a leaf directory, directories above). |
+| `-history` | 200 | 2,000 | 10,000 | Landings on mainline before measuring. |
+| `-closed` | 200 | 4,000 | 20,000 | Closed workspaces left behind. |
+| `-open` | 20 | 100 | 500 | Open, idle workspaces with unlanded work. |
+| `-agents` | 8 | 50 | 500 | Agents working at once. |
+| `-rounds` | 2 | 2 | 2 | Operations per agent: rounds of create, snapshot, land. |
+| `-snapshots` | 2 | 2 | 2 | Snapshots per round. |
+| `-changes` | 3 | 3 | 3 | Files changed per snapshot. |
+| `-overlap` | 0.25 | 0.25 | 0.25 | Share of agents that also change a file other agents change. |
+| `-probes` | 3 | 3 | 3 | Repetitions of each read operation. |
+| `-seed` | 1 | 1 | 1 | Everything random follows from it. |
+
+The same parameters and seed give the same tree, the same changes and the same order of landings on shared files:
+two runs end on the same mainline tree (`tree` in the report). Commit and operation ids differ (they carry the time).
+
+By default the harness **hosts the server** itself: local-disk blobs in a temporary folder and a schema of its own in
+the PostgreSQL of `-postgres` (default `BASSIA_TEST_POSTGRES`), both dropped afterwards. Each of the server's two
+stores holds at most 40 connections, so a default PostgreSQL is enough. `-data <folder>` keeps the seeded state (the
+blobs, and the name of its schema) and a later run with the same folder and state parameters continues on it without
+seeding. `-server <url> -token <t>` measures a server that is already running instead; it must be empty, or `-no-seed`
+runs the agents on what is there. `-no-gc` skips the garbage-collection dry run.
+
+The report goes to `-out` (default `loadtest-reports/`) as `<name>.toml` and `<name>.md`, and the Markdown to standard
+output. Per operation it gives the count, the throughput while it ran, latency at p50, p95, p99 and the maximum
+(measured at the client, from request to reply), and what one execution asked of the server on average: HTTP
+**requests**, PostgreSQL **statements** and **blob calls**. Statements and blob calls come only from a hosted server,
+which counts them per request (every Npgsql command; every object asked about, read or written in the blob store, as
+a cloud blob store would be called) and returns them in the `X-Bassia-Statements` and `X-Bassia-Blob-Calls` response
+headers. Work no request asked for - the server's background reconciliation - is reported per landing. `reconciled
+after a snapshot` is the time from a snapshot to the `reconciled` event on the watch stream. Landings are listed by
+outcome.
+
+Read times with care and counts with confidence: times depend on the machine, counts do not. The counts of the read
+operations are the same in every run; those of the agents' operations vary a little with timing (a landing takes the
+fast path only when the server reconciled the workspace first).
+
+A **sweep** runs the scenario once per value, each on a fresh state, and reports how each operation changed from the
+smallest value to the largest. When the parameter sizes the state (`-files`, `-fanout`, `-history`, `-closed`, `-open`)
+the work asked for is the same at every value, so an operation is marked **grows** when its statements, blob calls or
+requests rose by half or its median latency tripled: it costs more only because the state is larger. `compare` lists
+the operations whose p50, p95, requests, statements or blob calls differ between two reports by more than
+`-threshold` percent (default 20), for a run or value by value for two sweeps.
 
 ### The cloud backend on this machine: Azurite and PostgreSQL
 

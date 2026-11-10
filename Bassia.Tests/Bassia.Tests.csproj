@@ -27,6 +27,7 @@
     <ProjectReference Include="..\Bassia\Bassia.csproj" />
     <ProjectReference Include="..\Bassia.Server\Bassia.Server.csproj" />
     <ProjectReference Include="..\Bassia.Studio\Bassia.Studio.csproj" />
+    <ProjectReference Include="..\Bassia.LoadTest\Bassia.LoadTest.csproj" />
   </ItemGroup>
 
 </Project>

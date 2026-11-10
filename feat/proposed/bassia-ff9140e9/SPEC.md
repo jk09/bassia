@@ -79,17 +79,13 @@ background step at start walks the log once from that seq down to 0 in batches, 
 - **Workspace id and time in the entry.** The log page and Studio's history show them; storing them avoids reading
   the operation for each row of a page.
 
-Open questions (to resolve before implementation):
+Confirmed by the user (were open questions):
 
-1. Changing `IPathIndex.ApplyAsync`'s signature touches every implementation and `RemotePathIndex`. Is extending the
-   trait acceptable, or should the entry go through a separate optional interface the stores also implement?
-   Proposed: extend the trait - there are three implementations, and an optional interface invites a store that
-   indexes paths but not seqs.
-2. Should the entry also keep the landing's first line of intent and its author, so a log page reads no objects at
-   all? Proposed: no - a page of 50 reads 50 small cached objects in one batch; keep the table narrow.
-3. Backfill on a long history holds no lock on landings, but takes time. Is a background backfill with fallback
-   acceptable, or should `bassia-server migrate` finish it before nodes start? Proposed: background, and
-   `bassia-server migrate` also runs it to completion for deployments that migrate as a release step.
+- **`IPathIndex` is extended** (`ApplyAsync` takes the landing's entry; `GetEntryAsync`, `ListEntriesAsync`), rather
+  than adding an optional interface a store might leave out.
+- **The row stays narrow**: no intent or author; a log page reads its operations and commits in one batch.
+- **Backfill runs in the background** with the walk as fallback, and `bassia-server migrate` runs it to completion for
+  deployments that migrate as a release step.
 
 ## Progress
 

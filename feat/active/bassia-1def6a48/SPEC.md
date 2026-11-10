@@ -1,6 +1,6 @@
 # Load harness: measure the server under many agents and a large monorepo
 
-Status: proposed. Part 1 of 3 of the first scalability step; it measures what `bassia-c7ba795f` (workspace registry)
+Status: active. Part 1 of 3 of the first scalability step; it measures what `bassia-c7ba795f` (workspace registry)
 and `bassia-ff9140e9` (mainline index) improve.
 
 ## Outcome
@@ -56,19 +56,23 @@ accepted by measurement instead of by reading the code.
 
 ## Approach
 
-A new project, `Bassia.LoadTest`, a console program beside `Bassia.Tests`. It references `Bassia` and `Bassia.Server`
-and drives the server the way clients do - `ServerConnection` and the remote stores over HTTP - with agents as tasks in
-its own process, not as `bassia` processes or working folders: the subject is the server, and the client's scan and
-checkout are already covered by `SyncEfficiencyTests`. Seeding writes trees, commits and operations straight through
-the server's stores (or through the API for a remote server) and lands them, so history and closed workspaces exist
-as they would after real use.
+A new project, `Bassia.LoadTest` (`bassia-loadtest`), a console program beside `Bassia.Tests`. It references `Bassia`
+and `Bassia.Server` and drives the server the way clients do - `ServerConnection` and the remote stores over HTTP -
+with agents as tasks in its own process, not as `bassia` processes or working folders: the subject is the server, and
+the client's scan and checkout are already covered by `SyncEfficiencyTests`. Seeding writes trees, commits and
+operations through the version core (straight to the stores of a hosted server, through the API for a remote one) and
+lands them, so history and closed workspaces exist as they would after real use.
 
-Cost per operation comes from two counters around the server's stores when the harness hosts the server: the existing
-`CountingObjectStore` over the blob store, and a statement counter on the Npgsql data source (its command tracing), both
-attributed to the request in flight. Against a remote server only latency and throughput are reported.
+Cost per operation is counted inside the hosted server, per request, and returned to the client: `ServerOptions` has
+two hooks that are not command-line switches - `DecorateBlobs` (the harness wraps the blob store and counts its calls)
+and `RequestProbe` (a middleware around each request). The probe charges every Npgsql command (an `ActivityListener`
+on Npgsql's activity source) and every blob call made in the request's execution context to that request and sets two
+response headers; the client's HTTP handler adds them to the operation in flight. Work outside a request (the
+reconcile queue) is charged to a background total. Against a remote server only latency and requests are reported.
 
-Latency is measured at the client, from request to reply; background work (reconciliation after a landing) is measured
-from the event to the `reconciled` event on the watch stream.
+Latency is measured at the client, from request to reply. The server's work after a landing is measured twice: the
+scan for stale workspaces directly in the hosted server (time and counts), and the time from a snapshot to its
+`reconciled` event on the watch stream.
 
 ## Decisions
 
@@ -77,15 +81,33 @@ from the event to the `reconciled` event on the watch stream.
 - **Counts of statements and blob calls beside time.** Times on a developer machine vary; counts do not, and growth of
   a count with an unrelated parameter is the defect this harness exists to show.
 - **Not part of `dotnet test`.** Only a smoke scenario runs in CI, and it never fails on timing.
+- **Rounds, with landings on shared files in agent order.** Free-running agents make the order of overlapping landings
+  a matter of timing. In a round all agents create and snapshot at once, then land: agents with paths of their own at
+  once, agents meeting on a shared file one after another. The outcome (who lands, who replays) and the final tree are
+  the same in every run; concurrency is kept where it does not decide content.
+- **Reproducible means the same tree.** Commit and operation ids carry the time and differ between runs. The counts of
+  the read operations repeat exactly; those of the agents' operations vary slightly, because a landing takes the fast
+  path only when the background reconciliation got there first.
+- **Seeding writes workspace records directly**, not through `WorkspaceService.CreateAsync`, whose name check lists
+  every workspace - seeding 20,000 workspaces must not cost what the run is there to measure - and runs before the
+  server starts, so the server's reconciliation does not follow every seeded landing.
+- **Agents share one object cache; read operations use a cold client.** Agents on one machine share `.bassia/cache`;
+  the read operations are measured as a job container that just started would pay for them, which also makes their
+  counts repeatable.
+- **`-data <folder>` keeps and reuses a state** (instead of a separate keep switch): the folder holds the blobs and
+  the name of the schema. A run on a kept state continues on it; what the agents write includes the starting seq, so
+  they make changes of their own.
+- **A sweep marks growth only for parameters that size the state.** For load parameters (agents, rounds) more work is
+  asked for, so growth says nothing.
 
-Open questions (to resolve before implementation):
+Confirmed by the user (were open questions):
 
-1. Where should the full scenarios run - on demand only, or also on a schedule in CI (nightly) with the report kept as
-   an artifact? Proposed: on demand, plus a manually triggered workflow.
-2. Which target numbers should the default "large" scenario use? Proposed: 1,000,000 files, 10,000 landings of
-   history, 20,000 closed and 500 open workspaces, 500 concurrent agents.
-3. Should the harness also run against the Azure backend (Azurite locally) from the start, or the local-disk blob
-   store only at first? Proposed: local disk first; the remote-server mode already covers a deployed Azure server.
+- **Full scenarios run on demand**, plus a manually triggered workflow that keeps the report as an artifact; no
+  nightly run.
+- **The default large scenario**: 1,000,000 files, 10,000 landings of history, 20,000 closed and 500 open workspaces,
+  500 concurrent agents.
+- **Local-disk blob store first.** Azurite is not a harness backend for now; the remote-server mode covers a deployed
+  Azure server.
 
 ## Progress
 
@@ -97,8 +119,13 @@ Open questions (to resolve before implementation):
 
 ## Validation
 
-- `dotnet run --project Bassia.LoadTest -- smoke` (the CI scenario) passes with `BASSIA_TEST_POSTGRES` set.
-- `dotnet run --project Bassia.LoadTest -- sweep -workspaces 100,1000,10000` reports reconciliation after a landing
-  and workspace listing as growing with the number of workspaces on today's `main`.
-- Two runs with the same seed report the same counts of statements and blob calls.
+- `dotnet run --project Bassia.LoadTest -c Release -- smoke` (the CI scenario) passes with `BASSIA_TEST_POSTGRES` set,
+  hosted and against a separately started `bassia-server` (`-server`).
+- `dotnet run --project Bassia.LoadTest -c Release -- sweep -closed 100,1000,10000` marks workspace creation, listing,
+  name resolution and the reconciliation at start as growing with the number of closed workspaces on today's `main`.
+- Two runs with the same seed end on the same mainline tree and report the same requests, statements and blob calls
+  for the read operations.
+- `run -scenario large` with few agents seeds 1,000,000 files and 10,000 landings; a second run with the same `-data`
+  folder does not seed.
+- `compare` of two reports lists the operations that differ.
 - `dotnet test` passes and takes no longer than before.

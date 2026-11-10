@@ -66,6 +66,12 @@ internal sealed record ServerOptions
 	/// <summary>A shell command a machine-merged tree must pass before it lands; without one semantic conflicts need a replay.</summary>
 	public string? Validate { get; init; }
 
+	/// <summary>Decorates the blob store the server works on (the load harness counts its calls). Not a command-line switch.</summary>
+	public Func<Bassia.Core.Storage.IObjectStore, Bassia.Core.Storage.IObjectStore>? DecorateBlobs { get; init; }
+
+	/// <summary>A middleware ahead of every other, around each request (the load harness measures what a request costs). Not a command-line switch.</summary>
+	public Func<Microsoft.AspNetCore.Http.HttpContext, Microsoft.AspNetCore.Http.RequestDelegate, Task>? RequestProbe { get; init; }
+
 	/// <summary>Reads options from <c>-name value</c> switches, falling back to <c>BASSIA_SERVER_*</c> environment variables (containers).</summary>
 	public static ServerOptions Parse(IReadOnlyList<string> args)
 	{
