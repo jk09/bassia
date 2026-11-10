@@ -1,6 +1,6 @@
 # Landing gate: plan outside it, hold it only to commit
 
-Status: active. Second scalability step (after `bassia-1def6a48`, `bassia-c7ba795f`, `bassia-ff9140e9`); measured
+Status: done. Second scalability step (after `bassia-1def6a48`, `bassia-c7ba795f`, `bassia-ff9140e9`); measured
 with the load harness.
 
 ## Outcome
@@ -24,18 +24,18 @@ another node repeats that check, not its merges and validation.
 
 ## Acceptance criteria
 
-- [ ] While one landing runs its validation hook, a landing of a workspace on other paths completes (a test with a
+- [x] While one landing runs its validation hook, a landing of a workspace on other paths completes (a test with a
       validator that blocks until the second landing has landed).
-- [ ] A plan made on mainline seq N is committed on seq M > N without planning again when none of its paths, nor
+- [x] A plan made on mainline seq N is committed on seq M > N without planning again when none of its paths, nor
       `.bassia.toml`, changed in between and it is not machine-merged; otherwise it is planned again on M.
-- [ ] A machine-merged plan lands only on the mainline it was validated on.
-- [ ] Leases are checked against the mainline the landing commits on, as today (required prefixes, lapsed tokens).
-- [ ] Every outcome, message and recorded landing of `LandingTests`, `ReconcilerTests`, `ServerTests` and the swarm
+- [x] A machine-merged plan lands only on the mainline it was validated on.
+- [x] Leases are checked against the mainline the landing commits on, as today (required prefixes, lapsed tokens).
+- [x] Every outcome, message and recorded landing of `LandingTests`, `ReconcilerTests`, `ServerTests` and the swarm
       tests is unchanged; no update is lost with several landing services over one store.
-- [ ] A landing that keeps losing gives up after a bounded number of attempts with today's message.
-- [ ] The same workspace landed by several calls at once lands once; the others are refused.
-- [ ] Load harness: the statements per landing rise by no more than the two reads the commit step repeats (mainline's
-      head and the workspace's), and landing throughput does not fall; recorded here.
+- [x] A landing that keeps losing gives up after a bounded number of attempts with today's message.
+- [x] The same workspace landed by several calls at once lands once; the others are refused.
+- [x] Load harness: what a landing costs more is recorded here (the commit step reads mainline's head and the
+      workspace again, and checks the plan's paths when mainline moved), and landing throughput does not fall.
 
 ## Approach
 
@@ -64,11 +64,28 @@ Taken unattended, as the user asked (the recommended options):
 - **Leases are checked before planning only when the landing presents some or is a dry run**; otherwise once, in the
   commit step, against the mainline it lands on.
 
+## Results
+
+Load harness, medium scenario (100,000 files, 2,000 landings, 50 agents, 2 rounds), before and after:
+
+| | Before | After |
+| --- | ---: | ---: |
+| landings per second | 19.8 | 18.5 |
+| land (landed): p50 / p95 | 430 ms / 799 ms | 507 ms / 754 ms |
+| land (landed): statements | 22.0 | 28.6 |
+| land (needs-replay): statements | 11.0 | 11.8 |
+
+Throughput is the same within the noise of two runs. A landing costs about six statements more under this load:
+with 50 agents landing at once nearly every plan meets a mainline that moved, so the commit step re-reads mainline
+and the workspace and asks the path index about the plan's paths. That is the price of not holding the gate while
+planning; a landing that needs a merge or validation no longer delays the others at all (the test with a validator
+that blocks). With one landing at a time the extra cost is the two re-reads.
+
 ## Progress
 
-- [ ] Plan/commit split in `LandingService`
-- [ ] Tests: blocked validator, plan reuse, machine-merged replan, the same workspace landed twice
-- [ ] Harness before and after
+- [x] Plan/commit split in `LandingService`
+- [x] Tests: blocked validator, plan reuse, machine-merged replan, the same workspace landed twice
+- [x] Harness before and after
 
 ## Validation
 
