@@ -105,6 +105,10 @@ jobs:
       - name: Test
         run: dotnet test --configuration Release --no-build --filter "Category!=Azurite" --logger "console;verbosity=normal"
 
+      # The load harness on its smallest scenario: it fails when the harness breaks, never on how fast the runner is.
+      - name: Load harness (smoke)
+        run: dotnet Bassia.LoadTest/bin/Release/net10.0/bassia-loadtest.dll smoke -out "$RUNNER_TEMP/loadtest"
+
   devdrive:
     name: Dev Drive (Windows)
     # Block cloning of workspace files on a real ReFS volume: a VHD formatted as a Dev Drive (plain ReFS where this

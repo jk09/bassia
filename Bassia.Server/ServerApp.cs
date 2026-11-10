@@ -74,6 +74,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		Trees = new PostgresTreeStore(options.Postgres, options.Migrate);
+		Blobs = options.DecorateBlobs?.Invoke(Blobs) ?? Blobs;
 		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees);
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
@@ -146,6 +147,11 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		app = builder.Build();
+		if (options.RequestProbe is { } probe)
+		{
+			app.Use(probe);
+		}
+
 		app.UseResponseCompression();
 		if (options.CorsOrigins.Count > 0)
 		{
