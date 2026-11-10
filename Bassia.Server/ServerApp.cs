@@ -130,6 +130,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		Reconciling.Start();
+		backfill = Task.Run(BackfillAsync);
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
 		builder.Logging.ClearProviders();
 		builder.WebHost.UseUrls(options.Url);
@@ -172,6 +173,34 @@ internal sealed class ServerApp : IAsyncDisposable
 	}
 
 	public Task WaitForShutdownAsync() => app!.WaitForShutdownAsync();
+
+	private Task? backfill;
+	private readonly CancellationTokenSource stopping = new();
+
+	/// <summary>The mainline index's backfill, when the server started one (tests wait for it).</summary>
+	internal Task Backfilled => backfill ?? Task.CompletedTask;
+
+	/// <summary>
+	/// Records the landings from before the mainline index, in the background: until it reaches a seq, reading mainline
+	/// at that seq walks the log as it always did. Several nodes may run it at once; they record the same rows.
+	/// </summary>
+	private async Task BackfillAsync()
+	{
+		try
+		{
+			if (await Repo.BackfillMainlineIndexAsync(stopping.Token) is > 0 and var recorded)
+			{
+				Console.Error.WriteLine($"bassia-server: recorded {recorded} landing(s) in the mainline index.");
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		catch (Exception ex)
+		{
+			Console.Error.WriteLine($"bassia-server: the mainline index's backfill stopped: {ex.Message}; it resumes at the next start.");
+		}
+	}
 
 	// ----- authorization -----
 
@@ -403,6 +432,14 @@ internal sealed class ServerApp : IAsyncDisposable
 			var main = await Repo.GetMainAsync();
 			return Json(new Api.MainReply(main.Head, main.Seq, main.CommitId, main.Tree));
 		});
+
+		// The mainline index: the landing at a seq and pages of the log, without walking it.
+		api.MapGet("/main/log", async (long from, int? count) =>
+		{
+			await IndexAsync();
+			return Json(await State.ListEntriesAsync(from, Math.Clamp(count ?? 50, 1, 5000)));
+		});
+		api.MapGet("/main/indexed", async () => Json(new Api.SeqReply(await State.EntryCountAsync())));
 
 		// Heads (the view store).
 		api.MapGet("/heads/{*name}", async (string name) => Json(new Api.HeadReply(await State.GetHeadAsync(new HeadName(Uri.UnescapeDataString(name))))));
@@ -843,6 +880,12 @@ internal sealed class ServerApp : IAsyncDisposable
 		{
 			await app.StopAsync();
 			await app.DisposeAsync();
+		}
+
+		await stopping.CancelAsync();
+		if (backfill is not null)
+		{
+			await backfill;
 		}
 
 		await Reconciling.DisposeAsync();

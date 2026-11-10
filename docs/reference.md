@@ -463,7 +463,7 @@ bassia-server migrate -postgres "<connection string>" [-check]   # bring the sch
 ### Schema versions and migrations
 
 The PostgreSQL schema is versioned per component - `state` (heads, path index, meta, leases, lease queue, fencing
-sequence, workspace registry) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
+sequence, workspace registry, mainline index) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
 in the connection's schema. Steps are numbered from 1, run in order, each once, in one transaction with the version
 bump; migration 1 is the schema as it was created before versioning. On start the server (and every local monorepo
 or clone command) reads the version in one query; only when it is behind does it take a session advisory lock keyed
@@ -496,7 +496,7 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   `-azure-prefix` (default `objects/`), keyed by hash prefix. Chunks of 256 KiB and more move between clients and the
   container directly on SAS URLs valid for 30 minutes; the server never proxies them.
 - **PostgreSQL**: `-postgres <connection string>` (PostgreSQL 13 or later), the same as on any server. The tables (`bassia_heads`,
-  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, `bassia_workspaces`, `bassia_workspace_paths`, sequence `bassia_fencing`) are created and migrated on start
+  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, `bassia_workspaces`, `bassia_workspace_paths`, `bassia_mainline`, sequence `bassia_fencing`) are created and migrated on start
   (see "Schema versions and migrations"); Terraform provisions the server, not the schema.
   Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
   transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
@@ -550,6 +550,7 @@ The RPC surface under `/api/v1` is what a client's remote stores call:
 | Call | Purpose |
 | --- | --- |
 | `GET /main` | GetHead: mainline's head operation, seq, commit and tree. |
+| `GET /main/log?from=&count=`, `GET /main/indexed` | The mainline index: the landings at and below a seq, newest first (operation, view, commit, tree, workspace, time), and how many it holds. |
 | `GET /watch` | A stream (server-sent events) of landings with the prefixes they touched, of workspaces that moved, and of workspaces reconciled (`reconciled`). |
 | `GET /conflicts` | The live conflict overview: every open workspace reconciled with mainline, overlaps between open workspaces, hot paths. |
 | `POST /objects/fetch` | GetObjects: many objects in one binary reply (structural objects and chunks under 256 KiB); what it leaves out is read on its direct URL. |
@@ -675,7 +676,7 @@ where a setting has one, wins over the file. Repository policy is not a setting:
 ## Garbage collection and scrubbing
 
 Rewrites create garbage quickly. `bassia gc` (local monorepo) and `bassia-server gc` mark every object reachable from
-the retained operations - mainline's whole log (the audit trail), every workspace head, and heads named `pin/...` - and
+the retained operations - mainline's whole log (the audit trail; taken from the mainline index, without reading the log), every workspace head, and heads named `pin/...` - and
 the candidates of open workspaces (`rc/...`, whose merge results exist nowhere else; those of closed workspaces are
 dropped), and sweep the blobs nothing reaches that are older than the grace period. A closed workspace's head is pruned
 `gc.retention_days` after it closed, which makes its unlanded snapshots collectable. Workspace name reservations
@@ -756,6 +757,22 @@ Bassia has five projects; each depends only on the ones before it.
 5. **`Bassia.LoadTest`** - `bassia-loadtest`, the load harness: it hosts a `bassia-server`, seeds a synthetic monorepo
    and measures what each operation costs under many agents (see "Load harness").
 
+
+### Mainline index
+
+Mainline is a chain of operations, each pointing at the one before; only its head has a name. The **mainline index**
+keeps, for every seq, the landing itself - operation, view, commit, tree, the workspace that landed, the time and the
+task spec its commit names - in `bassia_mainline`, written by `IPathIndex.ApplyAsync` in the same transaction as that
+seq's path changes, so the two cover the same seqs. Mainline at a past seq (`mainline ... -seq`, Studio's tree, log
+and path history at a seq) is then one lookup and the three objects it names, whatever the distance from the head, and
+garbage collection marks all of mainline from one query instead of reading every operation, view and commit of the
+log.
+
+The index is derived: it is rebuilt from the operation log. Seqs landed before it existed (and seq 0, which has no
+path changes) are recorded by a backfill that walks the log once from the lowest seq held down to 0, in batches, and
+resumes where it stopped - in the background when a server starts, and when a local monorepo is opened. Until it
+reaches a seq, and against a server or store that keeps no index, mainline at that seq is found by walking back from
+the head, as before; garbage collection uses the index only when it holds every seq.
 
 ### Workspace registry
 
@@ -851,7 +868,7 @@ undo and restore, the path index and its rebuild from the operation log, leases 
 agents landing through several landing services, a replay landing with the original change id, garbage collection
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` and `PostgresStateTests` hold the
-in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
+in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `MainlineIndexTests` holds the mainline index to its contract in memory and on PostgreSQL, counts that mainline at a past seq reads the same objects after 8 and after 120 landings, backfills and resumes a backfill, compares what garbage collection marks from the index with what it marks from the log, and lands from several services at once without leaving a seq out. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict

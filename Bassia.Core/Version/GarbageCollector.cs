@@ -69,6 +69,7 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 
 		var live = new HashSet<ObjectId>();
 		var treeRoots = new List<ObjectId>();
+		await MarkMainlineAsync(live, treeRoots, ct);
 		await WalkAsync(roots.Select(op => (op, "op")), live, treeRoots, ct);
 		foreach (var (name, head) in candidates)
 		{
@@ -142,6 +143,52 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 	}
 
 	private ITreeStoreMaintenance? treeMaintenance => repo.Objects.TreeStore as ITreeStoreMaintenance;
+
+	/// <summary>
+	/// Marks mainline from the mainline index when it holds every seq: each landing's operation, view, commit and task
+	/// spec are live and its tree is a root - what walking the log finds, without reading one object of it. The walk
+	/// from mainline's head then stops at once. With an index that is not complete, nothing is marked here and the log is walked.
+	/// </summary>
+	private async Task MarkMainlineAsync(HashSet<ObjectId> live, List<ObjectId> treeRoots, CancellationToken ct)
+	{
+		if (await repo.Views.GetHeadAsync(HeadName.Main, ct) is null)
+		{
+			return;
+		}
+
+		var main = await repo.GetMainAsync(ct);
+		if (await repo.Paths.EntryCountAsync(ct) != main.Seq + 1)
+		{
+			return;
+		}
+
+		var trees = new List<(ObjectId, string)>();
+		for (var from = main.Seq; from >= 0;)
+		{
+			var page = await repo.Paths.ListEntriesAsync(from, 5000, ct);
+			if (page.Count == 0)
+			{
+				break;
+			}
+
+			foreach (var entry in page)
+			{
+				live.Add(entry.Operation);
+				live.Add(entry.View);
+				live.Add(entry.Commit);
+				if (entry.TaskSpec is { } spec)
+				{
+					live.Add(spec);
+				}
+
+				trees.Add((entry.Tree, "tree"));
+			}
+
+			from = page[^1].Seq - 1;
+		}
+
+		await WalkAsync(trees, live, treeRoots, ct);
+	}
 
 	/// <summary>
 	/// With a relational tree store, trees are not walked one by one: their roots are collected and the store computes

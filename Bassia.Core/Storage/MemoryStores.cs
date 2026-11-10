@@ -193,7 +193,46 @@ public sealed class MemoryPathIndex : IPathIndex
 		await Task.CompletedTask;
 	}
 
-	public ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, CancellationToken ct = default)
+	private readonly SortedDictionary<long, MainlineEntry> entries = [];
+
+	public ValueTask<MainlineEntry?> GetEntryAsync(long seq, CancellationToken ct = default)
+	{
+		lock (gate)
+		{
+			return ValueTask.FromResult(entries.GetValueOrDefault(seq));
+		}
+	}
+
+	public Task<IReadOnlyList<MainlineEntry>> ListEntriesAsync(long fromSeq, int count, CancellationToken ct = default)
+	{
+		lock (gate)
+		{
+			return Task.FromResult<IReadOnlyList<MainlineEntry>>(entries.Values.Where(entry => entry.Seq <= fromSeq).Reverse().Take(count).ToList());
+		}
+	}
+
+	public ValueTask RecordEntriesAsync(IReadOnlyList<MainlineEntry> recorded, CancellationToken ct = default)
+	{
+		lock (gate)
+		{
+			foreach (var entry in recorded)
+			{
+				entries.TryAdd(entry.Seq, entry);
+			}
+		}
+
+		return ValueTask.CompletedTask;
+	}
+
+	public ValueTask<long> EntryCountAsync(CancellationToken ct = default)
+	{
+		lock (gate)
+		{
+			return ValueTask.FromResult((long)entries.Count);
+		}
+	}
+
+	public ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, MainlineEntry? entry = null, CancellationToken ct = default)
 	{
 		lock (gate)
 		{
@@ -213,6 +252,10 @@ public sealed class MemoryPathIndex : IPathIndex
 			}
 
 			indexed = seq;
+			if (entry is not null)
+			{
+				entries[seq] = entry;
+			}
 		}
 
 		return ValueTask.CompletedTask;

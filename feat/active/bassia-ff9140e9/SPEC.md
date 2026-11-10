@@ -1,6 +1,6 @@
 # Mainline index: reach any seq of mainline in one lookup
 
-Status: proposed. Part 3 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
+Status: active. Part 3 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
 of `bassia-c7ba795f` (workspace registry).
 
 ## Outcome
@@ -42,11 +42,11 @@ read per landing.
 - [ ] An existing database gets the index by a schema migration and one backfill from the operation log on start
       (a single walk, resumable, done once when several nodes start together); until the backfill covers a seq, lookups
       of that seq fall back to the walk and stay correct. An older build keeps working through a rolling deploy.
-- [ ] `EnsureIndexedAsync` finds where to resume from the index instead of walking back from the head when it is far
-      behind; garbage collection takes mainline's operations, views and commits from the index instead of reading the
-      chain one object at a time, and marks the same objects as today.
-- [ ] A clone resolves a seq and a log page with one call each to the server; an older client that walks the log keeps
-      working.
+- [ ] Garbage collection takes mainline's operations, views, commits, task specs and tree roots from the index instead
+      of reading the chain one object at a time, and marks the same objects as today; with an index that does not hold
+      every seq it walks the log as before.
+- [ ] A clone resolves a seq with one call to the server and then reads that landing's objects; a client of a server
+      without the index, and an older client that walks the log, keep working.
 - [ ] The core's tests run on an in-memory implementation held to the same contract as the PostgreSQL one.
 - [ ] With the harness (`bassia-1def6a48`): mainline at a past seq and a log page no longer grow with the length of
       history, and the report before and after is recorded here.
@@ -78,6 +78,16 @@ background step at start walks the log once from that seq down to 0 in batches, 
 - **Derived, with a fallback to the walk.** Correctness never depends on the index; only cost does.
 - **Workspace id and time in the entry.** The log page and Studio's history show them; storing them avoids reading
   the operation for each row of a page.
+
+- **The entry also names the view and the commit's task spec.** With them garbage collection marks everything a
+  landing holds without reading its operation, view or commit: three blob reads per landing become none.
+- **`EnsureIndexedAsync` is left as it is.** It walks back only from the head to the indexed seq - exactly the landings
+  it has to apply, whose trees it needs anyway - so there is nothing for the index to save there.
+- **No separate log-page call for clients.** Studio's log page and `mainline log` start with mainline at a seq and read
+  the page's operations from there; with the lookup constant, the page costs the page.
+- **`bassia-server migrate` does not backfill**: it runs without a data folder or blob store, and the backfill reads
+  operations. The server backfills in the background at start (lookups fall back to the walk meanwhile); a local
+  monorepo backfills when it is opened and finds landings the index lacks. This replaces the answer to open question 3.
 
 Confirmed by the user (were open questions):
 

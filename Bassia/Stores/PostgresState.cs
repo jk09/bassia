@@ -54,6 +54,11 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 			CREATE TABLE bassia_workspace_paths (path text COLLATE "C" NOT NULL, workspace text COLLATE "C" NOT NULL, PRIMARY KEY (path, workspace));
 			CREATE INDEX bassia_workspace_paths_workspace ON bassia_workspace_paths (workspace);
 			"""),
+		// The mainline index (bassia-ff9140e9): one row per landing, written with the path index; earlier seqs are backfilled. Adds only.
+		new SchemaMigration(3, "mainline index: the landing at every seq", """
+			CREATE TABLE bassia_mainline (seq bigint PRIMARY KEY, op text NOT NULL, view text NOT NULL, commit text NOT NULL, tree text NOT NULL,
+				workspace text, time timestamptz NOT NULL, task_spec text);
+			"""),
 	]);
 
 	/// <param name="schema">Migrate the schema to this build's version (the default), or only check that it is usable (<c>bassia-server -migrate verify</c>).</param>
@@ -74,6 +79,18 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 
 	/// <summary>What opening the schema found and did.</summary>
 	public SchemaStatus SchemaStatus { get; }
+
+	/// <summary>Whether mainline has landings the mainline index does not hold: a database from before it, or a backfill that did not finish.</summary>
+	public bool MainlineNeedsBackfill
+	{
+		get
+		{
+			using var connection = source.OpenConnection();
+			using var command = new NpgsqlCommand(
+				"SELECT EXISTS (SELECT 1 FROM bassia_heads WHERE name = 'main') AND NOT EXISTS (SELECT 1 FROM bassia_mainline WHERE seq = 0)", connection);
+			return (bool)command.ExecuteScalar()!;
+		}
+	}
 
 	/// <summary>Whether workspaces exist that the registry has never recorded: a database from before it, not backfilled yet.</summary>
 	public bool WorkspacesNeedBackfill
@@ -291,7 +308,62 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		}
 	}
 
-	public async ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, CancellationToken ct = default)
+	private const string EntryColumns = "seq, op, view, commit, tree, workspace, time, task_spec";
+
+	private static MainlineEntry ReadEntry(DbDataReader reader) => new(reader.GetInt64(0), ObjectId.Parse(reader.GetString(1)), ObjectId.Parse(reader.GetString(2)),
+		ObjectId.Parse(reader.GetString(3)), ObjectId.Parse(reader.GetString(4)), reader.IsDBNull(5) ? null : reader.GetString(5),
+		reader.GetFieldValue<DateTimeOffset>(6), reader.IsDBNull(7) ? null : ObjectId.Parse(reader.GetString(7)));
+
+	private static Task<int> InsertEntriesAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, IReadOnlyList<MainlineEntry> entries, CancellationToken ct) =>
+		ExecuteAsync(connection, $"""
+			INSERT INTO bassia_mainline ({EntryColumns})
+			SELECT * FROM unnest(@seq::bigint[], @op::text[], @view::text[], @commit::text[], @tree::text[], @workspace::text[], @time::timestamptz[], @spec::text[])
+			ON CONFLICT (seq) DO NOTHING
+			""", transaction, ct,
+			("seq", entries.Select(entry => entry.Seq).ToArray()), ("op", entries.Select(entry => entry.Operation.Hex).ToArray()),
+			("view", entries.Select(entry => entry.View.Hex).ToArray()), ("commit", entries.Select(entry => entry.Commit.Hex).ToArray()),
+			("tree", entries.Select(entry => entry.Tree.Hex).ToArray()), ("workspace", entries.Select(entry => entry.Workspace).ToArray()),
+			("time", entries.Select(entry => entry.Time.UtcDateTime).ToArray()), ("spec", entries.Select(entry => entry.TaskSpec?.Hex).ToArray()));
+
+	public async ValueTask<MainlineEntry?> GetEntryAsync(long seq, CancellationToken ct = default)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		await using var command = Command(connection, $"SELECT {EntryColumns} FROM bassia_mainline WHERE seq = @seq", null, ("seq", seq));
+		await using var reader = await command.ExecuteReaderAsync(ct);
+		return await reader.ReadAsync(ct) ? ReadEntry(reader) : null;
+	}
+
+	public async Task<IReadOnlyList<MainlineEntry>> ListEntriesAsync(long fromSeq, int count, CancellationToken ct = default)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		await using var command = Command(connection, $"SELECT {EntryColumns} FROM bassia_mainline WHERE seq <= @from ORDER BY seq DESC LIMIT @count", null,
+			("from", fromSeq), ("count", (long)count));
+		await using var reader = await command.ExecuteReaderAsync(ct);
+		var entries = new List<MainlineEntry>();
+		while (await reader.ReadAsync(ct))
+		{
+			entries.Add(ReadEntry(reader));
+		}
+
+		return entries;
+	}
+
+	public async ValueTask RecordEntriesAsync(IReadOnlyList<MainlineEntry> entries, CancellationToken ct = default)
+	{
+		if (entries.Count > 0)
+		{
+			await using var connection = await source.OpenConnectionAsync(ct);
+			await InsertEntriesAsync(connection, null, entries, ct);
+		}
+	}
+
+	public async ValueTask<long> EntryCountAsync(CancellationToken ct = default)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		return (long)(await ScalarAsync(connection, "SELECT count(*) FROM bassia_mainline", null, ct))!;
+	}
+
+	public async ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, MainlineEntry? entry = null, CancellationToken ct = default)
 	{
 		await using var connection = await source.OpenConnectionAsync(ct);
 		await using var transaction = await connection.BeginTransactionAsync(ct);
@@ -328,6 +400,12 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 			}
 
 			await writer.CompleteAsync(ct);
+		}
+
+		// The landing itself, in the transaction of its paths: the mainline index and the path index cover the same seqs.
+		if (entry is not null)
+		{
+			await InsertEntriesAsync(connection, transaction, [entry], ct);
 		}
 
 		await ExecuteAsync(connection, "UPDATE bassia_meta SET value = @seq WHERE key = 'indexed_seq'", transaction, ct, ("seq", seq));

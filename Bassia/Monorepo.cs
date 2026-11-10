@@ -72,6 +72,12 @@ internal sealed class Monorepo : IDisposable
 			postgres.Add(State);
 			postgres.Add(trees);
 			Repo = new Repository(disk, State, State, State, chunks, trees, State);
+			if (State.MainlineNeedsBackfill)
+			{
+				// A monorepo made before the mainline index: its landings are recorded once, from the operation log.
+				Repo.BackfillMainlineIndexAsync().GetAwaiter().GetResult();
+			}
+
 			if (State.WorkspacesNeedBackfill)
 			{
 				// A monorepo made before the workspace registry: its workspaces are recorded once, from their heads.

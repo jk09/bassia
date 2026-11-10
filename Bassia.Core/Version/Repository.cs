@@ -121,6 +121,13 @@ public sealed class Repository
 			throw new VersionException($"Mainline has no seq {seq}; its head is at seq {main.Seq}.");
 		}
 
+		// The mainline index names the operation at any seq; without its entry (not backfilled yet, a store that keeps
+		// none) the log is walked back from the head, one operation per landing.
+		if (seq < main.Seq && await Paths.GetEntryAsync(seq, ct) is { } entry)
+		{
+			return await MainAtAsync(entry.Operation, ct);
+		}
+
 		var head = main.Head;
 		var op = main.Operation;
 		while (op.Seq > seq)
@@ -130,6 +137,60 @@ public sealed class Repository
 		}
 
 		return await MainAtAsync(head, ct);
+	}
+
+	/// <summary>A landing as the mainline index keeps it.</summary>
+	public static MainlineEntry EntryOf(MainState state) =>
+		new(state.Seq, state.Head, state.Operation.View, state.CommitId, state.Tree, state.Operation.Workspace,
+			DateTimeOffset.FromUnixTimeMilliseconds(state.Operation.Time.ToUnixTimeMilliseconds()), state.Commit.Recipe?.TaskSpec);
+
+	/// <summary>
+	/// Records in the mainline index the landings it lacks below what the path index applied: one walk of the log from
+	/// the lowest seq it holds down to seq 0, in batches, so an interrupted backfill resumes where it stopped. Returns
+	/// the number of landings recorded; 0 when the index already reaches seq 0.
+	/// </summary>
+	public async Task<long> BackfillMainlineIndexAsync(CancellationToken ct = default)
+	{
+		var main = await GetMainAsync(ct);
+		var count = await Paths.EntryCountAsync(ct);
+		if (count > main.Seq)
+		{
+			return 0;
+		}
+
+		// Entries are written from the head down, so the lowest one held is count - 1 below the highest: start under it.
+		var state = main;
+		var highest = (await Paths.ListEntriesAsync(main.Seq, 1, ct)).FirstOrDefault();
+		if (highest is not null && count > 0 && await Paths.GetEntryAsync(highest.Seq - count + 1, ct) is { } lowest)
+		{
+			if (lowest.Seq == 0)
+			{
+				return 0;
+			}
+
+			var above = await Objects.ReadOperationAsync(lowest.Operation, ct);
+			state = await MainAtAsync(above.Parents[0], ct);
+		}
+
+		long recorded = 0;
+		var batch = new List<MainlineEntry>();
+		while (true)
+		{
+			batch.Add(EntryOf(state));
+			if (batch.Count >= 500 || state.Seq == 0)
+			{
+				await Paths.RecordEntriesAsync(batch, ct);
+				recorded += batch.Count;
+				batch.Clear();
+			}
+
+			if (state.Seq == 0)
+			{
+				return recorded;
+			}
+
+			state = await MainAtAsync(state.Operation.Parents[0], ct);
+		}
 	}
 
 	/// <summary>The operations of a head, newest first.</summary>
@@ -411,7 +472,7 @@ public sealed class Repository
 		while (pending.TryPop(out var next))
 		{
 			var changes = await Trees.DiffAsync(previous, next.Tree, "", ct);
-			await Paths.ApplyAsync(next.Seq, changes.Select(change => new PathChange(change.Path, change.New)).ToList(), ct);
+			await Paths.ApplyAsync(next.Seq, changes.Select(change => new PathChange(change.Path, change.New)).ToList(), EntryOf(next), ct);
 			previous = next.Tree;
 		}
 	}

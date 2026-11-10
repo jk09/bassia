@@ -422,7 +422,38 @@ public sealed class RemotePathIndex(ServerConnection server) : IPathIndex
 		}
 	}
 
-	public ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, CancellationToken ct = default) =>
+	/// <summary>The landing at a seq, in one call; null from a server that does not keep the mainline index (the caller then walks the log).</summary>
+	public async ValueTask<MainlineEntry?> GetEntryAsync(long seq, CancellationToken ct = default) =>
+		(await ListEntriesAsync(seq, 1, ct)).FirstOrDefault(entry => entry.Seq == seq);
+
+	public async Task<IReadOnlyList<MainlineEntry>> ListEntriesAsync(long fromSeq, int count, CancellationToken ct = default)
+	{
+		using var response = await server.Http.GetAsync(ServerConnection.Path($"main/log?from={fromSeq}&count={count}"), ct);
+		if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+		{
+			return [];
+		}
+
+		await ServerConnection.EnsureAsync(response, ct);
+		return (await response.Content.ReadFromJsonAsync<List<MainlineEntry>>(Api.Json, ct))!;
+	}
+
+	public ValueTask RecordEntriesAsync(IReadOnlyList<MainlineEntry> entries, CancellationToken ct = default) =>
+		throw new VersionException("The mainline index is kept by the server.");
+
+	public async ValueTask<long> EntryCountAsync(CancellationToken ct = default)
+	{
+		using var response = await server.Http.GetAsync(ServerConnection.Path("main/indexed"), ct);
+		if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+		{
+			return 0;
+		}
+
+		await ServerConnection.EnsureAsync(response, ct);
+		return (await response.Content.ReadFromJsonAsync<Api.SeqReply>(Api.Json, ct))!.Seq;
+	}
+
+	public ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, MainlineEntry? entry = null, CancellationToken ct = default) =>
 		throw new VersionException("Only the server's landing service changes the path index.");
 
 	public async ValueTask<long> IndexedSeqAsync(CancellationToken ct = default) => (await server.GetAsync<Api.SeqReply>("paths/indexed", ct)).Seq;
