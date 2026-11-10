@@ -130,7 +130,11 @@ internal sealed class Runner(Scenario scenario, RunOptions options, Action<strin
 		// The same stores the server will open, without the server: its reconciliation would follow every seeded landing.
 		await using var state = new PostgresState(connection);
 		await using var trees = new PostgresTreeStore(connection);
-		var repo = new Repository(new DiskObjectStore(Path.Combine(data, "objects")), state, state, state, null, trees, state);
+		// Through the object catalog, as the server will write: the catalog covers the store from its first object.
+		var disk = new DiskObjectStore(Path.Combine(data, "objects"));
+		var objects = new CatalogedObjectStore(disk, state, disk);
+		await objects.CompleteIfEmptyAsync(ct);
+		var repo = new Repository(objects, state, state, state, null, trees, state);
 		await repo.InitializeAsync("bassia-server");
 		return await new Seeder(repo, new LandingService(repo), scenario, log).SeedAsync(ct);
 	}

@@ -74,7 +74,11 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		Trees = new PostgresTreeStore(options.Postgres, options.Migrate);
-		Blobs = options.DecorateBlobs?.Invoke(Blobs) ?? Blobs;
+		// The object catalog sits over the blob store (and over the harness's probe, which then counts only what
+		// reaches blob storage): "have" is answered from PostgreSQL, and maintenance lists and sweeps through it.
+		Catalog = new CatalogedObjectStore(options.DecorateBlobs?.Invoke(Blobs) ?? Blobs, State, Maintenance);
+		Blobs = Catalog;
+		Maintenance = Catalog;
 		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees, new NotifyingWorkspaceIndex(State, this));
 		Repo.Objects.CacheLimitBytes = options.ObjectCache;
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
@@ -96,6 +100,9 @@ internal sealed class ServerApp : IAsyncDisposable
 	public AzureBlobObjectStore? Azure { get; }
 
 	public IObjectStore Blobs { get; }
+
+	/// <summary>The blob store behind the object catalog: what <see cref="Blobs"/> and <see cref="Maintenance"/> are.</summary>
+	public CatalogedObjectStore Catalog { get; }
 
 	public IObjectStoreMaintenance Maintenance { get; }
 
@@ -123,6 +130,12 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		accessToken = ResolveToken();
+		if (!await Catalog.CompleteIfEmptyAsync())
+		{
+			Console.Error.WriteLine("bassia-server: the object catalog does not cover this blob store yet (a store from before it); " +
+				"until 'bassia-server gc' has reconciled it once, unknown objects are asked of blob storage.");
+		}
+
 		await Repo.InitializeAsync("bassia-server");
 		// Heads the registry does not describe (the first start on it, or heads an older node moved) are recorded now.
 		if (await Repo.SyncWorkspaceIndexAsync() is > 0 and var recorded)
@@ -639,8 +652,8 @@ internal sealed class ServerApp : IAsyncDisposable
 				await Repo.Objects.TreeStore.PutManyAsync(trees.Select(item => (item.Id, ObjectCodec.Decode<Tree>(item.Bytes))).ToList(), request.HttpContext.RequestAborted);
 			}
 
-			await Parallel.ForEachAsync(objects.Except(trees), new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
-				async (item, ct) => await Blobs.PutAsync(item.Id, item.Bytes, ct));
+			// One announcement and one confirmation in the catalog for the whole batch; the blobs are written in parallel.
+			await Catalog.PutManyAsync(objects.Except(trees).ToList(), request.HttpContext.RequestAborted);
 			ObjectsStored.Add(objects.Count);
 			return Results.NoContent();
 		});
@@ -765,6 +778,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			}
 
 			await Disk.PutAsync(objectId, bytes);
+			await State.ConfirmAsync([(objectId, bytes.Length)]);
 			ObjectsStored.Add(1);
 			return Results.NoContent();
 		});

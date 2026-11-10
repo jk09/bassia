@@ -455,7 +455,7 @@ PostgreSQL, so `-postgres <connection string>` (or `BASSIA_SERVER_POSTGRES`) is 
 bassia-server -data /srv/bassia -postgres "Host=db;Database=bassia;Username=bassia;Password=..." \
   -url http://0.0.0.0:8080 -public-url https://bassia.example.com -token <shared-token>
 bassia-server -data /srv/bassia -postgres "<connection string>" -storage s3 -bucket acme-bassia -region eu-central-1   # blobs on S3
-bassia-server gc -data /srv/bassia -postgres "<connection string>" [-grace-hours 24] [-retention-days 14] [-dry-run]
+bassia-server gc -data /srv/bassia -postgres "<connection string>" [-grace-hours 24] [-retention-days 14] [-dry-run] [-reconcile]
 bassia-server scrub -data /srv/bassia -postgres "<connection string>" [-sample 1000]
 bassia-server migrate -postgres "<connection string>" [-check]   # bring the schema to this build's version (or only check it)
 ```
@@ -463,7 +463,7 @@ bassia-server migrate -postgres "<connection string>" [-check]   # bring the sch
 ### Schema versions and migrations
 
 The PostgreSQL schema is versioned per component - `state` (heads, path index, meta, leases, lease queue, fencing
-sequence, workspace registry, mainline index) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
+sequence, workspace registry, mainline index, object catalog) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
 in the connection's schema. Steps are numbered from 1, run in order, each once, in one transaction with the version
 bump; migration 1 is the schema as it was created before versioning. On start the server (and every local monorepo
 or clone command) reads the version in one query; only when it is behind does it take a session advisory lock keyed
@@ -496,7 +496,7 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   `-azure-prefix` (default `objects/`), keyed by hash prefix. Chunks of 256 KiB and more move between clients and the
   container directly on SAS URLs valid for 30 minutes; the server never proxies them.
 - **PostgreSQL**: `-postgres <connection string>` (PostgreSQL 13 or later), the same as on any server. The tables (`bassia_heads`,
-  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, `bassia_workspaces`, `bassia_workspace_paths`, `bassia_mainline`, sequence `bassia_fencing`) are created and migrated on start
+  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, `bassia_workspaces`, `bassia_workspace_paths`, `bassia_mainline`, `bassia_objects`, sequence `bassia_fencing`) are created and migrated on start
   (see "Schema versions and migrations"); Terraform provisions the server, not the schema.
   Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
   transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
@@ -564,7 +564,7 @@ The RPC surface under `/api/v1` is what a client's remote stores call:
 | `POST /objects/put` | Many small objects in one binary request, each checked like a single put. |
 | `POST /objects/batch` | Structural objects by id as JSON, optionally with subtrees to a depth. |
 | `POST /paths/stat`, `GET /paths/list`, `GET /paths/changed` | StatPaths, listing and ChangedSince from the path index. |
-| `POST /objects/have` | Which ids the server already holds; asked before every upload. |
+| `POST /objects/have` | Which ids the server already holds; asked before every upload. Answered from the object catalog, and counts as use: what it reports present is not swept by a collection already under way. |
 | `POST /objects/read-urls`, `POST /objects/upload-urls` | GetChunkUrls and BeginUpload: signed URLs for direct transfers. |
 | `GET/PUT /objects/{id}` | One object; large chunks are redirected to their signed URL, structural objects are validated on upload. |
 | `GET /heads...`, `POST /heads/advance` | Workspace heads, by compare-and-swap; `main` is refused (only landing moves it), and so are the server's `rc/` candidate heads. A workspace head must point at an operation of that workspace; the server records it in the workspace registry from the operation it reads itself. |
@@ -686,7 +686,10 @@ Rewrites create garbage quickly. `bassia gc` (local monorepo) and `bassia-server
 the retained operations - mainline's whole log (the audit trail; taken from the mainline index, without reading the log), every workspace head, and heads named `pin/...` - and
 the candidates of open workspaces (`rc/...`, whose merge results exist nowhere else; those of closed workspaces are
 dropped), and sweep the blobs nothing reaches that are older than the grace period. A closed workspace's head is pruned
-`gc.retention_days` after it closed, which makes its unlanded snapshots collectable. Workspace name reservations
+`gc.retention_days` after it closed, which makes its unlanded snapshots collectable. On a server the sweep goes through the
+object catalog (below): in batches, each object deleted only if it was not put or asked about since the collection's
+cutoff, so an old object a client's `Have` just found - and that its next snapshot will name - is left alone. Trees
+are deleted under the same condition. Workspace name reservations
 (`name/...`) are not roots; those whose workspace is closed are dropped. `scrub` re-hashes stored blobs (all,
 or a `-sample`) and reports any whose bytes do not match their id.
 
@@ -764,6 +767,25 @@ Bassia has five projects; each depends only on the ones before it.
 5. **`Bassia.LoadTest`** - `bassia-loadtest`, the load harness: it hosts a `bassia-server`, seeds a synthetic monorepo
    and measures what each operation costs under many agents (see "Load harness").
 
+
+### Object catalog
+
+Every object is a blob, and a blob store answers "do you have this?" one object at a time. On a server the **object
+catalog** (`IObjectCatalog`; `bassia_objects`: id, size, state, last use) answers instead: `CatalogedObjectStore` sits
+over the blob store, so `Have` is one statement for any number of ids and no blob call, a put is the blob and one
+statement for the batch, and garbage collection lists the catalog, not the bucket.
+
+The catalog also orders a collection's deletes against uploads of the same object. A row is *pending* (a direct
+upload was announced; the first `Have` asks the blob store whether it arrived), *stored*, or *doomed* (a collection
+chose it). `Have` and a put touch a stored row; a collection dooms only rows not touched since its cutoff, deletes
+their blobs and then their rows, under a lock; a doomed object is not vouched for, and an upload of it waits for that
+lock and writes the blob again. So an object reported present is never deleted by a collection that had already
+marked.
+
+The catalog is derived: the blobs are the truth. A new server's catalog covers its store from the first object. For
+a store from before the catalog, ids it does not know are asked of the blob store and remembered, and
+`bassia-server gc` reconciles it once, by one listing of the bucket (`-reconcile` forces that again, after a restore).
+Local monorepos keep no catalog: their blob store is a local folder.
 
 ### Mainline index
 
@@ -875,7 +897,7 @@ undo and restore, the path index and its rebuild from the operation log, leases 
 agents landing through several landing services, a replay landing with the original change id, garbage collection
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` and `PostgresStateTests` hold the
-in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `ObjectCacheTests` and `ServerMemoryTests` cover the bounds on the server's memory: the cache of decoded objects staying within its size and keeping what is used, a batched fetch that stops at its budget with the client asking for the rest (and a client that does not know of the budget), and a body over the limit refused with a 413. `MainlineIndexTests` holds the mainline index to its contract in memory and on PostgreSQL, counts that mainline at a past seq reads the same objects after 8 and after 120 landings, backfills and resumes a backfill, compares what garbage collection marks from the index with what it marks from the log, and lands from several services at once without leaving a seq out. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
+in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `ObjectCatalogTests` holds the object catalog to its contract in memory and on PostgreSQL, counts that `Have` behind it asks no blob store, reconciles a store from before it, and interleaves a client's snapshot between a collection's mark and its sweep - the object the client was told is there survives, as does a tree asked about; `ObjectCatalogSweepTests` uploads an object while it is being swept. `ObjectCacheTests` and `ServerMemoryTests` cover the bounds on the server's memory: the cache of decoded objects staying within its size and keeping what is used, a batched fetch that stops at its budget with the client asking for the rest (and a client that does not know of the budget), and a body over the limit refused with a 413. `MainlineIndexTests` holds the mainline index to its contract in memory and on PostgreSQL, counts that mainline at a past seq reads the same objects after 8 and after 120 landings, backfills and resumes a backfill, compares what garbage collection marks from the index with what it marks from the log, and lands from several services at once without leaving a seq out. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict

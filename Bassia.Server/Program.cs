@@ -21,7 +21,7 @@ internal static class Program
 		  bassia-server -data <folder> -postgres <connection string> [-url <url>] [-public-url <url>] [-token <token> | -no-auth]
 		                [-storage disk | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
 		                [-cors-origin <origin>[,<origin>...]] [-semantic-driver <command>|off] [-validate <command>]        run the server
-		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run]   collect unreferenced blobs
+		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run] [-reconcile]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs and trees
 		  bassia-server migrate -postgres <connection string> [-check]                                                         migrate the PostgreSQL schema (or check it)
 		The server migrates its schema on start under a lock; -migrate verify makes it only check and refuse an outdated one.
@@ -72,6 +72,13 @@ internal static class Program
 					var value = Switch(rest, "grace-hours");
 					var grace = TimeSpan.FromHours(value is null ? 24 : double.Parse(value));
 					var retention = TimeSpan.FromDays(Switch(rest, "retention-days") is { } days ? double.Parse(days) : 14);
+					// The collection sweeps what the object catalog lists: a catalog that does not cover the store yet (or
+					// -reconcile) is first brought in step with one listing of the bucket.
+					if (rest.Contains("-reconcile") || !await server.Catalog.CompleteIfEmptyAsync())
+					{
+						Console.Out.WriteLine($"reconciled the object catalog with {await server.Catalog.ReconcileAsync()} blobs");
+					}
+
 					var report = await new GarbageCollector(server.Repo, server.Maintenance).CollectAsync(grace, retention, rest.Contains("-dry-run"));
 					Console.Out.WriteLine($"{(report.DryRun ? "would sweep" : "swept")} {report.Swept} of {report.Blobs} blobs ({report.SweptBytes} bytes) and {report.TreesSwept} of {report.Trees + report.TreesSwept} trees; " +
 						$"{report.Live} live; {report.Young} younger than the grace period; {report.PrunedWorkspaces} closed workspaces pruned");
