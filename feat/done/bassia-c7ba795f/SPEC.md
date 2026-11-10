@@ -1,6 +1,6 @@
 # Workspace registry: find workspaces by query, not by reading every head
 
-Status: active. Part 2 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
+Status: done. Part 2 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
 of `bassia-ff9140e9` (mainline index).
 
 ## Outcome
@@ -31,36 +31,36 @@ Studio as fast as an empty one.
 
 ## Acceptance criteria
 
-- [ ] Open workspaces are listed in one query that returns only open workspaces, without reading objects of closed
+- [x] Open workspaces are listed in one query that returns only open workspaces, without reading objects of closed
       ones; with 20,000 closed and 500 open workspaces the server makes the same number of PostgreSQL statements and
       blob reads as with 0 closed.
-- [ ] A workspace is resolved by id, by name, and by a unique prefix (4+ characters) of either, with the results and
+- [x] A workspace is resolved by id, by name, and by a unique prefix (4+ characters) of either, with the results and
       error messages `ResolveWorkspaceAsync` gives today, in a bounded number of statements whatever the number of
       workspaces.
-- [ ] Creating a workspace whose name is free does not list workspaces.
-- [ ] After a landing, the workspaces it made stale are found in one statement, whatever the number of workspaces, from
+- [x] Creating a workspace whose name is free does not list workspaces.
+- [x] After a landing, the workspaces it made stale are found in one statement, whatever the number of workspaces, from
       the registry's touched paths and the path index (see Decisions for what the database does inside it). The result
       is the same set `AffectedAsync` returns today (workspaces with no candidate or one for other commits; workspaces touching a
       changed path; every reconciled workspace when `.bassia.toml` changed).
-- [ ] The conflict overview (workspaces, overlaps, hot paths) is unchanged in content and no longer reads one
+- [x] The conflict overview (workspaces, overlaps, hot paths) is unchanged in content and no longer reads one
       candidate and runs one path query per workspace.
-- [ ] `workspace list` (open, and `-all`), `status`, `mainline log` and the Studio pages show what they show today;
+- [x] `workspace list` (open, and `-all`), `status`, `mainline log` and the Studio pages show what they show today;
       lists of closed workspaces are paged rather than read whole.
-- [ ] The registry never disagrees with the heads for longer than a head move takes: a crash between moving a head
+- [x] The registry never disagrees with the heads for longer than a head move takes: a crash between moving a head
       and recording it is repaired without an operator, and a reader never acts on a row that names another head than
       the one stored.
-- [ ] The registry is derived: dropping its tables and starting a server rebuilds it from the heads, identical to the
+- [x] The registry is derived: dropping its tables and starting a server rebuilds it from the heads, identical to the
       one kept incrementally (shown by a test, as for the path index).
-- [ ] An existing database gets the registry by a schema migration and one backfill on start; several nodes starting
+- [x] An existing database gets the registry by a schema migration and one backfill on start; several nodes starting
       together backfill once. An older build keeps working through a rolling deploy (the step only adds).
-- [ ] Clients ask the server instead of listing heads: a clone's workspace list and name resolution are one call each.
+- [x] Clients ask the server instead of listing heads: a clone's workspace list and name resolution are one call each.
       An older client that still lists heads keeps working.
-- [ ] Garbage collection prunes a closed workspace's row with its head.
-- [ ] The core's tests run on an in-memory registry held to the same contract as the PostgreSQL one.
-- [ ] With the harness (`bassia-1def6a48`): reconciliation after a landing, workspace list, name resolution and the
+- [x] Garbage collection prunes a closed workspace's row with its head.
+- [x] The core's tests run on an in-memory registry held to the same contract as the PostgreSQL one.
+- [x] With the harness (`bassia-1def6a48`): reconciliation after a landing, workspace list, name resolution and the
       conflict overview no longer grow with the number of closed workspaces, and the report before and after is
       recorded here.
-- [ ] The existing test suite passes; only assertions that named the `state` schema's version as 1 follow the new step.
+- [x] The existing test suite passes; only assertions that named the `state` schema's version as 1 follow the new step.
 
 ## Approach
 
@@ -123,14 +123,36 @@ Confirmed by the user (were open questions):
   changes.
 - **Lists of closed workspaces are paged**: 100 per page, newest first, in `workspace list -all` and Studio.
 
+## Results
+
+Load harness (`bassia-1def6a48`), small scenario, the same machine as the baseline; counts are per execution.
+
+| At 10,000 closed workspaces | Before | After |
+| --- | ---: | ---: |
+| workspace list (open), cold client: requests / blob calls | 20,077 / 60,228 | 3 / 80 |
+| workspace resolve by name: requests | 20,078 | 5 |
+| workspace create: requests / blob calls | 7,851 / 23,534 | 10 / 9 |
+| reconcile catch-up at start: blob calls | 20,083 | 83 |
+| scan after a landing: statements | 41 | 3 |
+| conflict overview: statements | 41 | 4 |
+
+The sweep over 100, 1,000 and 10,000 closed workspaces marks nothing as growing any more. Over 20, 100 and 500 open
+workspaces the scan after a landing stays at 3 statements (979 before at 500 open; 11 ms) and the conflict overview at
+4; what still grows with open workspaces is the reconciliation of each at a node's start, which is work per workspace.
+`workspace close` went from 2 statements to 4 and resolve by name from 2 to 3 (the row is written in a transaction).
+
+The full large scenario (500 agents on 20,000 closed workspaces), which did not finish before, is recorded with
+`bassia-ff9140e9`: its first attempt here found a defect in the harness itself (an agent that owns few files could
+pick the same one twice in a snapshot), fixed in this change.
+
 ## Progress
 
-- [ ] `IWorkspaceIndex`, in-memory implementation, contract tests
-- [ ] PostgreSQL tables, migration, transactional write with the head, backfill and rebuild
-- [ ] `Repository` and `Reconciler` on the registry
-- [ ] Server API and remote implementation; paged `/heads`
-- [ ] CLI and Studio on paged lists
-- [ ] Harness report before and after, recorded here; documentation (`docs/reference.md`: Architecture, server API)
+- [x] `IWorkspaceIndex`, in-memory implementation, contract tests
+- [x] PostgreSQL tables, migration, transactional write with the head, backfill and rebuild
+- [x] `Repository` and `Reconciler` on the registry
+- [x] Server API and remote implementation; paged `/heads`
+- [x] CLI and Studio on paged lists
+- [x] Harness report before and after, recorded here; documentation (`docs/reference.md`: Architecture, server API)
 
 ## Validation
 

@@ -282,6 +282,11 @@ internal sealed class Runner(Scenario scenario, RunOptions options, Action<strin
 				for (var change = 0; change < scenario.Changes; change++)
 				{
 					var path = scenario.AgentPath(agent.Index, round, snapshot, change);
+					if (changes.Any(other => other.Path == path))
+					{
+						continue; // with many agents each owns few files: the same one may come up twice in a snapshot
+					}
+
 					changes.Add((path, Content($"seed {scenario.Seed} from {epoch} agent {agent.Index} round {round} snapshot {snapshot} {path}")));
 				}
 
