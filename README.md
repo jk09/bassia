@@ -168,7 +168,7 @@ bassia-server -data /srv/bassia -postgres "<connection string>" -storage azure -
 bassia clone -from http://bassia.example.com:8080 -path ~/acme -token <token>         # a client
 ```
 
-The version core reaches storage only through four small interfaces - objects, heads, the path index and leases - so
+The version core reaches storage only through a few small interfaces - objects, heads, the path index, leases, the workspace registry and trees - so
 the same core runs in a local monorepo (`bassia init`: a local-disk blob container and a local PostgreSQL) and in `bassia-server`
 (the local-disk blob container, S3 or Azure Blob Storage; its state always in PostgreSQL, such as Azure Database for PostgreSQL). A client talks to the server and
 caches every object it reads, in batches, for all its workspaces. Large chunks travel between

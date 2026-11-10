@@ -129,8 +129,15 @@ public sealed record PathChange(string Path, Leaf? Leaf);
 public sealed record PathListing(string Path, bool IsDirectory, PathVersion? Version);
 
 /// <summary>
-/// Mainline's path index: for every file path, its versions by seq. Derived from trees and rebuildable from the
-/// operation log; only the landing service applies changes to it.
+/// One landing as the mainline index keeps it: the operation at <see cref="Seq"/> with its view, commit and tree, the
+/// workspace that landed (none for seq 0), when, and the task spec its commit's recipe names - everything garbage
+/// collection marks for the landing, so mainline is reached without reading its log.
+/// </summary>
+public sealed record MainlineEntry(long Seq, ObjectId Operation, ObjectId View, ObjectId Commit, ObjectId Tree, string? Workspace, DateTimeOffset Time, ObjectId? TaskSpec = null);
+
+/// <summary>
+/// Mainline's path index: for every file path, its versions by seq, and for every seq its landing (the mainline
+/// index). Derived from trees and rebuildable from the operation log; only the landing service applies changes to it.
 /// </summary>
 public interface IPathIndex
 {
@@ -158,8 +165,23 @@ public interface IPathIndex
 	/// <summary>The latest version of every path under <paramref name="prefix"/> that changed after <paramref name="afterSeq"/>.</summary>
 	IAsyncEnumerable<PathVersion> ChangedSinceAsync(string prefix, long afterSeq, CancellationToken ct = default);
 
-	/// <summary>Records the changes of the landing numbered <paramref name="seq"/>; applying a seq again is a no-op.</summary>
-	ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, CancellationToken ct = default);
+	/// <summary>
+	/// Records the changes of the landing numbered <paramref name="seq"/> and, with them, the landing itself
+	/// (<paramref name="entry"/>); applying a seq again is a no-op.
+	/// </summary>
+	ValueTask ApplyAsync(long seq, IReadOnlyList<PathChange> changes, MainlineEntry? entry = null, CancellationToken ct = default);
+
+	/// <summary>The landing at <paramref name="seq"/>, or null when the index does not hold it (not backfilled yet, or beyond mainline).</summary>
+	ValueTask<MainlineEntry?> GetEntryAsync(long seq, CancellationToken ct = default);
+
+	/// <summary>The landings at or below <paramref name="fromSeq"/> that the index holds, newest first, at most <paramref name="count"/>.</summary>
+	Task<IReadOnlyList<MainlineEntry>> ListEntriesAsync(long fromSeq, int count, CancellationToken ct = default);
+
+	/// <summary>Records landings of seqs applied before the index kept them (backfill); those it holds are left as they are.</summary>
+	ValueTask RecordEntriesAsync(IReadOnlyList<MainlineEntry> entries, CancellationToken ct = default);
+
+	/// <summary>How many landings the index holds: mainline's seq + 1 once every seq from 0 is there.</summary>
+	ValueTask<long> EntryCountAsync(CancellationToken ct = default);
 
 	/// <summary>The highest seq applied so far (0 when none).</summary>
 	ValueTask<long> IndexedSeqAsync(CancellationToken ct = default);

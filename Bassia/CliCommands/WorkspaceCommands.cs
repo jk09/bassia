@@ -144,7 +144,9 @@ internal static class WorkspaceCommands
 	{
 		using var monorepo = Monorepo.Current();
 		var all = invocation.Has("all");
-		var workspaces = await monorepo.Repo.ListWorkspacesAsync(all);
+		var limit = invocation.Int("limit", Repository.ClosedPage, 1);
+		var workspaces = await monorepo.Repo.ListWorkspacesAsync(all, closedLimit: limit);
+		var closed = workspaces.Count(state => !state.IsOpen);
 		var entries = new List<IReadOnlyDictionary<string, object?>>();
 		foreach (var state in workspaces)
 		{
@@ -162,7 +164,9 @@ internal static class WorkspaceCommands
 			])),
 			["workspace"] = entries
 		};
-		return Ok(invocation, $"{workspaces.Count} {(all ? "" : "open ")}workspace(s).", data);
+		// Closed workspaces come a page at a time, newest first: a monorepo keeps thousands of them.
+		var more = all && closed >= limit ? $" Only the newest {limit} closed ones are listed; -limit <n> lists more." : "";
+		return Ok(invocation, $"{workspaces.Count} {(all ? "" : "open ")}workspace(s).{more}", data);
 	}
 
 	public static async Task<int> ShowAsync(Invocation invocation)

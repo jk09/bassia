@@ -257,7 +257,7 @@ public sealed class Reconciler(Repository repo, LandingPlanner planner) : IConfl
 			{
 				if (existing is { } stale)
 				{
-					await repo.Views.DeleteHeadAsync(name, stale, ct);
+					await repo.Workspaces.AdvanceCandidateAsync(workspaceId, stale, null, ct);
 				}
 
 				return null;
@@ -276,7 +276,8 @@ public sealed class Reconciler(Repository repo, LandingPlanner planner) : IConfl
 
 			var candidate = await ComputeAsync(workspace, main, ct);
 			var id = await repo.Objects.WriteAsync(candidate, ct);
-			if ((await repo.Views.AdvanceHeadAsync(name, existing, id, ct)).Success)
+			var summary = new CandidateSummary(id, candidate.Base, candidate.Working, candidate.MainSeq, candidate.Touched);
+			if ((await repo.Workspaces.AdvanceCandidateAsync(workspaceId, existing, summary, ct)).Success)
 			{
 				Reconciled?.Invoke(candidate);
 				return candidate;
@@ -320,17 +321,7 @@ public sealed class Reconciler(Repository repo, LandingPlanner planner) : IConfl
 	public async Task<IReadOnlyList<string>> AffectedAsync(long seq, CancellationToken ct = default)
 	{
 		await repo.EnsureIndexedAsync(await repo.GetMainAsync(ct), ct);
-		var affected = new List<string>();
-		foreach (var workspace in await repo.ListWorkspacesAsync(false, ct))
-		{
-			var candidate = await GetAsync(workspace.Id, ct);
-			if (!Matches(candidate, workspace.Record) || await MovedSinceAsync(candidate!, seq, ct))
-			{
-				affected.Add(workspace.Id);
-			}
-		}
-
-		return affected;
+		return await repo.Workspaces.StaleAsync(seq, RepoPolicy.FileName, ct);
 	}
 
 	/// <summary>Whether a touched path of the candidate, or the policy file, changed on mainline after the candidate's seq (up to <paramref name="seq"/>).</summary>
@@ -351,12 +342,17 @@ public sealed class Reconciler(Repository repo, LandingPlanner planner) : IConfl
 		var main = await repo.GetMainAsync(ct);
 		await repo.EnsureIndexedAsync(main, ct);
 
-		var open = await repo.ListWorkspacesAsync(false, ct);
+		// The registry names the open workspaces, their candidates and which of those mainline has overtaken.
+		var summaries = await repo.Workspaces.ListAsync(true, ct: ct);
+		var stale = (await repo.Workspaces.StaleAsync(main.Seq, RepoPolicy.FileName, ct)).ToHashSet(StringComparer.Ordinal);
+		var open = await repo.StatesAsync(summaries, ct);
+		var candidates = summaries.ToDictionary(summary => summary.Id, summary => summary.Candidate);
+		await repo.Objects.PrefetchAsync(candidates.Values.OfType<ObjectId>(), ct);
 		var rows = new List<(WorkspaceState Workspace, Candidate? Candidate, bool Current)>();
 		foreach (var workspace in open)
 		{
-			var candidate = await GetAsync(workspace.Id, ct);
-			var current = Matches(candidate, workspace.Record) && !await MovedSinceAsync(candidate!, main.Seq, ct);
+			var candidate = candidates[workspace.Id] is { } stored ? await repo.Objects.ReadCandidateAsync(stored, ct) : null;
+			var current = Matches(candidate, workspace.Record) && !stale.Contains(workspace.Id);
 			if (!current && ReconcileOnRead)
 			{
 				candidate = await ReconcileAsync(workspace.Id, ct);

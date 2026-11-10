@@ -45,7 +45,9 @@ public sealed class ConcurrentUpdateException(HeadName head) : VersionException(
 /// </summary>
 public sealed class Repository
 {
-	public Repository(IObjectStore objects, IViewStore views, IPathIndex paths, ILeaseStore leases, ChunkParameters? chunks = null, ITreeStore? trees = null)
+	/// <param name="workspaces">The workspace registry; without one, workspaces are found by reading every head (<see cref="ScanningWorkspaceIndex"/>).</param>
+	public Repository(IObjectStore objects, IViewStore views, IPathIndex paths, ILeaseStore leases, ChunkParameters? chunks = null, ITreeStore? trees = null,
+		IWorkspaceIndex? workspaces = null)
 	{
 		Store = objects;
 		Views = views;
@@ -54,7 +56,14 @@ public sealed class Repository
 		Objects = new ObjectAccess(objects, chunks, trees);
 		Trees = new Trees(Objects);
 		Diffs = new Diffs(Trees);
+		Workspaces = workspaces ?? new ScanningWorkspaceIndex(views, Objects, paths);
 	}
+
+	/// <summary>The workspace registry: it moves the workspace and candidate heads and answers every question about workspaces.</summary>
+	public IWorkspaceIndex Workspaces { get; }
+
+	/// <summary>How many closed workspaces a listing that includes them returns unless it asks for more.</summary>
+	public const int ClosedPage = 100;
 
 	public IObjectStore Store { get; }
 
@@ -112,6 +121,13 @@ public sealed class Repository
 			throw new VersionException($"Mainline has no seq {seq}; its head is at seq {main.Seq}.");
 		}
 
+		// The mainline index names the operation at any seq; without its entry (not backfilled yet, a store that keeps
+		// none) the log is walked back from the head, one operation per landing.
+		if (seq < main.Seq && await Paths.GetEntryAsync(seq, ct) is { } entry)
+		{
+			return await MainAtAsync(entry.Operation, ct);
+		}
+
 		var head = main.Head;
 		var op = main.Operation;
 		while (op.Seq > seq)
@@ -121,6 +137,60 @@ public sealed class Repository
 		}
 
 		return await MainAtAsync(head, ct);
+	}
+
+	/// <summary>A landing as the mainline index keeps it.</summary>
+	public static MainlineEntry EntryOf(MainState state) =>
+		new(state.Seq, state.Head, state.Operation.View, state.CommitId, state.Tree, state.Operation.Workspace,
+			DateTimeOffset.FromUnixTimeMilliseconds(state.Operation.Time.ToUnixTimeMilliseconds()), state.Commit.Recipe?.TaskSpec);
+
+	/// <summary>
+	/// Records in the mainline index the landings it lacks below what the path index applied: one walk of the log from
+	/// the lowest seq it holds down to seq 0, in batches, so an interrupted backfill resumes where it stopped. Returns
+	/// the number of landings recorded; 0 when the index already reaches seq 0.
+	/// </summary>
+	public async Task<long> BackfillMainlineIndexAsync(CancellationToken ct = default)
+	{
+		var main = await GetMainAsync(ct);
+		var count = await Paths.EntryCountAsync(ct);
+		if (count > main.Seq)
+		{
+			return 0;
+		}
+
+		// Entries are written from the head down, so the lowest one held is count - 1 below the highest: start under it.
+		var state = main;
+		var highest = (await Paths.ListEntriesAsync(main.Seq, 1, ct)).FirstOrDefault();
+		if (highest is not null && count > 0 && await Paths.GetEntryAsync(highest.Seq - count + 1, ct) is { } lowest)
+		{
+			if (lowest.Seq == 0)
+			{
+				return 0;
+			}
+
+			var above = await Objects.ReadOperationAsync(lowest.Operation, ct);
+			state = await MainAtAsync(above.Parents[0], ct);
+		}
+
+		long recorded = 0;
+		var batch = new List<MainlineEntry>();
+		while (true)
+		{
+			batch.Add(EntryOf(state));
+			if (batch.Count >= 500 || state.Seq == 0)
+			{
+				await Paths.RecordEntriesAsync(batch, ct);
+				recorded += batch.Count;
+				batch.Clear();
+			}
+
+			if (state.Seq == 0)
+			{
+				return recorded;
+			}
+
+			state = await MainAtAsync(state.Operation.Parents[0], ct);
+		}
 	}
 
 	/// <summary>The operations of a head, newest first.</summary>
@@ -150,19 +220,41 @@ public sealed class Repository
 		return new WorkspaceState(head, op, view.Workspace ?? throw new VersionException($"Operation {head.Short} has no workspace."));
 	}
 
-	public async Task<IReadOnlyList<WorkspaceState>> ListWorkspacesAsync(bool includeClosed = false, CancellationToken ct = default)
+	/// <summary>
+	/// The open workspaces and, with <paramref name="includeClosed"/>, the newest <paramref name="closedLimit"/> closed
+	/// ones (created before <paramref name="closedBefore"/>, to page further back), in the order they were created.
+	/// </summary>
+	public async Task<IReadOnlyList<WorkspaceState>> ListWorkspacesAsync(bool includeClosed = false, CancellationToken ct = default, int closedLimit = ClosedPage,
+		DateTimeOffset? closedBefore = null)
 	{
-		var result = new List<WorkspaceState>();
-		await foreach (var (_, head) in Views.ListHeadsAsync(HeadName.WorkspacePrefix, ct))
+		var summaries = (await Workspaces.ListAsync(true, ct: ct)).ToList();
+		if (includeClosed)
 		{
-			var state = await WorkspaceAtAsync(head, ct);
-			if (includeClosed || state.IsOpen)
-			{
-				result.Add(state);
-			}
+			summaries.AddRange(await Workspaces.ListAsync(false, closedLimit, closedBefore, ct));
 		}
 
-		return result.OrderBy(state => state.Record.Created).ToList();
+		return (await StatesAsync(summaries, ct)).OrderBy(state => state.Record.Created).ToList();
+	}
+
+	/// <summary>The states behind summaries, their operations and views fetched together where the store batches reads.</summary>
+	public async Task<IReadOnlyList<WorkspaceState>> StatesAsync(IReadOnlyList<WorkspaceSummary> summaries, CancellationToken ct = default)
+	{
+		await Objects.PrefetchAsync(summaries.Select(summary => summary.Head), ct);
+		var operations = new List<(ObjectId Head, Operation Operation)>();
+		foreach (var summary in summaries)
+		{
+			operations.Add((summary.Head, await Objects.ReadOperationAsync(summary.Head, ct)));
+		}
+
+		await Objects.PrefetchAsync(operations.Select(item => item.Operation.View), ct);
+		var states = new List<WorkspaceState>();
+		foreach (var (head, operation) in operations)
+		{
+			var view = await Objects.ReadViewAsync(operation.View, ct);
+			states.Add(new WorkspaceState(head, operation, view.Workspace ?? throw new VersionException($"Operation {head.Short} has no workspace.")));
+		}
+
+		return states;
 	}
 
 	/// <summary>
@@ -176,29 +268,31 @@ public sealed class Repository
 			return exact;
 		}
 
-		var all = await ListWorkspacesAsync(true, ct);
-		var named = all.Where(state => state.Name == reference).ToList();
-		var open = named.Where(state => state.IsOpen).ToList();
+		var found = await Workspaces.FindAsync(reference, ct);
+		var named = found.Where(summary => summary.Name == reference).ToList();
+		var open = named.Where(summary => summary.IsOpen).ToList();
 		if (open.Count == 1 || (open.Count == 0 && named.Count >= 1))
 		{
-			return open.Count == 1 ? open[0] : named[^1];
+			return await StateAsync(open.Count == 1 ? open[0] : named[^1], ct);
 		}
 
 		if (open.Count > 1)
 		{
-			throw new VersionException($"Several open workspaces are named '{reference}'; use the id ({string.Join(", ", open.Select(state => state.Id))}).");
+			throw new VersionException($"Several open workspaces are named '{reference}'; use the id ({string.Join(", ", open.Select(summary => summary.Id))}).");
 		}
 
-		var prefixed = reference.Length >= 4
-			? all.Where(state => state.IsOpen && (state.Id.StartsWith(reference, StringComparison.Ordinal) || state.Name.StartsWith(reference, StringComparison.Ordinal))).ToList()
-			: [];
+		var prefixed = reference.Length >= 4 ? found.Where(summary => summary.IsOpen).ToList() : [];
 		return prefixed.Count switch
 		{
-			1 => prefixed[0],
+			1 => await StateAsync(prefixed[0], ct),
 			0 => throw new VersionException($"No workspace '{reference}'. Run 'bassia workspace list'."),
-			_ => throw new VersionException($"'{reference}' matches several workspaces: {string.Join(", ", prefixed.Select(state => state.Name))}.")
+			_ => throw new VersionException($"'{reference}' matches several workspaces: {string.Join(", ", prefixed.Select(summary => summary.Name))}.")
 		};
 	}
+
+	/// <summary>The workspace a summary names, as it is now.</summary>
+	private async Task<WorkspaceState> StateAsync(WorkspaceSummary summary, CancellationToken ct) =>
+		await FindWorkspaceAsync(summary.Id, ct) ?? await WorkspaceAtAsync(summary.Head, ct);
 
 	/// <summary>
 	/// The open workspace named <paramref name="name"/>, or null when the name is free. Names are case-sensitive and
@@ -212,7 +306,7 @@ public sealed class Repository
 		}
 
 		// Workspaces opened before names were reserved hold no reservation; they still keep their name.
-		return (await ListWorkspacesAsync(false, ct)).FirstOrDefault(state => state.Name == name);
+		return (await Workspaces.FindAsync(name, ct)).FirstOrDefault(summary => summary.IsOpen && summary.Name == name) is { } holding ? await StateAsync(holding, ct) : null;
 	}
 
 	/// <summary><paramref name="name"/> if no open workspace holds it, else the first free <c>name-2</c>, <c>name-3</c>, ...</summary>
@@ -287,7 +381,7 @@ public sealed class Repository
 		// Inside a write batch, everything written so far goes up now: the head may only point at stored objects.
 		await Objects.FlushAsync(ct);
 		var name = HeadName.Workspace(record.Id);
-		var update = await Views.AdvanceHeadAsync(name, current?.Head, opId, ct);
+		var update = await Workspaces.AdvanceAsync(current?.Head, WorkspaceSummary.Of(opId, record), ct);
 		if (!update.Success)
 		{
 			throw new ConcurrentUpdateException(name);
@@ -324,6 +418,36 @@ public sealed class Repository
 	public async Task<ObjectId> AmendAsync(Commit working, ObjectId tree, CancellationToken ct = default) =>
 		await Objects.WriteAsync(working with { Tree = tree, Time = Clock() }, ct);
 
+	/// <summary>
+	/// Brings the workspace registry in step with the heads: records every workspace and candidate head it does not
+	/// describe as it is now (the first backfill, a head an older build moved) and drops rows whose head is gone. Returns
+	/// the number of heads recorded. With the registry in step this is one question to the store.
+	/// </summary>
+	public async Task<int> SyncWorkspaceIndexAsync(CancellationToken ct = default)
+	{
+		var unindexed = await Workspaces.UnindexedAsync(ct);
+		foreach (var id in unindexed.Select(item => item.Name.WorkspaceId).Distinct())
+		{
+			if (await Views.GetHeadAsync(HeadName.Workspace(id), ct) is not { } head)
+			{
+				continue; // a candidate without its workspace: the reconciler or garbage collection drops it
+			}
+
+			var state = await WorkspaceAtAsync(head, ct);
+			CandidateSummary? candidate = null;
+			if (await Views.GetHeadAsync(HeadName.Candidate(id), ct) is { } candidateHead)
+			{
+				var stored = await Objects.ReadCandidateAsync(candidateHead, ct);
+				candidate = new CandidateSummary(candidateHead, stored.Base, stored.Working, stored.MainSeq, stored.Touched);
+			}
+
+			await Workspaces.RecordAsync(WorkspaceSummary.Of(head, state.Record), candidate, ct);
+		}
+
+		await Workspaces.PruneAsync(ct);
+		return unindexed.Count;
+	}
+
 	// ----- path index -----
 
 	/// <summary>Brings the path index up to mainline's head from the operation log, when it is behind.</summary>
@@ -348,7 +472,7 @@ public sealed class Repository
 		while (pending.TryPop(out var next))
 		{
 			var changes = await Trees.DiffAsync(previous, next.Tree, "", ct);
-			await Paths.ApplyAsync(next.Seq, changes.Select(change => new PathChange(change.Path, change.New)).ToList(), ct);
+			await Paths.ApplyAsync(next.Seq, changes.Select(change => new PathChange(change.Path, change.New)).ToList(), EntryOf(next), ct);
 			previous = next.Tree;
 		}
 	}

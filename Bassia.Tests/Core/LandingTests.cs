@@ -136,6 +136,98 @@ public class LandingTests
 		}
 	}
 
+	/// <summary>A validation that waits until it is let through (the first time), and counts its calls.</summary>
+	private sealed class GatedValidator : IValidationHook
+	{
+		private readonly TaskCompletionSource open = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+		public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+		public int Calls;
+
+		public void Open() => open.TrySetResult();
+
+		public async Task<(bool Ok, string Message)> ValidateAsync(ObjectId tree, CancellationToken ct = default)
+		{
+			Interlocked.Increment(ref Calls);
+			Started.TrySetResult();
+			await open.Task;
+			return (true, "ok");
+		}
+	}
+
+	[Fact]
+	public async Task ALandingThatValidates_HoldsUpNoOtherLanding()
+	{
+		var repo = await TestRepo.CreateAsync();
+		var validator = new GatedValidator();
+		var landing = new LandingService(repo.Repo, new ConcatDriver(), validator);
+		await repo.CommitAsync(Files(("src/a.cs", "a\n"), (RepoPolicy.FileName, "[conflicts]\ndefault = \"semantic\"\n")));
+		var one = await repo.WorkspaceAsync("one", Files(("src/a.cs", "one\n")));
+		var two = await repo.WorkspaceAsync("two", Files(("src/a.cs", "two\n")));
+		var elsewhere = await repo.WorkspaceAsync("elsewhere", Files(("docs/readme.md", "docs\n")));
+		Assert.Equal(LandOutcome.Landed, (await landing.LandAsync(new LandRequest(one.Id))).Outcome);
+
+		// 'two' needs a machine merge, whose validation now hangs.
+		var slow = Task.Run(() => landing.LandAsync(new LandRequest(two.Id)));
+		await validator.Started.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+		// Through the same landing service, a workspace on other paths lands meanwhile.
+		var quick = await landing.LandAsync(new LandRequest(elsewhere.Id)).WaitAsync(TimeSpan.FromSeconds(30));
+		Assert.Equal(LandOutcome.Landed, quick.Outcome);
+		Assert.False(slow.IsCompleted);
+
+		// The merged tree was validated on a mainline that has moved since: it is merged and validated again, then lands.
+		validator.Open();
+		var result = await slow.WaitAsync(TimeSpan.FromSeconds(30));
+		Assert.Equal(LandOutcome.Landed, result.Outcome);
+		Assert.Equal(2, result.Attempts);
+		Assert.Equal(2, validator.Calls);
+		var files = await repo.MainFilesAsync();
+		Assert.Equal("one\ntwo\n", files["src/a.cs"]);
+		Assert.Equal("docs\n", files["docs/readme.md"]);
+	}
+
+	[Fact]
+	public async Task APlan_IsCommittedOnANewerMainline_WhenNoneOfItsPathsMoved()
+	{
+		var repo = await TestRepo.CreateAsync();
+		await repo.CommitAsync(Files(("src/a.cs", "a\n"), ("docs/readme.md", "docs\n")));
+		var mine = await repo.WorkspaceAsync("mine", Files(("src/a.cs", "mine\n")));
+		var elsewhere = await repo.WorkspaceAsync("elsewhere", Files(("docs/readme.md", "more docs\n")));
+
+		// Another node lands other paths just before this landing's compare-and-swap: the plan still holds, and lands.
+		var racing = new LandingService(new Repository(repo.Objects, new RacingViewStore(repo.Views, async () =>
+			Assert.Equal(LandOutcome.Landed, (await repo.LandAsync(elsewhere)).Outcome)), repo.Paths, repo.Leases, TestRepo.SmallChunks, repo.TreeStore, repo.Index));
+		var result = await racing.LandAsync(new LandRequest(mine.Id));
+		Assert.Equal(LandOutcome.Landed, result.Outcome);
+		Assert.Equal(1, result.Attempts); // decided once
+		var files = await repo.MainFilesAsync();
+		Assert.Equal("mine\n", files["src/a.cs"]);
+		Assert.Equal("more docs\n", files["docs/readme.md"]);
+
+		// Another node lands the same path first: the plan no longer holds, and the landing decides again.
+		var again = await repo.WorkspaceAsync("again", Files(("src/a.cs", "again\n")));
+		var same = await repo.WorkspaceAsync("same", Files(("src/a.cs", "theirs\n")));
+		var losing = new LandingService(new Repository(repo.Objects, new RacingViewStore(repo.Views, async () =>
+			Assert.Equal(LandOutcome.Landed, (await repo.LandAsync(same)).Outcome)), repo.Paths, repo.Leases, TestRepo.SmallChunks, repo.TreeStore, repo.Index));
+		var refused = await losing.LandAsync(new LandRequest(again.Id));
+		Assert.Equal(LandOutcome.NeedsReplay, refused.Outcome);
+		Assert.Equal(2, refused.Attempts);
+		Assert.Equal("theirs\n", (await repo.MainFilesAsync())["src/a.cs"]);
+	}
+
+	[Fact]
+	public async Task TheSameWorkspace_LandedTwiceAtOnce_LandsOnce()
+	{
+		var repo = await TestRepo.CreateAsync();
+		var workspace = await repo.WorkspaceAsync("once", Files(("src/a.cs", "a\n")));
+		var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Task.Run(() => repo.Landing.LandAsync(new LandRequest(workspace.Id)))));
+		Assert.Single(results, result => result.Outcome == LandOutcome.Landed);
+		Assert.All(results.Where(result => result.Outcome != LandOutcome.Landed), result => Assert.Equal(LandOutcome.Rejected, result.Outcome));
+		Assert.Equal(1, (await repo.Repo.GetMainAsync()).Seq);
+	}
+
 	[Fact]
 	public async Task SemanticPolicy_WithoutAValidator_BehavesAsReplay()
 	{
@@ -249,7 +341,7 @@ public class LandingTests
 		Assert.Equal(["src/a.cs"], (await repo.Paths.ChangedSinceAsync("src", 1).ToListAsync()).Select(version => version.Path));
 
 		var rebuilt = new MemoryPathIndex();
-		var replica = new Repository(repo.Objects, repo.Views, rebuilt, repo.Leases, TestRepo.SmallChunks, repo.TreeStore);
+		var replica = new Repository(repo.Objects, repo.Views, rebuilt, repo.Leases, TestRepo.SmallChunks, repo.TreeStore, repo.Index);
 		await replica.EnsureIndexedAsync(await replica.GetMainAsync());
 		Assert.Equal(seq, await rebuilt.IndexedSeqAsync());
 		Assert.Equal((await repo.Paths.GetAsync("src/b/c.cs", seq))!.Leaf, (await rebuilt.GetAsync("src/b/c.cs", seq))!.Leaf);

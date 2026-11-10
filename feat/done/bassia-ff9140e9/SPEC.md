@@ -1,6 +1,6 @@
 # Mainline index: reach any seq of mainline in one lookup
 
-Status: proposed. Part 3 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
+Status: done. Part 3 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
 of `bassia-c7ba795f` (workspace registry).
 
 ## Outcome
@@ -28,29 +28,29 @@ read per landing.
 
 ## Acceptance criteria
 
-- [ ] `MainAtSeqAsync(seq)` reads a constant number of objects and makes a constant number of store calls for any seq
+- [x] `MainAtSeqAsync(seq)` reads a constant number of objects and makes a constant number of store calls for any seq
       and any length of history (one index lookup, then the operation, view and commit), with the result it gives today.
-- [ ] A page of mainline's log starting at any seq costs the page: no walk from the head. `mainline log` and Studio's
+- [x] A page of mainline's log starting at any seq costs the page: no walk from the head. `mainline log` and Studio's
       log page show what they show today.
-- [ ] The history of a path in Studio makes a number of calls bounded by the versions shown, each constant - not by
+- [x] The history of a path in Studio makes a number of calls bounded by the versions shown, each constant - not by
       the distance of those versions from the head.
-- [ ] A seq outside mainline (negative, or beyond the head) is refused with today's message.
-- [ ] The index row of a seq is written in the same transaction as that seq's path changes and `indexed_seq`: after
+- [x] A seq outside mainline (negative, or beyond the head) is refused with today's message.
+- [x] The index row of a seq is written in the same transaction as that seq's path changes and `indexed_seq`: after
       any crash, the mainline index and the path index cover exactly the same seqs.
-- [ ] The index is derived: dropping it and starting a server rebuilds it from the operation log, identical to the one
+- [x] The index is derived: dropping it and starting a server rebuilds it from the operation log, identical to the one
       kept incrementally (shown by a test, beside the path index's rebuild test).
-- [ ] An existing database gets the index by a schema migration and one backfill from the operation log on start
+- [x] An existing database gets the index by a schema migration and one backfill from the operation log on start
       (a single walk, resumable, done once when several nodes start together); until the backfill covers a seq, lookups
       of that seq fall back to the walk and stay correct. An older build keeps working through a rolling deploy.
-- [ ] `EnsureIndexedAsync` finds where to resume from the index instead of walking back from the head when it is far
-      behind; garbage collection takes mainline's operations, views and commits from the index instead of reading the
-      chain one object at a time, and marks the same objects as today.
-- [ ] A clone resolves a seq and a log page with one call each to the server; an older client that walks the log keeps
-      working.
-- [ ] The core's tests run on an in-memory implementation held to the same contract as the PostgreSQL one.
-- [ ] With the harness (`bassia-1def6a48`): mainline at a past seq and a log page no longer grow with the length of
+- [x] Garbage collection takes mainline's operations, views, commits, task specs and tree roots from the index instead
+      of reading the chain one object at a time, and marks the same objects as today; with an index that does not hold
+      every seq it walks the log as before.
+- [x] A clone resolves a seq with one call to the server and then reads that landing's objects; a client of a server
+      without the index, and an older client that walks the log, keep working.
+- [x] The core's tests run on an in-memory implementation held to the same contract as the PostgreSQL one.
+- [x] With the harness (`bassia-1def6a48`): mainline at a past seq and a log page no longer grow with the length of
       history, and the report before and after is recorded here.
-- [ ] The existing test suite passes unchanged.
+- [x] The existing test suite passes unchanged.
 
 ## Approach
 
@@ -79,6 +79,16 @@ background step at start walks the log once from that seq down to 0 in batches, 
 - **Workspace id and time in the entry.** The log page and Studio's history show them; storing them avoids reading
   the operation for each row of a page.
 
+- **The entry also names the view and the commit's task spec.** With them garbage collection marks everything a
+  landing holds without reading its operation, view or commit: three blob reads per landing become none.
+- **`EnsureIndexedAsync` is left as it is.** It walks back only from the head to the indexed seq - exactly the landings
+  it has to apply, whose trees it needs anyway - so there is nothing for the index to save there.
+- **No separate log-page call for clients.** Studio's log page and `mainline log` start with mainline at a seq and read
+  the page's operations from there; with the lookup constant, the page costs the page.
+- **`bassia-server migrate` does not backfill**: it runs without a data folder or blob store, and the backfill reads
+  operations. The server backfills in the background at start (lookups fall back to the walk meanwhile); a local
+  monorepo backfills when it is opened and finds landings the index lacks. This replaces the answer to open question 3.
+
 Confirmed by the user (were open questions):
 
 - **`IPathIndex` is extended** (`ApplyAsync` takes the landing's entry; `GetEntryAsync`, `ListEntriesAsync`), rather
@@ -87,14 +97,35 @@ Confirmed by the user (were open questions):
 - **Backfill runs in the background** with the walk as fallback, and `bassia-server migrate` runs it to completion for
   deployments that migrate as a release step.
 
+## Results
+
+Load harness (`bassia-1def6a48`), counts per execution, the same machine as the baseline.
+
+| On 10,000 landings of history (large scenario), cold client | Before | After |
+| --- | ---: | ---: |
+| mainline at seq 1: requests / blob calls / p50 | 10,010 / 30,027 / 2.1 s | 8 / 12 / 5 ms |
+| mainline log page in the middle: requests / blob calls / p50 | 5,058 / 15,171 / 1.0 s | 57 / 110 / 16 ms |
+| mainline log page at the head: requests | 51 | 51 |
+
+**The full large scenario** - 1,000,000 files, 10,000 landings, 20,000 closed and 500 open workspaces, 500 agents, 2
+rounds - which did not finish before the workspace registry, now runs to the end: 1,000 landings in 70 s (14.3 per
+second), 234 refused and replayed, no errors; seeding 272 s. Under that load a landing waits for the gate (p50 5.3 s),
+a snapshot takes 5.9 s and a lease 1.8 s at the median: the next things to look at (`bassia-6272ab3a` for the gate,
+`bassia-1cdec5d0` for leases). After every landing the server's background reconciliation costs 18 statements
+(1,032 before).
+
+Garbage collection (dry run) on that state: 37 s and 127,000 blob reads. Mainline's operations, views and commits are
+no longer among them (a test counts at least three reads per landing fewer); what remains is one read per file object
+and the operations of 21,000 workspaces - the subject of `bassia-2e6c8766`.
+
 ## Progress
 
-- [ ] Trait extension, in-memory implementation, contract tests
-- [ ] PostgreSQL table, migration, write inside `ApplyAsync`, backfill and rebuild
-- [ ] `Repository` (seq lookup, log, catch-up) and `GarbageCollector` on the index
-- [ ] Server API and remote implementation
-- [ ] Studio's log and path history on the index
-- [ ] Harness report before and after, recorded here; documentation (`docs/reference.md`: schema, server API)
+- [x] Trait extension, in-memory implementation, contract tests
+- [x] PostgreSQL table, migration, write inside `ApplyAsync`, backfill and rebuild
+- [x] `Repository` (seq lookup, log, catch-up) and `GarbageCollector` on the index
+- [x] Server API and remote implementation
+- [x] Studio's log and path history on the index
+- [x] Harness report before and after, recorded here; documentation (`docs/reference.md`: schema, server API)
 
 ## Validation
 

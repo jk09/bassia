@@ -89,13 +89,13 @@ public sealed class SchemaMigrationTests
 		{
 			Assert.Equal(SchemaOutcome.Created, state.SchemaStatus.Outcome);
 			Assert.Equal(SchemaOutcome.Created, trees.SchemaStatus.Outcome);
-			Assert.Equal([1], state.SchemaStatus.Applied);
+			Assert.Equal(Enumerable.Range(1, PostgresState.Schema.Latest), state.SchemaStatus.Applied);
 			Assert.True((await state.AdvanceHeadAsync(new HeadName("main"), null, SomeHead)).Success);
 		}
 
 		Assert.Equal((PostgresState.Schema.Latest, 1), Stored(connection, "state"));
 		Assert.Equal((PostgresTreeStore.Schema.Latest, 1), Stored(connection, "trees"));
-		Assert.Equal(2L, Scalar(connection, "SELECT count(*) FROM bassia_schema_history"));
+		Assert.Equal((long)(PostgresState.Schema.Latest + PostgresTreeStore.Schema.Latest), Scalar(connection, "SELECT count(*) FROM bassia_schema_history"));
 
 		await using var again = new PostgresState(connection);
 		Assert.Equal(SchemaOutcome.Current, again.SchemaStatus.Outcome);
@@ -123,7 +123,7 @@ public sealed class SchemaMigrationTests
 
 		// The fencing sequence kept counting: a baseline never recreates it.
 		Assert.Equal(3L, Scalar(connection, "SELECT nextval('bassia_fencing')"));
-		Assert.Equal((1, 1), Stored(connection, "state"));
+		Assert.Equal((PostgresState.Schema.Latest, 1), Stored(connection, "state")); // stamped as version 1, then the later steps (all additive)
 		Assert.StartsWith("baseline", (string)Scalar(connection, "SELECT description FROM bassia_schema_history WHERE component = 'state' AND version = 1")!);
 
 		await using var again = new PostgresState(connection);
@@ -317,8 +317,8 @@ public sealed class SchemaMigrationTests
 		Assert.Equal(1, await Bassia.Server.Program.Main(["migrate", "-postgres", connection, "-check"]));
 		Assert.Equal(0, await Bassia.Server.Program.Main(["migrate", "-postgres", connection]));
 		Assert.Equal(0, await Bassia.Server.Program.Main(["migrate", "-postgres", connection, "-check"]));
-		Assert.Equal((1, 1), Stored(connection, "state"));
-		Assert.Equal((1, 1), Stored(connection, "trees"));
+		Assert.Equal((PostgresState.Schema.Latest, 1), Stored(connection, "state"));
+		Assert.Equal((PostgresTreeStore.Schema.Latest, 1), Stored(connection, "trees"));
 	}
 
 	// ----- the clone's cache -----

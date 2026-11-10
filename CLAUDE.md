@@ -16,8 +16,8 @@ snapshots, and workspaces *land* on the single trunk (mainline), which is linear
 follow per-path policies in the versioned `.bassia.toml`; the default re-runs the task on the new trunk (replay)
 instead of merging text.
 
-The version core (`Bassia.Core`) reaches storage only through four traits - `IObjectStore`, `IViewStore`, `IPathIndex`,
-`ILeaseStore` - and may not reference an HTTP client, a cloud SDK or a database driver. The same core runs in a local
+The version core (`Bassia.Core`) reaches storage only through its traits - `IObjectStore`, `IViewStore`, `IPathIndex`,
+`ILeaseStore`, and the derived `IWorkspaceIndex` (the workspace registry) and `ITreeStore` - and may not reference an HTTP client, a cloud SDK or a database driver. The same core runs in a local
 monorepo (a local-disk blob store standing in for S3, and a local PostgreSQL) and in `bassia-server` (state in PostgreSQL only); a clone of a server uses
 remote implementations of the traits. See "Architecture" in `docs/reference.md`.
 

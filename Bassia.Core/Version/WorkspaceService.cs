@@ -302,7 +302,7 @@ public sealed class WorkspaceService(Repository repo)
 		}
 		catch (VersionException)
 		{
-			await repo.Views.DeleteHeadAsync(HeadName.Workspace(state.Id), state.Head, CancellationToken.None);
+			await repo.Workspaces.RemoveAsync(state.Id, state.Head, CancellationToken.None);
 			throw;
 		}
 
