@@ -76,6 +76,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		Trees = new PostgresTreeStore(options.Postgres, options.Migrate);
 		Blobs = options.DecorateBlobs?.Invoke(Blobs) ?? Blobs;
 		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees, new NotifyingWorkspaceIndex(State, this));
+		Repo.Objects.CacheLimitBytes = options.ObjectCache;
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
 		Landing.Landed += landed => Publish(new Api.WatchEvent("landed", landed.Seq, landed.Prefixes, landed.Workspace, landed.Time));
@@ -134,6 +135,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
 		builder.Logging.ClearProviders();
 		builder.WebHost.UseUrls(options.Url);
+		builder.WebHost.ConfigureKestrel(kestrel => kestrel.Limits.MaxRequestBodySize = options.PutLimit);
 		if (Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") is { Length: > 0 })
 		{
 			builder.Services.AddOpenTelemetry().WithMetrics(metrics => metrics.AddMeter(Meter.Name).AddOtlpExporter());
@@ -418,7 +420,7 @@ internal sealed class ServerApp : IAsyncDisposable
 			}
 			catch (Exception ex) when (ex is VersionException or MonorepoException or InvalidDataException or BadHttpRequestException or System.Text.Json.JsonException)
 			{
-				return Error(StatusCodes.Status400BadRequest, ex.Message);
+				return Error(ex is BadHttpRequestException { StatusCode: StatusCodes.Status413PayloadTooLarge } ? StatusCodes.Status413PayloadTooLarge : StatusCodes.Status400BadRequest, ex.Message);
 			}
 		});
 
@@ -559,23 +561,47 @@ internal sealed class ServerApp : IAsyncDisposable
 		api.MapPost("/objects/fetch", async (HttpRequest request) =>
 		{
 			var body = await BodyAsync<Api.IdsRequest>(request);
+			var ids = body.Ids.Distinct().Take(5000).ToList();
 			var found = new ConcurrentBag<(ObjectId, ReadOnlyMemory<byte>)>();
-			await Parallel.ForEachAsync(body.Ids.Distinct().Take(5000), new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
-				async (id, ct) =>
-				{
-					if (await Blobs.StatAsync(id, ct) is { Length: < ServerConnection.DirectTransferThreshold } && await Blobs.ReadAsync(id, null, ct) is { } bytes)
-					{
-						found.Add((id, bytes));
-					}
-				});
-			var lacking = body.Ids.Distinct().Take(5000).Except(found.Select(item => item.Item1)).ToList();
-			if (lacking.Count > 0)
+			var considered = 0;
+			long held = 0;
+
+			// A group of ids at a time, until the reply's budget is spent: the rest is left out and marked, and the
+			// client asks again. One reply never holds more than the budget plus one group of small objects.
+			foreach (var group in ids.Chunk(FetchGroup))
 			{
-				// A tree asked for as an object (an older client): its canonical encoding, from the tree store.
-				foreach (var (id, tree) in await Repo.Objects.TreeStore.GetManyAsync(lacking, request.HttpContext.RequestAborted))
+				if (Interlocked.Read(ref held) >= options.FetchBudget)
 				{
-					found.Add((id, ObjectCodec.Encode(tree)));
+					break;
 				}
+
+				await Parallel.ForEachAsync(group, new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = request.HttpContext.RequestAborted },
+					async (id, ct) =>
+					{
+						if (await Blobs.StatAsync(id, ct) is { Length: < ServerConnection.DirectTransferThreshold } && await Blobs.ReadAsync(id, null, ct) is { } bytes)
+						{
+							found.Add((id, bytes));
+							Interlocked.Add(ref held, bytes.Length);
+						}
+					});
+				var lacking = group.Except(found.Select(item => item.Item1)).ToList();
+				if (lacking.Count > 0)
+				{
+					// A tree asked for as an object (an older client): its canonical encoding, from the tree store.
+					foreach (var (id, tree) in await Repo.Objects.TreeStore.GetManyAsync(lacking, request.HttpContext.RequestAborted))
+					{
+						var encoded = ObjectCodec.Encode(tree);
+						found.Add((id, encoded));
+						Interlocked.Add(ref held, encoded.Length);
+					}
+				}
+
+				considered += group.Length;
+			}
+
+			if (considered < ids.Count)
+			{
+				request.HttpContext.Response.Headers[Api.TruncatedHeader] = (ids.Count - considered).ToString();
 			}
 
 			var reply = Api.Frames.Write(found);
@@ -746,8 +772,19 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	private async Task IndexAsync() => await Repo.EnsureIndexedAsync(await Repo.GetMainAsync());
 
-	private static async Task<byte[]> ReadBodyAsync(HttpRequest request)
+	/// <summary>Ids of a batched fetch looked at together; the reply's budget is checked between groups.</summary>
+	private const int FetchGroup = 64;
+
+	/// <summary>A request body in memory, up to the put limit; a larger one is refused before it is read.</summary>
+	private async Task<byte[]> ReadBodyAsync(HttpRequest request)
 	{
+		if (request.ContentLength > options.PutLimit)
+		{
+			throw new BadHttpRequestException(
+				$"The request body is {request.ContentLength} bytes; this server reads at most {options.PutLimit} (-put-limit). Send smaller batches, and large chunks on their upload URLs.",
+				StatusCodes.Status413PayloadTooLarge);
+		}
+
 		using var buffer = new MemoryStream();
 		await request.Body.CopyToAsync(buffer, request.HttpContext.RequestAborted);
 		return buffer.ToArray();

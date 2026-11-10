@@ -104,13 +104,20 @@ public sealed class RemoteObjectStore(ServerConnection server) : IObjectStore, I
 	public async Task<IReadOnlyDictionary<ObjectId, ReadOnlyMemory<byte>>> ReadManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
 	{
 		var result = new Dictionary<ObjectId, ReadOnlyMemory<byte>>();
-		foreach (var part in ids.Chunk(1000))
+		foreach (var part in ids.Distinct().Chunk(1000))
 		{
-			using var response = await server.Http.PostAsJsonAsync(ServerConnection.Path("objects/fetch"), new Api.IdsRequest(part), Api.Json, ct);
-			await ServerConnection.EnsureAsync(response, ct);
-			foreach (var (id, bytes) in Api.Frames.Read(await response.Content.ReadAsByteArrayAsync(ct)))
+			// A reply holds what fits its size budget and says how many ids at the end it did not look at: those are asked for again.
+			for (IReadOnlyList<ObjectId> asking = part; asking.Count > 0;)
 			{
-				result[id] = bytes;
+				using var response = await server.Http.PostAsJsonAsync(ServerConnection.Path("objects/fetch"), new Api.IdsRequest(asking), Api.Json, ct);
+				await ServerConnection.EnsureAsync(response, ct);
+				foreach (var (id, bytes) in Api.Frames.Read(await response.Content.ReadAsByteArrayAsync(ct)))
+				{
+					result[id] = bytes;
+				}
+
+				var left = response.Headers.TryGetValues(Api.TruncatedHeader, out var values) && int.TryParse(values.FirstOrDefault(), out var count) ? count : 0;
+				asking = left > 0 && left < asking.Count ? asking.Skip(asking.Count - left).ToList() : [];
 			}
 		}
 

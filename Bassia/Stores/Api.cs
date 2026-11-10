@@ -111,6 +111,12 @@ public static class Api
 
 	public sealed record ErrorReply(string Error);
 
+	/// <summary>
+	/// On a batched fetch's reply: how many of the ids asked for the server did not look at, because the reply had
+	/// reached its size budget. They come last in the request; the client asks for them again.
+	/// </summary>
+	public const string TruncatedHeader = "X-Bassia-Truncated";
+
 	public sealed record WorkspacesRequest(IReadOnlyList<string> Ids);
 
 	/// <summary>
