@@ -160,7 +160,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | --- | --- |
 | Monorepo | `init [-path <dir>] [-postgres <connection>]`, `clone -from <url> [-path <dir>] [-token <t>] [-postgres <connection>]`, `status`, `version`, `help` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>`, `config unset -key <k>` |
-| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>] [-materialize full\|lazy]`, `workspace clone -from <w> -name <n> [-context <rules>] [-materialize ...]`, `workspace checkout <w> [-materialize ...]`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace mount [<w>]`, `workspace unmount [<w>]`, `workspace list [-all]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
+| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>] [-materialize full\|lazy]`, `workspace clone -from <w> -name <n> [-context <rules>] [-materialize ...]`, `workspace checkout <w> [-materialize ...]`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace mount [<w>]`, `workspace unmount [<w>]`, `workspace list [-all [-limit <n>]]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
 | Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]`, `agent job` (in a container: clone, then start or replay from `BASSIA_JOB_ARGS`) |
@@ -463,7 +463,7 @@ bassia-server migrate -postgres "<connection string>" [-check]   # bring the sch
 ### Schema versions and migrations
 
 The PostgreSQL schema is versioned per component - `state` (heads, path index, meta, leases, lease queue, fencing
-sequence) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
+sequence, workspace registry) and `trees` - in `bassia_schema` (version and `compatible_from` per component) and `bassia_schema_history`,
 in the connection's schema. Steps are numbered from 1, run in order, each once, in one transaction with the version
 bump; migration 1 is the schema as it was created before versioning. On start the server (and every local monorepo
 or clone command) reads the version in one query; only when it is behind does it take a session advisory lock keyed
@@ -496,7 +496,7 @@ bassia-server -data /var/lib/bassia -url http://0.0.0.0:8080 -public-url https:/
   `-azure-prefix` (default `objects/`), keyed by hash prefix. Chunks of 256 KiB and more move between clients and the
   container directly on SAS URLs valid for 30 minutes; the server never proxies them.
 - **PostgreSQL**: `-postgres <connection string>` (PostgreSQL 13 or later), the same as on any server. The tables (`bassia_heads`,
-  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, sequence `bassia_fencing`) are created and migrated on start
+  `bassia_paths`, `bassia_meta`, `bassia_leases`, `bassia_lease_queue`, `bassia_workspaces`, `bassia_workspace_paths`, sequence `bassia_fencing`) are created and migrated on start
   (see "Schema versions and migrations"); Terraform provisions the server, not the schema.
   Heads move by compare-and-swap, paths are compared in byte order (`COLLATE "C"`), lease grants serialize through a
   transaction-scoped advisory lock and take fencing tokens from the sequence, and the path index is filled in seq
@@ -559,7 +559,8 @@ The RPC surface under `/api/v1` is what a client's remote stores call:
 | `POST /objects/have` | Which ids the server already holds; asked before every upload. |
 | `POST /objects/read-urls`, `POST /objects/upload-urls` | GetChunkUrls and BeginUpload: signed URLs for direct transfers. |
 | `GET/PUT /objects/{id}` | One object; large chunks are redirected to their signed URL, structural objects are validated on upload. |
-| `GET /heads...`, `POST /heads/advance` | Workspace heads, by compare-and-swap; `main` is refused (only landing moves it), and so are the server's `rc/` candidate heads. |
+| `GET /heads...`, `POST /heads/advance` | Workspace heads, by compare-and-swap; `main` is refused (only landing moves it), and so are the server's `rc/` candidate heads. A workspace head must point at an operation of that workspace; the server records it in the workspace registry from the operation it reads itself. |
+| `GET /workspaces?open=&limit=&before=`, `GET /workspaces/find?reference=`, `POST /workspaces/get`, `GET /workspaces/stale?seq=` | The workspace registry: open workspaces (oldest first) or closed ones (newest first, in pages), the workspaces a name or prefix may mean, workspaces by id, and the open workspaces not reconciled with mainline at a seq. |
 | `POST /leases/acquire`, `renew`, `release`, `GET /leases` | Leases; waiting happens on the server. |
 | `POST /land` | Land (or check, with `dry_run`) a workspace. |
 
@@ -724,9 +725,9 @@ Bassia has five projects; each depends only on the ones before it.
      id, size and mode), `ConflictObject` (bases and sides), `Commit` (tree, parents, change id, author, intent, replay
      recipe), `Operation`, `View` and `Candidate` (a workspace reconciled with mainline) - with ids as BLAKE3-256 hashes of
      canonical CBOR (`ObjectCodec`).
-   - `Storage`: the four traits - `IObjectStore` (immutable objects: has, stat, ranged read, put, begin upload),
-     `IViewStore` (heads moved by compare-and-swap), `IPathIndex` (mainline's path versions by seq) and `ILeaseStore`
-     (leases with fencing tokens) - with in-memory implementations, the local-disk blob store (`DiskObjectStore`) and
+   - `Storage`: the traits - `IObjectStore` (immutable objects: has, stat, ranged read, put, begin upload),
+     `IViewStore` (heads moved by compare-and-swap), `IPathIndex` (mainline's path versions by seq), `ILeaseStore`
+     (leases with fencing tokens) and `IWorkspaceIndex` (the workspace registry, below) - with in-memory implementations, the local-disk blob store (`DiskObjectStore`) and
      decorators (caching, counting, verifying).
    - `Version`: `Repository` (mainline, workspace heads, operation logs, path index catch-up), `Trees` (lookup, edit,
      diff and three-way merge, all skipping equal subtrees), `Diffs` (renames, rewrites, hunks), `WorkspaceService`
@@ -755,6 +756,33 @@ Bassia has five projects; each depends only on the ones before it.
 5. **`Bassia.LoadTest`** - `bassia-loadtest`, the load harness: it hosts a `bassia-server`, seeds a synthetic monorepo
    and measures what each operation costs under many agents (see "Load harness").
 
+
+### Workspace registry
+
+A workspace is a head `ws/<id>` pointing at an operation whose view holds its record; a reconciled candidate is a head
+`rc/<id>`. The **workspace registry** (`IWorkspaceIndex`) is what answers questions about workspaces without reading
+the operation behind every head: for each workspace head a row with what its record says (name, status, owner, base
+seq, created, closed, its commits), and for each candidate the commits and mainline seq it was computed for and the
+paths its workspace touches. It is derived, like the path index: dropped, it is rebuilt from the heads
+(`Repository.SyncWorkspaceIndexAsync`).
+
+The registry moves the workspace and candidate heads itself, so a head and its row change together - on PostgreSQL
+(`bassia_workspaces`, `bassia_workspace_paths`) in one transaction with the compare-and-swap. A workspace that closes
+loses its touched paths. A server records, at start, any head the registry does not describe as it is now (a database
+from before the registry, or a head a node of an older build moved during a rolling deploy) and drops rows whose head
+is gone; a local monorepo does so once, when it finds workspaces and an empty registry.
+
+| Question | Cost |
+| --- | --- |
+| Open workspaces (`workspace list`, status, Studio) | one query for the open ones, then their operations and views in one batch each |
+| Closed workspaces | a page of 100, newest first (`workspace list -all [-limit <n>]`, Studio's "Older") |
+| A workspace by name or prefix; whether a name is free | one query, by name or over the open workspaces |
+| The workspaces a landing made stale; the conflict overview | one query: open workspaces without a current candidate, or with a touched path (or `.bassia.toml`) that changed on mainline after their candidate's seq |
+
+None of these grows with the closed workspaces kept (14 days by default). A clone asks the server
+(`RemoteWorkspaceIndex`, the `/workspaces` calls). A store without a registry - an older client's remote stores, the
+core over plain in-memory stores - falls back to `ScanningWorkspaceIndex`, which lists the heads and reads every
+operation, as every question did before.
 
 ### Trees
 
@@ -823,7 +851,7 @@ undo and restore, the path index and its rebuild from the operation log, leases 
 agents landing through several landing services, a replay landing with the original change id, garbage collection
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` and `PostgresStateTests` hold the
-in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
+in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict

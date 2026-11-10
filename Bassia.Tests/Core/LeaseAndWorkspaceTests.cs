@@ -64,7 +64,7 @@ public class LeaseTests
 	private static LandingService RacingLanding(TestRepo repo, Func<Task> race)
 	{
 		var views = new RacingViewStore(repo.Views, race);
-		return new LandingService(new Repository(repo.Objects, views, repo.Paths, repo.Leases, TestRepo.SmallChunks, repo.TreeStore));
+		return new LandingService(new Repository(repo.Objects, views, repo.Paths, repo.Leases, TestRepo.SmallChunks, repo.TreeStore, repo.Index));
 	}
 
 	[Fact]
@@ -251,7 +251,7 @@ public class WorkspaceDiskTests
 		File.WriteAllText(dir.Combine("ws", "d1", "f1.txt"), "changed");
 
 		// A fresh client over the same store, as a second process would be: only tree objects are read.
-		var fresh = new Repository(counting, repo.Views, repo.Paths, repo.Leases, TestRepo.SmallChunks, repo.TreeStore);
+		var fresh = new Repository(counting, repo.Views, repo.Paths, repo.Leases, TestRepo.SmallChunks, repo.TreeStore, repo.Index);
 		var freshClient = new WorkspaceClient(fresh, new LandingService(fresh), dir.Combine(".state"), "tester");
 		var before = counting.BytesRead;
 		var reads = counting.Reads;

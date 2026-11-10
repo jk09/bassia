@@ -75,6 +75,8 @@ internal sealed class Runner(Scenario scenario, RunOptions options, Action<strin
 			{
 				Execute(postgres, $"CREATE SCHEMA {schema}");
 				seed = await SeedHostedAsync(connection, data, ct);
+				// A database in use has statistics (autovacuum); one loaded a moment ago has none, and plans as if it were empty.
+				Execute(connection, "ANALYZE");
 				if (kept)
 				{
 					File.WriteAllText(marker, Marker(schema));
@@ -128,7 +130,7 @@ internal sealed class Runner(Scenario scenario, RunOptions options, Action<strin
 		// The same stores the server will open, without the server: its reconciliation would follow every seeded landing.
 		await using var state = new PostgresState(connection);
 		await using var trees = new PostgresTreeStore(connection);
-		var repo = new Repository(new DiskObjectStore(Path.Combine(data, "objects")), state, state, state, null, trees);
+		var repo = new Repository(new DiskObjectStore(Path.Combine(data, "objects")), state, state, state, null, trees, state);
 		await repo.InitializeAsync("bassia-server");
 		return await new Seeder(repo, new LandingService(repo), scenario, log).SeedAsync(ct);
 	}
@@ -190,7 +192,7 @@ internal sealed class Runner(Scenario scenario, RunOptions options, Action<strin
 	private static Repository Client(ServerConnection connection, IObjectStore? sharedObjects) =>
 		new(sharedObjects ?? new CachingObjectStore(new MemoryObjectStore(), new RemoteObjectStore(connection)),
 			new RemoteViewStore(connection), new RemotePathIndex(connection), new RemoteLeaseStore(connection), null,
-			new CachingTreeStore(new MemoryTreeStore(), new RemoteTreeStore(connection)));
+			new CachingTreeStore(new MemoryTreeStore(), new RemoteTreeStore(connection)), new RemoteWorkspaceIndex(connection));
 
 	private async Task<RunReport> MeasureAsync(string url, string? token, string serverName, bool seeded, SeedResult? seed, ServerApp? server, ServerProbe? probe, CancellationToken ct)
 	{

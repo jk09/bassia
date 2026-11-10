@@ -57,7 +57,7 @@ internal sealed class Monorepo : IDisposable
 			}
 
 			Repo = new Repository(Objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks,
-				new CachingTreeStore(localTrees, new RemoteTreeStore(server)));
+				new CachingTreeStore(localTrees, new RemoteTreeStore(server)), new RemoteWorkspaceIndex(server));
 			Landing = new RemoteLanding(server);
 			Overview = new RemoteConflictOverview(server);
 		}
@@ -71,7 +71,12 @@ internal sealed class Monorepo : IDisposable
 			var trees = new PostgresTreeStore(connection);
 			postgres.Add(State);
 			postgres.Add(trees);
-			Repo = new Repository(disk, State, State, State, chunks, trees);
+			Repo = new Repository(disk, State, State, State, chunks, trees, State);
+			if (State.WorkspacesNeedBackfill)
+			{
+				// A monorepo made before the workspace registry: its workspaces are recorded once, from their heads.
+				Repo.SyncWorkspaceIndexAsync().GetAwaiter().GetResult();
+			}
 			var semantic = MergeDrivers.Semantic(Config.Get("merge.semantic_driver"));
 			var validate = Config.GetOrNull("land.validate") is { } command ? new ShellValidationHook(Repo, command) : null;
 			LocalLanding = new LandingService(Repo, semantic, validate);

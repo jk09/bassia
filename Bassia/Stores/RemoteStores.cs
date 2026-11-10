@@ -344,6 +344,45 @@ public sealed class RemoteViewStore(ServerConnection server) : IViewStore
 		(await server.PostAsync<Api.AdvanceReply>("heads/delete", new Api.DeleteHeadRequest(name.Value, expected), ct)).Success;
 }
 
+/// <summary>
+/// The server's workspace registry as a client sees it: workspaces are listed and found in one call each, and a
+/// workspace head moves through the server, which records it. Candidates are the server's: a client reconciles nothing.
+/// </summary>
+public sealed class RemoteWorkspaceIndex(ServerConnection server) : IWorkspaceIndex
+{
+	public async ValueTask<HeadUpdate> AdvanceAsync(ObjectId? expected, WorkspaceSummary next, CancellationToken ct = default)
+	{
+		var reply = await server.PostAsync<Api.AdvanceReply>("heads/advance", new Api.AdvanceRequest(HeadName.Workspace(next.Id).Value, expected, next.Head), ct);
+		return new HeadUpdate(reply.Success, reply.Current);
+	}
+
+	public async ValueTask<bool> RemoveAsync(string workspace, ObjectId expected, CancellationToken ct = default) =>
+		(await server.PostAsync<Api.AdvanceReply>("heads/delete", new Api.DeleteHeadRequest(HeadName.Workspace(workspace).Value, expected), ct)).Success;
+
+	public async Task<IReadOnlyList<WorkspaceSummary>> ListAsync(bool open, int limit = int.MaxValue, DateTimeOffset? before = null, CancellationToken ct = default) =>
+		await server.GetAsync<List<WorkspaceSummary>>(
+			$"workspaces?open={(open ? "true" : "false")}&limit={limit}{(before is { } time ? "&before=" + Uri.EscapeDataString(time.ToUniversalTime().ToString("O")) : "")}", ct);
+
+	public async Task<IReadOnlyList<WorkspaceSummary>> GetAsync(IReadOnlyList<string> ids, CancellationToken ct = default) =>
+		ids.Count == 0 ? [] : await server.PostAsync<List<WorkspaceSummary>>("workspaces/get", new Api.WorkspacesRequest(ids), ct);
+
+	public async Task<IReadOnlyList<WorkspaceSummary>> FindAsync(string reference, CancellationToken ct = default) =>
+		await server.GetAsync<List<WorkspaceSummary>>($"workspaces/find?reference={Uri.EscapeDataString(reference)}", ct);
+
+	public async Task<IReadOnlyList<string>> StaleAsync(long seq, string policyPath, CancellationToken ct = default) =>
+		await server.GetAsync<List<string>>($"workspaces/stale?seq={seq}", ct);
+
+	public ValueTask<HeadUpdate> AdvanceCandidateAsync(string workspace, ObjectId? expected, CandidateSummary? next, CancellationToken ct = default) =>
+		throw new VersionException("Reconciled candidates are kept by the server; a client does not store them.");
+
+	public Task<IReadOnlyList<(HeadName Name, ObjectId Head)>> UnindexedAsync(CancellationToken ct = default) =>
+		Task.FromResult<IReadOnlyList<(HeadName, ObjectId)>>([]);
+
+	public ValueTask RecordAsync(WorkspaceSummary summary, CandidateSummary? candidate, CancellationToken ct = default) => ValueTask.CompletedTask;
+
+	public ValueTask PruneAsync(CancellationToken ct = default) => ValueTask.CompletedTask;
+}
+
 /// <summary>Mainline's path index on the server (StatPaths, ChangedSince); only the server's landing service applies to it.</summary>
 public sealed class RemotePathIndex(ServerConnection server) : IPathIndex
 {

@@ -75,7 +75,7 @@ internal sealed class ServerApp : IAsyncDisposable
 
 		Trees = new PostgresTreeStore(options.Postgres, options.Migrate);
 		Blobs = options.DecorateBlobs?.Invoke(Blobs) ?? Blobs;
-		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees);
+		Repo = new Repository(Blobs, new NotifyingViewStore(State, this), State, State, options.Chunks, Trees, new NotifyingWorkspaceIndex(State, this));
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
 		Landing.Landed += landed => Publish(new Api.WatchEvent("landed", landed.Seq, landed.Prefixes, landed.Workspace, landed.Time));
@@ -123,6 +123,12 @@ internal sealed class ServerApp : IAsyncDisposable
 
 		accessToken = ResolveToken();
 		await Repo.InitializeAsync("bassia-server");
+		// Heads the registry does not describe (the first start on it, or heads an older node moved) are recorded now.
+		if (await Repo.SyncWorkspaceIndexAsync() is > 0 and var recorded)
+		{
+			Console.Error.WriteLine($"bassia-server: recorded {recorded} workspace head(s) in the workspace registry.");
+		}
+
 		Reconciling.Start();
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
 		builder.Logging.ClearProviders();
@@ -287,6 +293,42 @@ internal sealed class ServerApp : IAsyncDisposable
 		public ValueTask<bool> DeleteHeadAsync(HeadName name, ObjectId expected, CancellationToken ct = default) => inner.DeleteHeadAsync(name, expected, ct);
 	}
 
+	/// <summary>The registry, publishing a moved workspace head to watchers and to the reconcile queue.</summary>
+	private sealed class NotifyingWorkspaceIndex(IWorkspaceIndex inner, ServerApp server) : IWorkspaceIndex
+	{
+		public async ValueTask<HeadUpdate> AdvanceAsync(ObjectId? expected, WorkspaceSummary next, CancellationToken ct = default)
+		{
+			var update = await inner.AdvanceAsync(expected, next, ct);
+			if (update.Success)
+			{
+				server.Publish(new Api.WatchEvent("workspace", Workspace: next.Id, Time: DateTimeOffset.UtcNow));
+				server.Reconciling?.Workspace(next.Id);
+			}
+
+			return update;
+		}
+
+		public ValueTask<HeadUpdate> AdvanceCandidateAsync(string workspace, ObjectId? expected, CandidateSummary? next, CancellationToken ct = default) =>
+			inner.AdvanceCandidateAsync(workspace, expected, next, ct);
+
+		public ValueTask<bool> RemoveAsync(string workspace, ObjectId expected, CancellationToken ct = default) => inner.RemoveAsync(workspace, expected, ct);
+
+		public Task<IReadOnlyList<WorkspaceSummary>> ListAsync(bool open, int limit = int.MaxValue, DateTimeOffset? before = null, CancellationToken ct = default) =>
+			inner.ListAsync(open, limit, before, ct);
+
+		public Task<IReadOnlyList<WorkspaceSummary>> GetAsync(IReadOnlyList<string> ids, CancellationToken ct = default) => inner.GetAsync(ids, ct);
+
+		public Task<IReadOnlyList<WorkspaceSummary>> FindAsync(string reference, CancellationToken ct = default) => inner.FindAsync(reference, ct);
+
+		public Task<IReadOnlyList<string>> StaleAsync(long seq, string policyPath, CancellationToken ct = default) => inner.StaleAsync(seq, policyPath, ct);
+
+		public Task<IReadOnlyList<(HeadName Name, ObjectId Head)>> UnindexedAsync(CancellationToken ct = default) => inner.UnindexedAsync(ct);
+
+		public ValueTask RecordAsync(WorkspaceSummary summary, CandidateSummary? candidate, CancellationToken ct = default) => inner.RecordAsync(summary, candidate, ct);
+
+		public ValueTask PruneAsync(CancellationToken ct = default) => inner.PruneAsync(ct);
+	}
+
 	private async Task WatchAsync(HttpContext context)
 	{
 		var channel = Channel.CreateBounded<Api.WatchEvent>(new BoundedChannelOptions(256) { FullMode = BoundedChannelFullMode.DropOldest });
@@ -396,6 +438,18 @@ internal sealed class ServerApp : IAsyncDisposable
 				return Error(StatusCodes.Status400BadRequest, $"'{name}' must point at an operation of a workspace with that name.");
 			}
 
+			// A workspace head moves through the registry, which records what the server itself read from the operation.
+			if (name.IsWorkspace)
+			{
+				if (view.Workspace is not { } record || record.Id != name.WorkspaceId)
+				{
+					return Error(StatusCodes.Status400BadRequest, $"'{name}' must point at an operation of that workspace.");
+				}
+
+				var moved = await Repo.Workspaces.AdvanceAsync(body.Expected, WorkspaceSummary.Of(body.Next, record));
+				return Json(new Api.AdvanceReply(moved.Success, moved.Current));
+			}
+
 			var update = await Repo.Views.AdvanceHeadAsync(name, body.Expected, body.Next);
 			return Json(new Api.AdvanceReply(update.Success, update.Current));
 		});
@@ -405,7 +459,18 @@ internal sealed class ServerApp : IAsyncDisposable
 			var name = new HeadName(body.Name);
 			return name == HeadName.Main ? Error(StatusCodes.Status403Forbidden, "Mainline cannot be deleted.")
 				: name.IsCandidate ? Error(StatusCodes.Status403Forbidden, "Reconciled candidates are kept by the server.")
-				: Json(new Api.AdvanceReply(await State.DeleteHeadAsync(name, body.Expected), null));
+				: Json(new Api.AdvanceReply(name.IsWorkspace ? await State.RemoveAsync(name.WorkspaceId, body.Expected) : await State.DeleteHeadAsync(name, body.Expected), null));
+		});
+
+		// The workspace registry: listing, finding and resolving workspaces without reading every head.
+		api.MapGet("/workspaces", async (bool? open, int? limit, DateTimeOffset? before) =>
+			Json(await State.ListAsync(open ?? true, Math.Clamp(limit ?? int.MaxValue, 1, int.MaxValue), before)));
+		api.MapGet("/workspaces/find", async (string reference) => Json(await State.FindAsync(reference)));
+		api.MapPost("/workspaces/get", async (HttpRequest request) => Json(await State.GetAsync((await BodyAsync<Api.WorkspacesRequest>(request)).Ids)));
+		api.MapGet("/workspaces/stale", async (long seq) =>
+		{
+			await IndexAsync();
+			return Json(await State.StaleAsync(seq, RepoPolicy.FileName));
 		});
 
 		// Objects.
@@ -693,13 +758,19 @@ internal sealed class ServerApp : IAsyncDisposable
 	/// <summary>Serves an object: small ones and structural objects directly, large chunks by redirect to a signed URL.</summary>
 	private async Task<IResult> ReadObjectAsync(string id, HttpRequest request)
 	{
-		if (!TryId(id, out var objectId) || await StatObjectAsync(objectId) is not { } stat)
+		if (!TryId(id, out var objectId))
 		{
 			return Error(404, $"No object {id}.");
 		}
 
-		if (await Blobs.StatAsync(objectId) is null && (await Repo.Objects.TreeStore.GetManyAsync([objectId])).TryGetValue(objectId, out var stored))
+		// One stat tells a blob from a tree and a small blob from one to redirect; a blob is not asked about twice.
+		if (await Blobs.StatAsync(objectId) is not { } stat)
 		{
+			if (!(await Repo.Objects.TreeStore.GetManyAsync([objectId])).TryGetValue(objectId, out var stored))
+			{
+				return Error(404, $"No object {id}.");
+			}
+
 			var encoded = ObjectCodec.Encode(stored);
 			BytesServed.Add(encoded.Length);
 			return Results.Bytes(encoded, "application/octet-stream");

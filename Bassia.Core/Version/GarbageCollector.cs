@@ -50,7 +50,7 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 				var state = await repo.WorkspaceAtAsync(head, ct);
 				if (!state.IsOpen && state.Record.Closed is { } closed && now - closed > retention)
 				{
-					if (!dryRun && await repo.Views.DeleteHeadAsync(name, head, ct))
+					if (!dryRun && await repo.Workspaces.RemoveAsync(state.Id, head, ct))
 					{
 						pruned++;
 						continue;
@@ -78,7 +78,7 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 			}
 			else if (!dryRun)
 			{
-				await repo.Views.DeleteHeadAsync(name, head, ct);
+				await repo.Workspaces.AdvanceCandidateAsync(name.WorkspaceId, head, null, ct);
 			}
 		}
 

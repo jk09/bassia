@@ -111,6 +111,8 @@ public static class Api
 
 	public sealed record ErrorReply(string Error);
 
+	public sealed record WorkspacesRequest(IReadOnlyList<string> Ids);
+
 	/// <summary>
 	/// Many objects in one body: for each, its 32-byte id, its length (4 bytes, little-endian) and its bytes. Used by
 	/// <c>/objects/fetch</c> (the reply) and <c>/objects/put</c> (the request); compressed in transit when both sides can.

@@ -60,7 +60,8 @@ public sealed class MonorepoClient(StudioOptions options) : IDisposable
 					landing = new RemoteLanding(server);
 					overview = new RemoteConflictOverview(server);
 					connection = server;
-					repo = new Repository(objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks);
+					repo = new Repository(objects, new RemoteViewStore(server), new RemotePathIndex(server), new RemoteLeaseStore(server), chunks,
+						workspaces: new RemoteWorkspaceIndex(server));
 				}
 				catch
 				{

@@ -1,6 +1,6 @@
 # Workspace registry: find workspaces by query, not by reading every head
 
-Status: proposed. Part 2 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
+Status: active. Part 2 of 3 of the first scalability step; measured with `bassia-1def6a48` (load harness), sibling
 of `bassia-ff9140e9` (mainline index).
 
 ## Outcome
@@ -38,9 +38,9 @@ Studio as fast as an empty one.
       error messages `ResolveWorkspaceAsync` gives today, in a bounded number of statements whatever the number of
       workspaces.
 - [ ] Creating a workspace whose name is free does not list workspaces.
-- [ ] After a landing, the workspaces it made stale are found from the paths it changed: the cost follows the number
-      of changed paths and of workspaces touching them, not the number of open workspaces. The result is the same set
-      `AffectedAsync` returns today (workspaces with no candidate or one for other commits; workspaces touching a
+- [ ] After a landing, the workspaces it made stale are found in one statement, whatever the number of workspaces, from
+      the registry's touched paths and the path index (see Decisions for what the database does inside it). The result
+      is the same set `AffectedAsync` returns today (workspaces with no candidate or one for other commits; workspaces touching a
       changed path; every reconciled workspace when `.bassia.toml` changed).
 - [ ] The conflict overview (workspaces, overlaps, hot paths) is unchanged in content and no longer reads one
       candidate and runs one path query per workspace.
@@ -60,7 +60,7 @@ Studio as fast as an empty one.
 - [ ] With the harness (`bassia-1def6a48`): reconciliation after a landing, workspace list, name resolution and the
       conflict overview no longer grow with the number of closed workspaces, and the report before and after is
       recorded here.
-- [ ] The existing test suite passes unchanged.
+- [ ] The existing test suite passes; only assertions that named the `state` schema's version as 1 follow the new step.
 
 ## Approach
 
@@ -80,8 +80,8 @@ transaction.
 `AffectedAsync(seq)` becomes: the paths changed at that seq (already in `bassia_paths`) joined with
 `bassia_workspace_paths`, plus open workspaces without a current candidate - one statement.
 
-The server exposes the registry under `/api/v1/workspaces` (list with status and paging, resolve); `RemoteWorkspaceIndex`
-calls it. `GET /heads` gains paging and stays for older clients and for garbage collection.
+The server exposes the registry under `/api/v1/workspaces` (list with status and paging, find, get, stale);
+`RemoteWorkspaceIndex` calls it. `GET /heads` stays for older clients and for garbage collection.
 
 Backfill, and repair after a crash, is the catch-up the path index already has: rows are rebuilt from the `ws/` and
 `rc/` heads under the migration's advisory lock.
@@ -93,6 +93,24 @@ Backfill, and repair after a crash, is the catch-up the path index already has: 
   object into a table - it would change object formats, the operation log of a workspace and clones.
 - **Touched paths come from the candidate.** The server already computes them when it reconciles; a workspace that is
   not reconciled yet is found by its missing candidate instead.
+
+- **A repository without a registry scans** (`ScanningWorkspaceIndex`): the old behavior behind the same trait, for an
+  older client's remote stores and for plain in-memory stores. `Repository` has one code path.
+- **The registry moves the candidate heads too** (`AdvanceCandidateAsync`), so the touched paths change in the
+  transaction that moves `rc/<id>`, as the workspace row does with `ws/<id>`.
+- **Stale workspaces in one statement, evaluated per open workspace.** The query checks, for each open workspace, its
+  candidate's commits and whether one of its touched paths (or `.bassia.toml`) has a path-index row after the
+  candidate's seq. Driving it from the landing's changed paths instead was rejected: a candidate that nothing
+  overtakes keeps an old seq, so the range of history to join against is not bounded by the last landing. The work
+  inside the statement follows open workspaces times their touched paths (index probes), never closed ones.
+- **Summaries keep millisecond times**, the precision a stored record has, so a row written with the head equals one
+  rebuilt from it.
+- **A listing with closed workspaces returns all open ones and a page of closed ones** (`Repository.ClosedPage` = 100,
+  newest first); run lists and name lookups that used to read every workspace see that page.
+- **`GET /heads` is not paged** in this change: with the registry no client lists workspace heads any more; garbage
+  collection still reads all heads in one reply. Left for the garbage-collection work.
+- **The load harness analyzes its database after seeding**: without statistics PostgreSQL scanned the whole workspace
+  table for the open ones (18 ms at 10,000 closed, 2 ms with statistics).
 
 Confirmed by the user (were open questions):
 

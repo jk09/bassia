@@ -15,7 +15,8 @@ internal sealed class TestRepo
 	{
 		Objects = objects ?? new MemoryObjectStore();
 		TreeStore = trees ?? new MemoryTreeStore();
-		Repo = new Repository(Objects, Views, Paths, Leases, SmallChunks, TreeStore);
+		Index = new MemoryWorkspaceIndex(Views, Paths);
+		Repo = new Repository(Objects, Views, Paths, Leases, SmallChunks, TreeStore, Index);
 		Landing = new LandingService(Repo);
 		Workspaces = new WorkspaceService(Repo);
 	}
@@ -42,6 +43,9 @@ internal sealed class TestRepo
 	public MemoryPathIndex Paths { get; } = new();
 
 	public MemoryLeaseStore Leases { get; } = new();
+
+	/// <summary>The workspace registry every repository over these stores must share: it moves the workspace heads.</summary>
+	public MemoryWorkspaceIndex Index { get; }
 
 	public Repository Repo { get; }
 

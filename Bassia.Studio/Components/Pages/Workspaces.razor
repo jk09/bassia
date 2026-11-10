@@ -33,18 +33,31 @@ else
 			</tr>
 		}
 	</table>
+	@if (older is { } next)
+	{
+		<p class="muted">The newest @Repository.ClosedPage closed workspaces@(Before is null ? "" : " before this page"). <a href="/workspaces?all=true&before=@next">Older</a></p>
+	}
 }
 
 @code {
 	[SupplyParameterFromQuery(Name = "all")] public bool All { get; set; }
 
+	/// <summary>Closed workspaces created before this time (UTC ticks): the next page of "All".</summary>
+	[SupplyParameterFromQuery(Name = "before")] public long? Before { get; set; }
+
 	private IReadOnlyList<WorkspaceState> workspaces = [];
+	private long? older;
 
 	protected override bool LiveUpdates => true;
 
 	protected override async Task LoadAsync()
 	{
 		var repo = await Client.OpenAsync();
-		workspaces = (await repo.ListWorkspacesAsync(All)).OrderByDescending(state => state.Record.Created).ToList();
+		var before = Before is { } ticks ? new DateTimeOffset(ticks, TimeSpan.Zero) : (DateTimeOffset?)null;
+		workspaces = (await repo.ListWorkspacesAsync(All, closedBefore: before)).OrderByDescending(state => state.Record.Created).ToList();
+
+		// Closed workspaces come a page at a time, newest first; the link below continues before the oldest one shown.
+		var closed = workspaces.Where(state => !state.IsOpen).ToList();
+		older = All && closed.Count >= Repository.ClosedPage ? closed[^1].Record.Created.UtcTicks : null;
 	}
 }
