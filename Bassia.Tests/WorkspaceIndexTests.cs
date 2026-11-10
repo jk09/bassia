@@ -196,7 +196,11 @@ public sealed class WorkspaceIndexTests
 			}
 			catch (VersionException ex)
 			{
-				return ex.Message;
+				// Workspaces made in the same millisecond are named in no particular order.
+				const string several = "matches several workspaces: ";
+				var at = ex.Message.IndexOf(several, StringComparison.Ordinal);
+				return at < 0 ? ex.Message
+					: ex.Message[..(at + several.Length)] + string.Join(", ", ex.Message[(at + several.Length)..].TrimEnd('.').Split(", ").Order(StringComparer.Ordinal));
 			}
 		}
 
