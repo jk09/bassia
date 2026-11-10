@@ -118,8 +118,8 @@ public sealed class LoadHarnessTests : IDisposable
 		var scenario = new Scenario();
 		var before = temp.Combine("before.toml");
 		var after = temp.Combine("after.toml");
-		File.WriteAllText(before, Reports.Toml(Report(scenario, Operation("list", 100, 200, 1, 600), Operation("land", 30, 1, 19, 5), Operation("tiny", 0.4, 1, 1, 0))));
-		File.WriteAllText(after, Reports.Toml(Report(scenario, Operation("list", 10, 1, 1, 0), Operation("land", 31, 1, 30, 5), Operation("tiny", 1.2, 1, 1, 0))));
+		File.WriteAllText(before, Reports.Toml(Report(scenario, Operation("list", 100, 200, 1, 600), Operation("land", 30, 1, 19, 5), Operation("tiny", 0.3, 1, 1, 0))));
+		File.WriteAllText(after, Reports.Toml(Report(scenario, Operation("list", 10, 1, 1, 0), Operation("land", 31, 1, 30, 5), Operation("tiny", 0.9, 1, 1, 0))));
 
 		var read = Reports.Read(before);
 		Assert.Equal(200, read[""]["list"]["requests"]);

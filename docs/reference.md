@@ -931,7 +931,8 @@ fast path only when the server reconciled the workspace first).
 A **sweep** runs the scenario once per value, each on a fresh state, and reports how each operation changed from the
 smallest value to the largest. When the parameter sizes the state (`-files`, `-fanout`, `-history`, `-closed`, `-open`)
 the work asked for is the same at every value, so an operation is marked **grows** when its statements, blob calls or
-requests rose by half or its median latency tripled: it costs more only because the state is larger. `compare` lists
+requests rose by half or its median latency tripled: it costs more only because the state is larger. The first value runs
+in a process that has compiled nothing yet, so its times are high and time ratios below 1 mean nothing. `compare` lists
 the operations whose p50, p95, requests, statements or blob calls differ between two reports by more than
 `-threshold` percent (default 20), for a run or value by value for two sweeps.
 
