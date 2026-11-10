@@ -98,27 +98,55 @@ public sealed class LandingService : ILanding
 
 	public event Action<LandedEvent>? Landed;
 
+	/// <summary>What a landing decided before it takes the gate: the plan for a workspace's commits on one mainline.</summary>
+	private sealed record Prepared(WorkspaceRecord Record, MainState Main, RepoPolicy Policy, IReadOnlyList<string> Paths, LandingPlan Plan, ObjectId Tree, bool Reconciled);
+
 	public async Task<LandResult> LandAsync(LandRequest request, CancellationToken ct = default)
 	{
-		// One landing at a time in this process; the compare-and-swap keeps several processes or nodes correct.
-		await gate.WaitAsync(ct);
-		try
+		for (var attempt = 1; attempt <= MaxAttempts; attempt++)
 		{
-			var result = await LandOnceAsync(request, ct);
-			if (!request.DryRun)
+			// Deciding - the diff, the conflict policies, merge drivers and validation - holds no lock: a landing that
+			// validates for a minute keeps no other landing waiting.
+			var (result, prepared) = await PrepareAsync(request, attempt, ct);
+			if (result is not null && request.DryRun)
 			{
-				await RecordAsync(request, result, ct);
+				return result;
 			}
 
-			return result;
+			// One landing at a time commits in this process; the compare-and-swap keeps several processes or nodes correct.
+			await gate.WaitAsync(ct);
+			try
+			{
+				result ??= await CommitAsync(request, prepared!, attempt, ct);
+				if (result is not null)
+				{
+					await RecordAsync(request, result, ct);
+					return result;
+				}
+			}
+			finally
+			{
+				gate.Release();
+			}
+
+			// Mainline (or the workspace) moved under the plan: decide again.
 		}
-		finally
+
+		var main = await repo.GetMainAsync(ct);
+		var gaveUp = new LandResult(LandOutcome.Rejected, $"Mainline kept moving; gave up after {MaxAttempts} attempts.", null, null, main.Seq, main.CommitId, [], 0, [], [], MaxAttempts);
+		if (!request.DryRun)
 		{
-			gate.Release();
+			await RecordAsync(request, gaveUp, ct);
 		}
+
+		return gaveUp;
 	}
 
-	private async Task<LandResult> LandOnceAsync(LandRequest request, CancellationToken ct)
+	/// <summary>
+	/// Decides a landing on the current mainline, without a lock: a result when it is refused, has nothing to land or
+	/// is a dry run; otherwise the plan to commit.
+	/// </summary>
+	private async Task<(LandResult? Result, Prepared? Prepared)> PrepareAsync(LandRequest request, int attempt, CancellationToken ct)
 	{
 		var workspace = await repo.ResolveWorkspaceAsync(request.Workspace, ct);
 		var record = workspace.Record;
@@ -128,7 +156,7 @@ public sealed class LandingService : ILanding
 
 		if (await Planner.RefusalAsync(workspace, ct) is { } refusal)
 		{
-			return Fail(refusal.Outcome, refusal.Message);
+			return (Fail(refusal.Outcome, refusal.Message), null);
 		}
 
 		// A candidate for exactly these commits that would land replaces the diff and the planning below.
@@ -151,107 +179,167 @@ public sealed class LandingService : ILanding
 
 		if (candidate is null && await PlanFromScratchAsync() is { } early)
 		{
-			return early;
+			return (early, null);
 		}
 
-		var warnings = new List<string>();
-		for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+		await repo.EnsureIndexedAsync(main, ct);
+		var policy = await RepoPolicy.LoadAsync(repo.Trees, main.Tree, ct);
+
+		// The fast path: the candidate holds while none of its paths moved since it was reconciled.
+		LandingPlan? plan = null;
+		if (candidate is not null)
 		{
-			main = await repo.GetMainAsync(ct);
-			await repo.EnsureIndexedAsync(main, ct);
-			var policy = await RepoPolicy.LoadAsync(repo.Trees, main.Tree, ct);
-			var paths = candidate?.Touched ?? touched!.Select(change => change.Path).ToList();
-
-			// Leases are checked on every attempt, against the policy of the mainline this attempt lands on: a lost
-			// race may have outlived a presented lease or landed a new [leases] required prefix.
-			warnings.Clear();
-			var leaseProblems = await CheckLeasesAsync(record, request, paths, policy, warnings, ct);
-			if (leaseProblems.Count > 0)
+			if (await Reconciler.MovedSinceAsync(candidate, main.Seq, ct) || (candidate.MachineMerged && candidate.MainSeq != main.Seq))
 			{
-				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", leaseProblems, paths.Count, attempt);
+				candidate = null;
 			}
-
-			// The fast path: the candidate holds while none of its paths moved since it was reconciled.
-			LandingPlan? plan = null;
-			if (candidate is not null)
+			else
 			{
-				if (await Reconciler.MovedSinceAsync(candidate, main.Seq, ct) || (candidate.MachineMerged && candidate.MainSeq != main.Seq))
+				var changes = candidate.Changes.Select(change => new PathChange(change.Path, change.Leaf)).ToList();
+				try
+				{
+					var edited = await repo.Trees.EditAsync(main.Tree, changes, ct);
+					plan = new LandingPlan(LandOutcome.WouldLand, edited == main.Tree
+							? $"Workspace '{record.Name}' would land without changing mainline: its changes are already there."
+							: $"Workspace '{record.Name}' can land on seq {main.Seq}: {candidate.Touched.Count} touched path(s), no conflicts (reconciled at seq {candidate.MainSeq}).",
+						changes, [], candidate.Merged, candidate.MachineMerged, edited);
+				}
+				catch (PathClashException)
 				{
 					candidate = null;
 				}
-				else
-				{
-					var changes = candidate.Changes.Select(change => new PathChange(change.Path, change.Leaf)).ToList();
-					try
-					{
-						var edited = await repo.Trees.EditAsync(main.Tree, changes, ct);
-						plan = new LandingPlan(LandOutcome.WouldLand, edited == main.Tree
-								? $"Workspace '{record.Name}' would land without changing mainline: its changes are already there."
-								: $"Workspace '{record.Name}' can land on seq {main.Seq}: {paths.Count} touched path(s), no conflicts (reconciled at seq {candidate.MainSeq}).",
-							changes, [], candidate.Merged, candidate.MachineMerged, edited);
-					}
-					catch (PathClashException)
-					{
-						candidate = null;
-					}
-				}
-
-				if (candidate is null && await PlanFromScratchAsync() is { } refused)
-				{
-					return refused;
-				}
 			}
 
-			plan ??= await Planner.PlanAsync(record, touched!, main, policy, request.Strict, request.ReadSet, ct);
-			var reconciled = candidate is not null;
-			if (plan.Tree is not { } tree)
+			if (candidate is null && await PlanFromScratchAsync() is { } refused)
 			{
-				return Fail(plan.Outcome, plan.Message, plan.Conflicts, paths.Count, attempt);
+				return (refused, null);
 			}
-
-			if (request.DryRun)
-			{
-				return new LandResult(LandOutcome.WouldLand, plan.Message, null, null, main.Seq, main.CommitId, [], paths.Count, plan.Merged, warnings, attempt, reconciled);
-			}
-
-			// Merging and validation take time: the presented leases must still hold right before main moves.
-			var lapsed = await LapsedLeasesAsync(request, ct);
-			if (lapsed.Count > 0)
-			{
-				return Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", lapsed, paths.Count, attempt);
-			}
-
-			var working = await repo.Objects.ReadCommitAsync(record.Working, ct);
-			var commit = working with
-			{
-				Tree = tree,
-				Parents = [main.CommitId],
-				Time = repo.Clock(),
-				MachineMerged = working.MachineMerged || plan.MachineMerged
-			};
-			var commitId = await repo.Objects.WriteAsync(commit, ct);
-			var seq = main.Seq + 1;
-			var view = await repo.Objects.WriteAsync(new View(new Dictionary<string, ObjectId> { ["main"] = commitId }), ct);
-			var op = await repo.Objects.WriteAsync(new Operation([main.Head], view, $"land {record.Name}: {FirstLine(working.Intent)}", record.Id,
-				request.Agent ?? working.Author.Agent, working.Author.Run, repo.Clock(), seq), ct);
-			var update = await repo.Views.AdvanceHeadAsync(HeadName.Main, main.Head, op, ct);
-			if (!update.Success)
-			{
-				continue;
-			}
-
-			// Index through the operation log's catch-up rather than applying this seq alone: with several landing
-			// services (server nodes), the landing before this one may not be indexed yet, and seqs go in order.
-			var applied = await repo.Trees.DiffAsync(main.Tree, tree, "", ct);
-			await repo.EnsureIndexedAsync(await repo.MainAtAsync(op, ct), ct);
-			var prefixes = applied.Select(change => PathNames.Split(change.Path)[0]).Distinct(StringComparer.Ordinal).ToList();
-			Landed?.Invoke(new LandedEvent(seq, commitId, record.Id, prefixes, repo.Clock()));
-			return new LandResult(LandOutcome.Landed,
-				$"Landed workspace '{record.Name}' at seq {seq} ({paths.Count} touched path(s){(plan.Merged.Count > 0 ? $", {plan.Merged.Count} merged" : "")}{(reconciled ? ", pre-reconciled" : "")}).",
-				seq, commitId, seq, commitId, [], paths.Count, plan.Merged, warnings, attempt, reconciled);
 		}
 
-		return Fail(LandOutcome.Rejected, $"Mainline kept moving; gave up after {MaxAttempts} attempts.", null, touched?.Count ?? candidate?.Touched.Count ?? 0, MaxAttempts);
+		var paths = candidate?.Touched ?? touched!.Select(change => change.Path).ToList();
+		var warnings = new List<string>();
+		if (request.DryRun || request.Leases is { Count: > 0 })
+		{
+			// A landing that presents leases, or only asks, hears about them before any merge or validation runs.
+			var problems = await CheckLeasesAsync(record, request, paths, policy, warnings, ct);
+			if (problems.Count > 0)
+			{
+				return (Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", problems, paths.Count, attempt), null);
+			}
+		}
+
+		plan ??= await Planner.PlanAsync(record, touched!, main, policy, request.Strict, request.ReadSet, ct);
+		if (plan.Tree is not { } tree)
+		{
+			return (Fail(plan.Outcome, plan.Message, plan.Conflicts, paths.Count, attempt), null);
+		}
+
+		return request.DryRun
+			? (new LandResult(LandOutcome.WouldLand, plan.Message, null, null, main.Seq, main.CommitId, [], paths.Count, plan.Merged, warnings, attempt, candidate is not null), null)
+			: (null, new Prepared(record, main, policy, paths, plan, tree, candidate is not null));
+	}
+
+	/// <summary>
+	/// Commits a plan, under the gate: on the mainline it was made for, or on a newer one that changed none of its
+	/// paths (nor the policy file) - the plan's changes then apply as they are. Null when the plan no longer holds
+	/// (a path moved, a machine-merged or strict plan met a newer mainline, the workspace changed, a lost race): the
+	/// landing decides again.
+	/// </summary>
+	private async Task<LandResult?> CommitAsync(LandRequest request, Prepared prepared, int attempt, CancellationToken ct)
+	{
+		// A compare-and-swap lost to another node is tried again here: the plan holds or not on the mainline that won.
+		for (var race = 0; race < CommitRaces; race++)
+		{
+			if (await CommitOnceAsync(request, prepared, attempt, ct) is var (result, lostRace) && !lostRace)
+			{
+				return result;
+			}
+		}
+
+		return null;
+	}
+
+	/// <summary>How often one plan is committed again after losing the compare-and-swap of main, before it is planned again.</summary>
+	private const int CommitRaces = 8;
+
+	private async Task<(LandResult? Result, bool LostRace)> CommitOnceAsync(LandRequest request, Prepared prepared, int attempt, CancellationToken ct)
+	{
+		var record = prepared.Record;
+		var plan = prepared.Plan;
+		var paths = prepared.Paths;
+		var main = await repo.GetMainAsync(ct);
+		var tree = prepared.Tree;
+		if (main.Head != prepared.Main.Head)
+		{
+			// A machine-merged tree was validated on the mainline it was planned on, and a strict landing reads more than it touches.
+			if (plan.MachineMerged || request.Strict)
+			{
+				return (null, false);
+			}
+
+			await repo.EnsureIndexedAsync(main, ct);
+			var versions = await repo.Paths.GetManyAsync(paths.Append(RepoPolicy.FileName).ToList(), main.Seq, ct);
+			if (versions.Any(version => version is not null && version.Seq > prepared.Main.Seq))
+			{
+				return (null, false);
+			}
+
+			try
+			{
+				tree = await repo.Trees.EditAsync(main.Tree, plan.Changes, ct);
+			}
+			catch (PathClashException)
+			{
+				return (null, false);
+			}
+		}
+
+		// The workspace must still be what was planned: not landed by another call, not snapshotted since.
+		if (await repo.FindWorkspaceAsync(record.Id, ct) is not { IsOpen: true } current || current.Record.Working != record.Working || current.Record.Base != record.Base)
+		{
+			return (null, false);
+		}
+
+		LandResult Fail(string outcome, string message, IReadOnlyList<PathConflict> conflicts) =>
+			new(outcome, message, null, null, main.Seq, main.CommitId, conflicts, paths.Count, [], [], attempt);
+
+		// Leases are checked against the policy of the mainline this lands on (the policy file did not move, or the
+		// plan would not hold), right before main moves: merging and validation took time.
+		var warnings = new List<string>();
+		var leaseProblems = await CheckLeasesAsync(record, request, paths, prepared.Policy, warnings, ct);
+		if (leaseProblems.Count > 0)
+		{
+			return (Fail(LandOutcome.Rejected, "The landing does not hold the leases it needs.", leaseProblems), false);
+		}
+
+		var working = await repo.Objects.ReadCommitAsync(record.Working, ct);
+		var commit = working with
+		{
+			Tree = tree,
+			Parents = [main.CommitId],
+			Time = repo.Clock(),
+			MachineMerged = working.MachineMerged || plan.MachineMerged
+		};
+		var commitId = await repo.Objects.WriteAsync(commit, ct);
+		var seq = main.Seq + 1;
+		var view = await repo.Objects.WriteAsync(new View(new Dictionary<string, ObjectId> { ["main"] = commitId }), ct);
+		var op = await repo.Objects.WriteAsync(new Operation([main.Head], view, $"land {record.Name}: {FirstLine(working.Intent)}", record.Id,
+			request.Agent ?? working.Author.Agent, working.Author.Run, repo.Clock(), seq), ct);
+		var update = await repo.Views.AdvanceHeadAsync(HeadName.Main, main.Head, op, ct);
+		if (!update.Success)
+		{
+			return (null, true);
+		}
+
+		// Index through the operation log's catch-up rather than applying this seq alone: with several landing
+		// services (server nodes), the landing before this one may not be indexed yet, and seqs go in order.
+		var applied = await repo.Trees.DiffAsync(main.Tree, tree, "", ct);
+		await repo.EnsureIndexedAsync(await repo.MainAtAsync(op, ct), ct);
+		var prefixes = applied.Select(change => PathNames.Split(change.Path)[0]).Distinct(StringComparer.Ordinal).ToList();
+		Landed?.Invoke(new LandedEvent(seq, commitId, record.Id, prefixes, repo.Clock()));
+		return (new LandResult(LandOutcome.Landed,
+			$"Landed workspace '{record.Name}' at seq {seq} ({paths.Count} touched path(s){(plan.Merged.Count > 0 ? $", {plan.Merged.Count} merged" : "")}{(prepared.Reconciled ? ", pre-reconciled" : "")}).",
+			seq, commitId, seq, commitId, [], paths.Count, plan.Merged, warnings, attempt, prepared.Reconciled), false);
 	}
 
 	/// <summary>
@@ -302,9 +390,6 @@ public sealed class LandingService : ILanding
 
 		return (live, lapsed);
 	}
-
-	private async Task<List<PathConflict>> LapsedLeasesAsync(LandRequest request, CancellationToken ct) =>
-		request.Leases is { Count: > 0 } ? (await PresentedLeasesAsync(request, ct)).Lapsed : [];
 
 	private async Task RecordAsync(LandRequest request, LandResult result, CancellationToken ct)
 	{

@@ -1,6 +1,6 @@
 # Landing gate: plan outside it, hold it only to commit
 
-Status: proposed. Second scalability step (after `bassia-1def6a48`, `bassia-c7ba795f`, `bassia-ff9140e9`); measured
+Status: active. Second scalability step (after `bassia-1def6a48`, `bassia-c7ba795f`, `bassia-ff9140e9`); measured
 with the load harness.
 
 ## Outcome
@@ -33,8 +33,9 @@ another node repeats that check, not its merges and validation.
 - [ ] Every outcome, message and recorded landing of `LandingTests`, `ReconcilerTests`, `ServerTests` and the swarm
       tests is unchanged; no update is lost with several landing services over one store.
 - [ ] A landing that keeps losing gives up after a bounded number of attempts with today's message.
-- [ ] The load harness can run with a validation hook of a given duration (`-validate-ms`), and reports landing
-      throughput with it before and after; without a hook the statements per landing do not rise.
+- [ ] The same workspace landed by several calls at once lands once; the others are refused.
+- [ ] Load harness: the statements per landing rise by no more than the two reads the commit step repeats (mainline's
+      head and the workspace's), and landing throughput does not fall; recorded here.
 
 ## Approach
 
@@ -53,14 +54,22 @@ Taken unattended, as the user asked (the recommended options):
   statements long; the compare-and-swap already keeps nodes correct, and a lost race is cheap once plans are reused.
 - **The validation hook runs outside the gate**, so two landings may validate at once; each validates the tree it would
   land, and a machine-merged plan is thrown away if mainline moved.
-- **The harness gets a validator option** rather than a separate benchmark.
+- **No validator option in the harness.** The validation hook runs only for machine-merged landings (the `semantic`
+  policy with a merge driver), which the harness's replay-policy scenario never produces; a test with a validator
+  that blocks shows the property directly, and the harness shows that ordinary landings cost the same.
+- **A lost compare-and-swap is retried inside the commit step** (up to 8 times) before the landing is planned again:
+  the plan is checked against the mainline that won, which costs one path lookup.
+- **Recording the outcome on the workspace stays under the gate**, and the commit step checks that the workspace is
+  still what was planned - so two calls landing the same workspace cannot both land it.
+- **Leases are checked before planning only when the landing presents some or is a dry run**; otherwise once, in the
+  commit step, against the mainline it lands on.
 
 ## Progress
 
 - [ ] Plan/commit split in `LandingService`
-- [ ] Tests: blocked validator, plan reuse, machine-merged replan
-- [ ] Harness `-validate-ms`, before and after
+- [ ] Tests: blocked validator, plan reuse, machine-merged replan, the same workspace landed twice
+- [ ] Harness before and after
 
 ## Validation
 
-`dotnet test`; `bassia-loadtest run -validate-ms 200` before and after, recorded here.
+`dotnet test`; `bassia-loadtest run` (small and medium) before and after, recorded here.
