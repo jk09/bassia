@@ -66,6 +66,15 @@ internal sealed record ServerOptions
 	/// <summary>A shell command a machine-merged tree must pass before it lands; without one semantic conflicts need a replay.</summary>
 	public string? Validate { get; init; }
 
+	/// <summary>The most object bytes one batched reply (<c>/objects/fetch</c>) carries before it stops adding; what does not fit is asked for again.</summary>
+	public long FetchBudget { get; init; } = 32L * 1024 * 1024;
+
+	/// <summary>The largest request body the server reads into memory (batched puts, objects put through it).</summary>
+	public long PutLimit { get; init; } = 32L * 1024 * 1024;
+
+	/// <summary>The bound of the decoded objects the server keeps in memory, in approximate bytes.</summary>
+	public long ObjectCache { get; init; } = Bassia.Core.Version.ObjectAccess.DefaultCacheBytes;
+
 	/// <summary>Decorates the blob store the server works on (the load harness counts its calls). Not a command-line switch.</summary>
 	public Func<Bassia.Core.Storage.IObjectStore, Bassia.Core.Storage.IObjectStore>? DecorateBlobs { get; init; }
 
@@ -99,6 +108,10 @@ internal sealed record ServerOptions
 				"Pass -postgres <connection string>.");
 		}
 
+		long Megabytes(string name, long fallback) => Get(name) is not { } text ? fallback * 1024 * 1024
+			: long.TryParse(text, out var megabytes) && megabytes >= 1 ? megabytes * 1024 * 1024
+			: throw new ArgumentException($"-{name} '{text}' is not a number of MiB (1 or more).");
+
 		var noAuth = Get("no-auth") is { } open && !open.Equals("false", StringComparison.OrdinalIgnoreCase);
 		if (noAuth && Get("token") is not null)
 		{
@@ -127,6 +140,9 @@ internal sealed record ServerOptions
 				"verify" => SchemaMode.Verify,
 				var other => throw new ArgumentException($"-migrate '{other}' is not supported: use auto (the default) or verify.")
 			},
+			FetchBudget = Megabytes("fetch-budget", 32),
+			PutLimit = Megabytes("put-limit", 32),
+			ObjectCache = Megabytes("object-cache", 256),
 			SemanticDriver = Get("semantic-driver") ?? "weave-driver",
 			Validate = Get("validate")
 		};

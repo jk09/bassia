@@ -18,10 +18,21 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	/// <summary>Where tree objects live: a relational tree store on the server and in local monorepos, else the object store.</summary>
 	public ITreeStore TreeStore => treeStore;
 
-	private const int CacheLimit = 50_000;
+	/// <summary>The decoded-object cache's bound unless <see cref="CacheLimitBytes"/> sets another: 256 MiB of approximate object size.</summary>
+	public const long DefaultCacheBytes = 256L * 1024 * 1024;
 	private const int UploadBatch = 16;
 
-	private readonly ConcurrentDictionary<ObjectId, StoredObject> cache = new();
+	private readonly ObjectCache cache = new(DefaultCacheBytes);
+
+	/// <summary>The bound of the decoded objects held in memory, in approximate bytes; past it the least recently used go.</summary>
+	public long CacheLimitBytes
+	{
+		get => cache.LimitBytes;
+		set => cache.LimitBytes = value;
+	}
+
+	/// <summary>The approximate bytes of decoded objects held in memory.</summary>
+	public long CacheBytes => cache.Bytes;
 
 	/// <summary>Forgets the decoded objects held in memory (the store, and a clone's disk cache, keep them).</summary>
 	public void ClearCache() => cache.Clear();
@@ -32,7 +43,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 
 	public async Task<T> ReadAsync<T>(ObjectId id, CancellationToken ct = default) where T : StoredObject
 	{
-		if (cache.TryGetValue(id, out var cached))
+		if (cache.TryGet(id, out var cached))
 		{
 			return cached as T ?? throw new VersionException($"Object {id.Short} is a {cached.GetType().Name}, not a {typeof(T).Name}.");
 		}
@@ -59,15 +70,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 		return value as T ?? throw new VersionException($"Object {id.Short} is a {value.GetType().Name}, not a {typeof(T).Name}.");
 	}
 
-	private void Remember(ObjectId id, StoredObject value)
-	{
-		if (cache.Count > CacheLimit)
-		{
-			cache.Clear();
-		}
-
-		cache[id] = value;
-	}
+	private void Remember(ObjectId id, StoredObject value) => cache.Add(id, value);
 
 	private void Remember(IReadOnlyDictionary<ObjectId, Tree> trees)
 	{
@@ -82,7 +85,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	/// <summary>Brings these trees into the cache in one call (a level of a diff).</summary>
 	public async Task PrefetchTreesAsync(IEnumerable<ObjectId> ids, CancellationToken ct = default)
 	{
-		var missing = ids.Where(id => !cache.ContainsKey(id)).Distinct().ToList();
+		var missing = ids.Where(id => !cache.Contains(id)).Distinct().ToList();
 		if (missing.Count > 0)
 		{
 			Remember(await treeStore.GetManyAsync(missing, ct));
@@ -92,7 +95,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	/// <summary>Brings a tree and the trees below it into the cache in one call: a walk of the subtree then reads nothing more.</summary>
 	public async Task PrefetchSubtreeAsync(ObjectId root, int depth = int.MaxValue, CancellationToken ct = default)
 	{
-		if (!cache.ContainsKey(root))
+		if (!cache.Contains(root))
 		{
 			Remember(await treeStore.GetSubtreesAsync(root, depth, SubtreeLimit, ct));
 		}
@@ -182,7 +185,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	{
 		if (store is IObjectPrefetcher prefetcher)
 		{
-			var missing = ids.Where(id => !cache.ContainsKey(id)).Distinct().ToList();
+			var missing = ids.Where(id => !cache.Contains(id)).Distinct().ToList();
 			if (missing.Count > 0)
 			{
 				await prefetcher.PrefetchAsync(missing, ct);
@@ -216,7 +219,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 	public async Task<IReadOnlyList<ObjectId>> WriteManyAsync(IReadOnlyList<StoredObject> values, CancellationToken ct = default)
 	{
 		var encoded = values.Select(value => (Value: value, Bytes: ObjectCodec.Encode(value))).Select(item => (item.Value, Id: ObjectId.Of(item.Bytes), item.Bytes)).ToList();
-		var fresh = encoded.Where(item => !cache.ContainsKey(item.Id)).DistinctBy(item => item.Id).ToList();
+		var fresh = encoded.Where(item => !cache.Contains(item.Id)).DistinctBy(item => item.Id).ToList();
 		var freshTrees = fresh.Where(item => item.Value is Tree).Select(item => (item.Id, (Tree)item.Value)).ToList();
 		var freshBlobs = fresh.Where(item => item.Value is not Tree).ToList();
 		if (deferred.Value is { } pending)
@@ -243,7 +246,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 
 		foreach (var item in encoded)
 		{
-			cache.TryAdd(item.Id, item.Value);
+			cache.Add(item.Id, item.Value);
 		}
 
 		return encoded.Select(item => item.Id).ToList();
@@ -255,7 +258,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 		var id = ObjectId.Of(bytes);
 		if (deferred.Value is { } pending)
 		{
-			if (!cache.ContainsKey(id))
+			if (!cache.Contains(id))
 			{
 				if (value is Tree tree)
 				{
@@ -276,7 +279,7 @@ public sealed class ObjectAccess(IObjectStore store, ChunkParameters? chunks = n
 			await store.PutAsync(id, bytes, ct);
 		}
 
-		cache.TryAdd(id, value);
+		cache.Add(id, value);
 		return id;
 	}
 

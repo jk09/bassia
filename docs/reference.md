@@ -528,6 +528,13 @@ theirs in a local PostgreSQL too); `-state postgres` is still accepted, any othe
 and, with the default `-storage disk`, the blob container `objects/` - a local-disk stand-in for cloud blob storage,
 laid out by hash prefix, so a server and its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
 
+**Memory.** What one request can make the server hold is bounded by three switches, each in MiB: `-fetch-budget`
+(default 32) - a batched fetch stops adding objects once its reply holds that much, and clients ask again for the
+rest; `-put-limit` (default 32) - a larger request body is refused with a 413 before it is read (clients send small
+objects in batches of 8 MiB and large chunks on their upload URLs); and `-object-cache` (default 256) - the decoded
+objects the server keeps (commits, operations, views, trees, file objects, candidates), by approximate size, the
+least recently used evicted first.
+
 `bassia-server` is a Web API only: it serves no pages. Its web UI is Bassia Studio; the API is for Studio, `bassia`
 clients and any other client, in the cloud or local. `GET /` answers a short JSON description (`service`, `version`,
 `api`, `health`); any other path outside the API is a JSON 404.
@@ -553,7 +560,7 @@ The RPC surface under `/api/v1` is what a client's remote stores call:
 | `GET /main/log?from=&count=`, `GET /main/indexed` | The mainline index: the landings at and below a seq, newest first (operation, view, commit, tree, workspace, time), and how many it holds. |
 | `GET /watch` | A stream (server-sent events) of landings with the prefixes they touched, of workspaces that moved, and of workspaces reconciled (`reconciled`). |
 | `GET /conflicts` | The live conflict overview: every open workspace reconciled with mainline, overlaps between open workspaces, hot paths. |
-| `POST /objects/fetch` | GetObjects: many objects in one binary reply (structural objects and chunks under 256 KiB); what it leaves out is read on its direct URL. |
+| `POST /objects/fetch` | GetObjects: many objects in one binary reply (structural objects and chunks under 256 KiB); what it leaves out is read on its direct URL. A reply stops adding objects at its byte budget (`-fetch-budget`) and says in `X-Bassia-Truncated` how many of the last ids it did not look at; the client asks for those again. |
 | `POST /objects/put` | Many small objects in one binary request, each checked like a single put. |
 | `POST /objects/batch` | Structural objects by id as JSON, optionally with subtrees to a depth. |
 | `POST /paths/stat`, `GET /paths/list`, `GET /paths/changed` | StatPaths, listing and ChangedSince from the path index. |
@@ -868,7 +875,7 @@ undo and restore, the path index and its rebuild from the operation log, leases 
 agents landing through several landing services, a replay landing with the original change id, garbage collection
 and scrubbing, and workspaces on disk (snapshots that hash only what changed, ignore rules, case collisions,
 materialized conflicts, undo, and status reading no file bytes). `StoreContractTests` and `PostgresStateTests` hold the
-in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `MainlineIndexTests` holds the mainline index to its contract in memory and on PostgreSQL, counts that mainline at a past seq reads the same objects after 8 and after 120 landings, backfills and resumes a backfill, compares what garbage collection marks from the index with what it marks from the log, and lands from several services at once without leaving a seq out. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
+in-memory and PostgreSQL stores to the same contract, and `TreeStoreTests` the tree stores (memory, blobs, PostgreSQL). `SchemaMigrationTests` covers schema versioning: a fresh schema, baselining, later steps, concurrent starters, a database newer than the build and the clone's cache. `ObjectCacheTests` and `ServerMemoryTests` cover the bounds on the server's memory: the cache of decoded objects staying within its size and keeping what is used, a batched fetch that stops at its budget with the client asking for the rest (and a client that does not know of the budget), and a body over the limit refused with a 413. `MainlineIndexTests` holds the mainline index to its contract in memory and on PostgreSQL, counts that mainline at a past seq reads the same objects after 8 and after 120 landings, backfills and resumes a backfill, compares what garbage collection marks from the index with what it marks from the log, and lands from several services at once without leaving a seq out. `WorkspaceIndexTests` holds the workspace registry to its contract in memory and on PostgreSQL, compares a repository on it with one that reads every head, rebuilds it from the heads (several starters at once), and counts that finding workspaces costs the same with none and with sixty closed ones; `WorkspaceRegistryServerTests` runs a clone and an older client that lists heads against a server. `CliTests` drives the command line in-process on local monorepos. `ServerTests` starts
 `bassia-server` in the test process over the local-disk blob storage and PostgreSQL and runs clients and raw HTTP clients against it: the
 command line across two clients, a swarm of agents landing overlapping trees over HTTP, laziness of status against
 the server, object validation, mainline's protection and signed blob URLs, background reconciliation and the conflict
