@@ -8,7 +8,35 @@ using Npgsql;
 using NpgsqlTypes;
 
 /// <summary>The server's mutable state: heads, mainline's path index and leases, in one store.</summary>
-public interface IServerState : IViewStore, IPathIndex, ILeaseStore, IWorkspaceIndex, IObjectCatalog;
+public interface IServerState : IViewStore, IPathIndex, ILeaseStore, IWorkspaceIndex, IObjectCatalog, IServerEvents;
+
+/// <summary>
+/// What the nodes of one server tell one another through their shared database: events (hints - whoever hears one can
+/// also recompute what it says from the database) and short exclusive claims.
+/// </summary>
+public interface IServerEvents
+{
+	/// <summary>The channel of watch events (landings, workspaces that moved, reconciliations).</summary>
+	const string Events = "events";
+
+	/// <summary>The channel that says a lease was released.</summary>
+	const string Leases = "leases";
+
+	/// <summary>Sends <paramref name="payload"/> to every node listening on <paramref name="channel"/>, this one included.</summary>
+	Task NotifyAsync(string channel, string payload, CancellationToken ct = default);
+
+	/// <summary>
+	/// Hears what is sent on <paramref name="channel"/> until disposed. <paramref name="onReconnect"/> runs when the
+	/// listening connection was lost and is back: what was sent meanwhile was not heard.
+	/// </summary>
+	IDisposable Subscribe(string channel, Action<string> onPayload, Action? onReconnect = null);
+
+	/// <summary>Completes once this node hears what is sent (subscriptions are in effect).</summary>
+	Task ListeningAsync(CancellationToken ct = default);
+
+	/// <summary>Claims <paramref name="name"/> among all nodes until the result is disposed; null when another holds it.</summary>
+	Task<IAsyncDisposable?> TryLockAsync(string name, CancellationToken ct = default);
+}
 
 /// <summary>
 /// The mutable state on PostgreSQL (Azure Database for PostgreSQL flexible server, or any PostgreSQL 13+): one row per
@@ -429,9 +457,17 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 	private static Lease ReadLease(DbDataReader reader) => new(reader.GetString(0), reader.GetString(1), (LeaseMode)reader.GetInt32(2), reader.GetString(3),
 		reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetInt64(5), reader.GetFieldValue<DateTimeOffset>(6), reader.GetFieldValue<DateTimeOffset>(7));
 
-	private static async Task<List<Lease>> LiveLeasesAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, DateTimeOffset now, CancellationToken ct)
+	/// <summary>Restricts a query to rows whose prefix overlaps <paramref name="prefix"/> (canonical: "" or ending in "/"): its ancestors, itself and what is under it.</summary>
+	private static (string Sql, (string, object?)[] Parameters) Overlapping(string prefix) => prefix.Length == 0
+		? ("", [])
+		: (" AND (prefix = ANY(@above) OR (prefix >= @from AND prefix < @to))",
+			[("above", PathNames.Ancestors(prefix).ToArray()), ("from", prefix), ("to", prefix[..^1] + "0")]);
+
+	/// <summary>The live leases; with <paramref name="overlapping"/>, only those whose prefix overlaps it - all a grant has to look at.</summary>
+	private static async Task<List<Lease>> LiveLeasesAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, DateTimeOffset now, CancellationToken ct, string? overlapping = null)
 	{
-		await using var command = Command(connection, $"SELECT {LeaseColumns} FROM bassia_leases WHERE expires > @now ORDER BY prefix", transaction, ("now", now));
+		var (filter, parameters) = overlapping is null ? ("", []) : Overlapping(overlapping);
+		await using var command = Command(connection, $"SELECT {LeaseColumns} FROM bassia_leases WHERE expires > @now{filter} ORDER BY prefix", transaction, [("now", now), .. parameters]);
 		await using var reader = await command.ExecuteReaderAsync(ct);
 		var leases = new List<Lease>();
 		while (await reader.ReadAsync(ct))
@@ -442,6 +478,24 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		return leases;
 	}
 
+	/// <summary>How long a waiter sleeps when no release is announced: what bounds its noticing an expiry.</summary>
+	private static readonly TimeSpan WaitPoll = TimeSpan.FromMilliseconds(500);
+
+	private TaskCompletionSource leaseReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
+	private IDisposable? leaseSubscription;
+
+	/// <summary>Completes at the next announced release of a lease, on any node.</summary>
+	private Task ReleasedSignal()
+	{
+		lock (subscribing)
+		{
+			leaseSubscription ??= Subscribe(IServerEvents.Leases, _ =>
+				Interlocked.Exchange(ref leaseReleased, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult());
+		}
+
+		return Volatile.Read(ref leaseReleased).Task;
+	}
+
 	public async ValueTask<LeaseResult> AcquireAsync(LeaseRequest request, CancellationToken ct = default)
 	{
 		var deadline = Clock() + request.Wait;
@@ -450,6 +504,8 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		{
 			while (true)
 			{
+				// Taken before looking: a release announced while this attempt runs is not missed.
+				var released = request.Wait > TimeSpan.Zero ? ReleasedSignal() : Task.CompletedTask;
 				var now = Clock();
 				await using (var connection = await source.OpenConnectionAsync(ct))
 				await using (var transaction = await connection.BeginTransactionAsync(ct))
@@ -457,10 +513,13 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 					await ExecuteAsync(connection, "SELECT pg_advisory_xact_lock(@lock)", transaction, ct, ("lock", LeaseLock));
 					await ExecuteAsync(connection, "DELETE FROM bassia_leases WHERE expires <= @now", transaction, ct, ("now", now));
 					await ExecuteAsync(connection, "DELETE FROM bassia_lease_queue WHERE alive_until <= @now", transaction, ct, ("now", now));
-					var blocking = LeaseRules.Blocking(request, await LiveLeasesAsync(connection, transaction, now, ct));
+					// Only leases and waiters on overlapping prefixes can stand in the way: the rest are not read.
+					var wanted = PathNames.Prefix(request.Prefix);
+					var blocking = LeaseRules.Blocking(request, await LiveLeasesAsync(connection, transaction, now, ct, wanted));
 					var ahead = new List<LeaseRequest>();
-					await using (var queue = Command(connection, "SELECT prefix, mode, owner FROM bassia_lease_queue WHERE @ticket::bigint IS NULL OR ticket < @ticket ORDER BY ticket",
-						transaction, ("ticket", ticket)))
+					var (overlap, overlapParameters) = Overlapping(wanted);
+					await using (var queue = Command(connection, $"SELECT prefix, mode, owner FROM bassia_lease_queue WHERE (@ticket::bigint IS NULL OR ticket < @ticket){overlap} ORDER BY ticket",
+						transaction, [("ticket", ticket), .. overlapParameters]))
 					await using (var reader = await queue.ExecuteReaderAsync(ct))
 					{
 						while (await reader.ReadAsync(ct))
@@ -509,7 +568,10 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 					await transaction.CommitAsync(ct);
 				}
 
-				await Task.Delay(100, ct);
+				// Until a release is announced - by any node - or, for what is not announced (a lease that expires, a
+				// waiter ahead that gave up), a moment passes.
+				await Task.WhenAny(released, Task.Delay(WaitPoll, ct));
+				ct.ThrowIfCancellationRequested();
 			}
 		}
 		finally
@@ -536,7 +598,11 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 	public async ValueTask ReleaseAsync(string id, long token, CancellationToken ct = default)
 	{
 		await using var connection = await source.OpenConnectionAsync(ct);
-		await ExecuteAsync(connection, "DELETE FROM bassia_leases WHERE id = @id AND token = @token", null, ct, ("id", id), ("token", token));
+		if (await ExecuteAsync(connection, "DELETE FROM bassia_leases WHERE id = @id AND token = @token", null, ct, ("id", id), ("token", token)) > 0)
+		{
+			// Waiters on every node look again now, instead of at their next poll.
+			await ExecuteAsync(connection, "SELECT pg_notify(@channel, '')", null, ct, ("channel", Scoped(await SchemaAsync(ct), IServerEvents.Leases)));
+		}
 	}
 
 	public async ValueTask<IReadOnlyList<Lease>> ListAsync(string? prefix = null, CancellationToken ct = default)
@@ -965,5 +1031,185 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		await ExecuteAsync(connection, "INSERT INTO bassia_meta (key, value) VALUES ('objects_cataloged', 1) ON CONFLICT (key) DO UPDATE SET value = 1", null, ct);
 	}
 
-	public ValueTask DisposeAsync() => source.DisposeAsync();
+	// ----- events between nodes -----
+
+	private readonly Lock subscribing = new();
+	private readonly List<(string Channel, Action<string> OnPayload, Action? OnReconnect)> subscribers = [];
+	private readonly CancellationTokenSource listenStop = new();
+	private readonly TaskCompletionSource listening = new(TaskCreationOptions.RunContinuationsAsynchronously);
+	private Task? listener;
+	private string? schema;
+
+	private async Task<string> SchemaAsync(CancellationToken ct)
+	{
+		if (schema is null)
+		{
+			await using var connection = await source.OpenConnectionAsync(ct);
+			schema = (string)(await ScalarAsync(connection, "SELECT current_schema()", null, ct))!;
+		}
+
+		return schema;
+	}
+
+	/// <summary>Channels and claims are per database in PostgreSQL; each schema (each monorepo, each test) gets names of its own.</summary>
+	private static string Scoped(string schema, string name) =>
+		"bassia_" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(schema + "\n" + name)))[..32];
+
+	public async Task NotifyAsync(string channel, string payload, CancellationToken ct = default)
+	{
+		var name = Scoped(await SchemaAsync(ct), channel);
+		await using var connection = await source.OpenConnectionAsync(ct);
+		await ExecuteAsync(connection, "SELECT pg_notify(@channel, @payload)", null, ct, ("channel", name), ("payload", payload));
+	}
+
+	public IDisposable Subscribe(string channel, Action<string> onPayload, Action? onReconnect = null)
+	{
+		var entry = (channel, onPayload, onReconnect);
+		lock (subscribing)
+		{
+			subscribers.Add(entry);
+			listener ??= Task.Run(ListenAsync);
+		}
+
+		return new Unsubscribe(() =>
+		{
+			lock (subscribing)
+			{
+				subscribers.Remove(entry);
+			}
+		});
+	}
+
+	private sealed class Unsubscribe(Action action) : IDisposable
+	{
+		public void Dispose() => action();
+	}
+
+	public Task ListeningAsync(CancellationToken ct = default)
+	{
+		lock (subscribing)
+		{
+			listener ??= Task.Run(ListenAsync);
+		}
+
+		return listening.Task.WaitAsync(ct);
+	}
+
+	/// <summary>One connection that listens on both channels for as long as the store lives, and comes back when it drops.</summary>
+	private async Task ListenAsync()
+	{
+		var ct = listenStop.Token;
+		var reconnected = false;
+		while (!ct.IsCancellationRequested)
+		{
+			try
+			{
+				var names = new Dictionary<string, string>();
+				foreach (var channel in new[] { IServerEvents.Events, IServerEvents.Leases })
+				{
+					names[Scoped(await SchemaAsync(ct), channel)] = channel;
+				}
+
+				await using var connection = await source.OpenConnectionAsync(ct);
+				connection.Notification += (_, notification) =>
+				{
+					if (names.TryGetValue(notification.Channel, out var channel))
+					{
+						Deliver(subscriber => subscriber.Channel == channel, subscriber => subscriber.OnPayload(notification.Payload));
+					}
+				};
+				foreach (var name in names.Keys)
+				{
+					await ExecuteAsync(connection, $"LISTEN {name}", null, ct);
+				}
+
+				if (reconnected)
+				{
+					Deliver(subscriber => subscriber.OnReconnect is not null, subscriber => subscriber.OnReconnect!());
+				}
+
+				listening.TrySetResult();
+				while (true)
+				{
+					await connection.WaitAsync(ct);
+				}
+			}
+			catch (OperationCanceledException) when (ct.IsCancellationRequested)
+			{
+				return;
+			}
+			catch (Exception ex) when (ex is NpgsqlException or IOException or ObjectDisposedException)
+			{
+				// The connection dropped: what was sent until it is back is lost, and the subscribers are told so.
+				reconnected = true;
+				try
+				{
+					await Task.Delay(1000, ct);
+				}
+				catch (OperationCanceledException)
+				{
+					return;
+				}
+			}
+		}
+	}
+
+	private void Deliver(Func<(string Channel, Action<string> OnPayload, Action? OnReconnect), bool> which, Action<(string Channel, Action<string> OnPayload, Action? OnReconnect)> call)
+	{
+		List<(string, Action<string>, Action?)> targets;
+		lock (subscribing)
+		{
+			targets = subscribers.Where(which).ToList();
+		}
+
+		foreach (var target in targets)
+		{
+			try
+			{
+				call(target);
+			}
+			catch (Exception)
+			{
+				// A subscriber's failure is its own; the others still hear.
+			}
+		}
+	}
+
+	public async Task<IAsyncDisposable?> TryLockAsync(string name, CancellationToken ct = default)
+	{
+		var key = BitConverter.ToInt64(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(await SchemaAsync(ct) + "\n" + name)));
+		var connection = await source.OpenConnectionAsync(ct);
+		try
+		{
+			if (await ScalarAsync(connection, "SELECT pg_try_advisory_lock(@key)", null, ct, ("key", key)) is true)
+			{
+				return new AdvisoryLock(connection, $"SELECT pg_advisory_unlock({key})");
+			}
+		}
+		catch
+		{
+			await connection.DisposeAsync();
+			throw;
+		}
+
+		await connection.DisposeAsync();
+		return null;
+	}
+
+	public async ValueTask DisposeAsync()
+	{
+		await listenStop.CancelAsync();
+		if (listener is not null)
+		{
+			try
+			{
+				await listener;
+			}
+			catch (Exception)
+			{
+			}
+		}
+
+		await source.DisposeAsync();
+	}
 }

@@ -16,14 +16,30 @@ internal sealed class ReconcileQueue : IAsyncDisposable
 	private const string LandedPrefix = "\0landed:";
 
 	private readonly Reconciler reconciler;
-	private readonly Channel<string> channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
+	private readonly Channel<string> channel = Channel.CreateUnbounded<string>();
 	private readonly HashSet<string> queued = [];
 	private readonly Lock gate = new();
 	private readonly CancellationTokenSource stopping = new();
-	private Task? worker;
+	private readonly List<Task> workers = [];
 	private int busy;
+	private int delayed;
 
 	public ReconcileQueue(Reconciler reconciler) => this.reconciler = reconciler;
+
+	/// <summary>How many workspaces this node reconciles at once.</summary>
+	public int Workers { get; init; } = 4;
+
+	/// <summary>
+	/// Claims a workspace among all nodes for the length of its reconciliation; null when another node has it. Without
+	/// it (one node) nothing is claimed.
+	/// </summary>
+	public Func<string, CancellationToken, Task<IAsyncDisposable?>>? Claim { get; init; }
+
+	/// <summary>
+	/// How often this node looks for open workspaces that are not reconciled, whoever's event made them stale: what
+	/// picks up the work of a node that died with its queue. Null: only at start.
+	/// </summary>
+	public TimeSpan? CatchUpEvery { get; init; }
 
 	/// <summary>Errors are reported here and the queue goes on (the next event reconciles again).</summary>
 	public Action<string>? Log { get; init; }
@@ -35,15 +51,63 @@ internal sealed class ReconcileQueue : IAsyncDisposable
 		{
 			lock (gate)
 			{
-				return queued.Count == 0 && Volatile.Read(ref busy) == 0;
+				return queued.Count == 0 && Volatile.Read(ref busy) == 0 && Volatile.Read(ref delayed) == 0;
 			}
 		}
 	}
 
 	public void Start()
 	{
-		worker ??= Task.Run(RunAsync);
+		if (workers.Count == 0)
+		{
+			for (var index = 0; index < Math.Max(1, Workers); index++)
+			{
+				workers.Add(Task.Run(RunAsync));
+			}
+
+			if (CatchUpEvery is { } interval)
+			{
+				workers.Add(Task.Run(() => CatchUpAsync(interval)));
+			}
+		}
+
 		Enqueue(CatchUp);
+	}
+
+	/// <summary>Looks again for workspaces that are not reconciled (after a reconnect, or on the periodic check).</summary>
+	public void LookAgain() => Enqueue(CatchUp);
+
+	private async Task CatchUpAsync(TimeSpan interval)
+	{
+		try
+		{
+			while (true)
+			{
+				await Task.Delay(interval, stopping.Token);
+				Enqueue(CatchUp);
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+	}
+
+	/// <summary>Another node is reconciling this workspace - perhaps as it was a moment ago: look at it again shortly.</summary>
+	private async Task RetryAsync(string item)
+	{
+		Interlocked.Increment(ref delayed);
+		try
+		{
+			await Task.Delay(200, stopping.Token);
+			Enqueue(item);
+		}
+		catch (OperationCanceledException)
+		{
+		}
+		finally
+		{
+			Interlocked.Decrement(ref delayed);
+		}
 	}
 
 	/// <summary>Reconcile this workspace soon; a workspace already waiting is not queued twice.</summary>
@@ -99,9 +163,21 @@ internal sealed class ReconcileQueue : IAsyncDisposable
 							Enqueue(id);
 						}
 					}
-					else
+					else if (Claim is null)
 					{
 						await reconciler.ReconcileAsync(item, ct);
+					}
+					else
+					{
+						await using var claim = await Claim(item, ct);
+						if (claim is null)
+						{
+							_ = RetryAsync(item);
+						}
+						else
+						{
+							await reconciler.ReconcileAsync(item, ct);
+						}
 					}
 				}
 				catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -127,7 +203,7 @@ internal sealed class ReconcileQueue : IAsyncDisposable
 	{
 		await stopping.CancelAsync();
 		channel.Writer.TryComplete();
-		if (worker is not null)
+		foreach (var worker in workers)
 		{
 			try
 			{
