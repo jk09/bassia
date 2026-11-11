@@ -430,3 +430,59 @@ public sealed class ObjectCatalogSweepTests
 		Assert.True((await blobs.ReadAsync(id))!.Value.Span.SequenceEqual(bytes));
 	}
 }
+
+/// <summary>Garbage collection against a blob store whose every read waits, as cloud storage does.</summary>
+public sealed class GarbageCollectionLatencyTests
+{
+	private sealed class SlowReads(IObjectStore inner, TimeSpan delay) : IObjectStore
+	{
+		public ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default) => inner.HasAsync(ids, ct);
+
+		public ValueTask<ObjectStat?> StatAsync(ObjectId id, CancellationToken ct = default) => inner.StatAsync(id, ct);
+
+		public async ValueTask<ReadOnlyMemory<byte>?> ReadAsync(ObjectId id, ByteRange? range = null, CancellationToken ct = default)
+		{
+			await Task.Delay(delay, ct);
+			return await inner.ReadAsync(id, range, ct);
+		}
+
+		public ValueTask PutAsync(ObjectId id, ReadOnlyMemory<byte> bytes, CancellationToken ct = default) => inner.PutAsync(id, bytes, ct);
+
+		public ValueTask<UploadTicket> BeginUploadAsync(ObjectId id, long length, CancellationToken ct = default) => inner.BeginUploadAsync(id, length, ct);
+	}
+
+	[Fact]
+	public async Task FileObjects_AreReadSeveralAtATime_NotOneAfterAnother()
+	{
+		var blobs = new MemoryObjectStore();
+		var seeding = new TestRepo(blobs);
+		await seeding.Repo.InitializeAsync("test");
+
+		// One landing of 160 files of several chunks each: every file is a file object the marking walk opens.
+		const int Files = 160;
+		var changes = new List<PathChange>();
+		for (var index = 0; index < Files; index++)
+		{
+			var content = new byte[3 * 1024];
+			new Random(index).NextBytes(content);
+			changes.Add(new PathChange($"src/f{index}.bin", await seeding.Repo.Objects.WriteContentAsync(content)));
+		}
+
+		var workspace = await seeding.Workspaces.CreateAsync("files", "ann");
+		var working = await seeding.Repo.Objects.ReadCommitAsync(workspace.Record.Working);
+		await seeding.Workspaces.SetTreeAsync(workspace.Id, await seeding.Repo.Trees.EditAsync(working.Tree, changes), "files", "ann", null);
+		Assert.Equal(LandOutcome.Landed, (await seeding.Landing.LandAsync(new LandRequest(workspace.Id))).Outcome);
+		Assert.True(Files <= (await seeding.Repo.Trees.WalkAsync((await seeding.Repo.GetMainAsync()).Tree).ToListAsync()).Count(item => item.Leaf.Kind == EntryKind.Chunked));
+
+		// The same stores in a fresh process, behind reads that each take 20 ms.
+		var delay = TimeSpan.FromMilliseconds(20);
+		var slow = new Repository(new SlowReads(blobs, delay), seeding.Views, seeding.Paths, seeding.Leases, TestRepo.SmallChunks, seeding.TreeStore, seeding.Index);
+		var watch = System.Diagnostics.Stopwatch.StartNew();
+		var report = await new GarbageCollector(slow, blobs).CollectAsync(TimeSpan.Zero, TimeSpan.FromDays(1), dryRun: true);
+		watch.Stop();
+
+		// One after another, the file objects alone would take 160 x 20 ms = 3.2 s.
+		Assert.True(report.Live > Files);
+		Assert.True(watch.Elapsed < Files * delay / 2, $"the collection took {watch.ElapsedMilliseconds} ms");
+	}
+}

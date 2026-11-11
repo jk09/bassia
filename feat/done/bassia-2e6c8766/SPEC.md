@@ -92,7 +92,16 @@ Garbage collection (dry run) on that state takes 4.7 s with 14,170 blob reads an
 lists the bucket. Its blob reads are now the file objects it opens to find their chunks and the operations of
 workspaces - what the follow-up above is for.
 
-## Progress
+### Follow-up: file objects read ahead
+
+The marking walk opened every file object one after another to find its chunks. It now reads them 16 at a time
+first. Behind a blob store whose reads each take 20 ms, a collection over 160 files took 3.6 s before and under 1.6 s
+after (`GarbageCollectionLatencyTests`). On the load harness's local-disk store it makes no measurable difference -
+0.42 ms per blob read without it, 0.45 ms with it, on states of 93,000 and 107,000 reads - since a local read does not
+wait on a network. The full large scenario (1,000,000 files, 10,000 landings, 21,000 closed workspaces) collects in
+29 s with 80,000 blob reads, against 37 s and 127,000 before the catalog.
+
+
 
 - [x] Trait, memory and PostgreSQL catalog, decorator, contract tests
 - [x] Collection through the catalog; the race tests (objects and trees); an upload meeting a sweep
