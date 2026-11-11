@@ -1,6 +1,6 @@
 # Wide directories: store a tree in pages, so a change rewrites a page
 
-Status: proposed. Third scalability step; measured with the load harness (`bassia-1def6a48`).
+Status: blocked - on whether tree ids may change (see Decisions). Third scalability step; measured with the load harness (`bassia-1def6a48`).
 
 ## Outcome
 
@@ -57,8 +57,27 @@ Taken unattended, as the user asked (the recommended options):
 - **Not started in this pass.** It rewrites the primary store of trees and needs an in-place migration of data that
   exists nowhere else; it should be its own change with its own review, after the object catalog.
 
+- **Blocked: storage-only paging is not worth its migration; the rest needs a new tree format.** Measured on
+  `PostgresTreeStore` alone, one changed file in a directory costs, per new version:
+
+  | Entries | Build and encode | Insert rows | Read back |
+  | ---: | ---: | ---: | ---: |
+  | 200 | 0.8 ms | 3 ms | 5 ms |
+  | 2,000 | 10 ms | 26 ms | 16 ms |
+  | 20,000 | 45 ms | 192 ms | 42 ms |
+
+  Paging the rows (the approach above) removes the insert - about a quarter of a snapshot's 731 ms at 20,000 entries
+  - and nothing else: the id is still the hash of the whole canonical encoding, so the client still builds and
+  encodes all entries, sends them all in `/trees/put` (about 1.6 MB), and the server decodes them all. Removing those
+  costs needs a tree object whose id covers pages (a prolly tree or a HAMT), which changes every tree and commit id
+  of existing monorepos, the git mapping's tree side, and the clone protocol. That is a product decision, not one to
+  take unattended: **may tree ids change for directories above a size, with existing monorepos converted (or kept
+  on the current format)?** Until it is answered, nothing is implemented; directories of a few hundred entries -
+  the common case - cost nothing measurable today.
+
 Open questions:
 
+0. The one that blocks: may tree ids change for large directories (above)?
 1. Page size target (proposed: about 256 entries) and whether small trees (under one page) keep today's layout.
 2. Whether the migration may run online in the background, as the mainline index's backfill does, or as a step of
    `bassia-server migrate`.
