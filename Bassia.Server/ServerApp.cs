@@ -84,7 +84,15 @@ internal sealed class ServerApp : IAsyncDisposable
 		var validate = options.Validate is { } command ? new ShellValidationHook(Repo, command) : null;
 		Landing = new LandingService(Repo, MergeDrivers.Semantic(options.SemanticDriver), validate);
 		Landing.Landed += landed => Publish(new Api.WatchEvent("landed", landed.Seq, landed.Prefixes, landed.Workspace, landed.Time));
-		Reconciling = new ReconcileQueue(Landing.Reconciler) { Log = message => Console.Error.WriteLine(message) };
+		Reconciling = new ReconcileQueue(Landing.Reconciler)
+		{
+			Log = message => Console.Error.WriteLine(message),
+			Workers = options.ReconcileWorkers,
+			// With several nodes on one database: a workspace is reconciled by one at a time, and what a node that died
+			// had queued is found again by the others' periodic look.
+			Claim = (workspace, ct) => State.TryLockAsync("reconcile/" + workspace, ct),
+			CatchUpEvery = TimeSpan.FromSeconds(30)
+		};
 		Landing.Landed += landed => Reconciling.Landed(landed.Seq, landed.Workspace);
 		Landing.Reconciler.Reconciled += candidate =>
 			Publish(new Api.WatchEvent("reconciled", candidate.MainSeq, null, candidate.Workspace, candidate.Time));
@@ -143,6 +151,8 @@ internal sealed class ServerApp : IAsyncDisposable
 			Console.Error.WriteLine($"bassia-server: recorded {recorded} workspace head(s) in the workspace registry.");
 		}
 
+		nodes = ListenToNodes();
+		await State.ListeningAsync(stopping.Token);
 		Reconciling.Start();
 		backfill = Task.Run(BackfillAsync);
 		var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
@@ -304,7 +314,44 @@ internal sealed class ServerApp : IAsyncDisposable
 
 	// ----- watch -----
 
+	/// <summary>This node among those sharing the database: what tells its own events from the others' when they come back.</summary>
+	private readonly string node = Guid.NewGuid().ToString("N");
+
+	private sealed record NodeEvent(string Node, Api.WatchEvent? Event);
+
+	/// <summary>PostgreSQL carries at most 8000 bytes per notification; a larger event travels as "look again".</summary>
+	private const int NotifyLimit = 7000;
+
+	/// <summary>Delivers a change to this node's watchers and announces it to the other nodes, whose watchers get it too.</summary>
 	private void Publish(Api.WatchEvent change)
+	{
+		Deliver(change);
+		var payload = System.Text.Json.JsonSerializer.Serialize(new NodeEvent(node, change), Api.Json);
+		if (payload.Length > NotifyLimit)
+		{
+			payload = System.Text.Json.JsonSerializer.Serialize(new NodeEvent(node, new Api.WatchEvent("resync", change.Seq, Time: change.Time)), Api.Json);
+		}
+
+		_ = AnnounceAsync(payload);
+	}
+
+	private async Task AnnounceAsync(string payload)
+	{
+		try
+		{
+			await State.NotifyAsync(IServerEvents.Events, payload, stopping.Token);
+		}
+		catch (Exception ex) when (ex is not OutOfMemoryException)
+		{
+			// An event is a hint: watchers of other nodes miss this one and see the state at their next look.
+			if (!stopping.IsCancellationRequested)
+			{
+				Console.Error.WriteLine($"bassia-server: could not announce an event to the other nodes: {ex.Message}");
+			}
+		}
+	}
+
+	private void Deliver(Api.WatchEvent change)
 	{
 		lock (watchGate)
 		{
@@ -314,6 +361,23 @@ internal sealed class ServerApp : IAsyncDisposable
 			}
 		}
 	}
+
+	/// <summary>What another node announced goes to this node's watchers; after a lost connection, everyone looks again.</summary>
+	private IDisposable ListenToNodes() => State.Subscribe(IServerEvents.Events,
+		payload =>
+		{
+			if (System.Text.Json.JsonSerializer.Deserialize<NodeEvent>(payload, Api.Json) is { Event: { } change } heard && heard.Node != node)
+			{
+				Deliver(change);
+			}
+		},
+		() =>
+		{
+			Deliver(new Api.WatchEvent("resync", Time: DateTimeOffset.UtcNow));
+			Reconciling.LookAgain();
+		});
+
+	private IDisposable? nodes;
 
 	/// <summary>Publishes a moved workspace head to watchers (Studio refreshes on it).</summary>
 	private sealed class NotifyingViewStore(IViewStore inner, ServerApp server) : IViewStore
@@ -934,6 +998,7 @@ internal sealed class ServerApp : IAsyncDisposable
 		}
 
 		await stopping.CancelAsync();
+		nodes?.Dispose();
 		if (backfill is not null)
 		{
 			await backfill;

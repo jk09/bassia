@@ -66,6 +66,9 @@ internal sealed record ServerOptions
 	/// <summary>A shell command a machine-merged tree must pass before it lands; without one semantic conflicts need a replay.</summary>
 	public string? Validate { get; init; }
 
+	/// <summary>How many workspaces this node reconciles with mainline at once, in the background.</summary>
+	public int ReconcileWorkers { get; init; } = 4;
+
 	/// <summary>The most object bytes one batched reply (<c>/objects/fetch</c>) carries before it stops adding; what does not fit is asked for again.</summary>
 	public long FetchBudget { get; init; } = 32L * 1024 * 1024;
 
@@ -140,6 +143,8 @@ internal sealed record ServerOptions
 				"verify" => SchemaMode.Verify,
 				var other => throw new ArgumentException($"-migrate '{other}' is not supported: use auto (the default) or verify.")
 			},
+			ReconcileWorkers = Get("reconcile-workers") is not { } workers ? 4
+				: int.TryParse(workers, out var count) && count >= 1 ? count : throw new ArgumentException($"-reconcile-workers '{workers}' is not a number (1 or more)."),
 			FetchBudget = Megabytes("fetch-budget", 32),
 			PutLimit = Megabytes("put-limit", 32),
 			ObjectCache = Megabytes("object-cache", 256),
