@@ -46,7 +46,11 @@ public interface ITreeStoreMaintenance
 
 	IAsyncEnumerable<TreeInfo> ListAsync(CancellationToken ct = default);
 
-	Task DeleteAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default);
+	/// <summary>
+	/// Deletes trees - with <paramref name="olderThan"/>, only those not written, put again or asked about since then,
+	/// so a tree a client was just told the store has survives the collection that chose it. Returns how many went.
+	/// </summary>
+	Task<int> DeleteAsync(IReadOnlyList<ObjectId> ids, DateTimeOffset? olderThan = null, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -139,8 +143,22 @@ public sealed class MemoryTreeStore : ITreeStore, ITreeStoreMaintenance
 
 	public int Count => trees.Count;
 
+	/// <summary>Which trees are held; asking counts as use (see <see cref="ITreeStoreMaintenance.DeleteAsync"/>).</summary>
 	public ValueTask<IReadOnlyList<bool>> HasAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default) =>
-		ValueTask.FromResult<IReadOnlyList<bool>>(ids.Select(trees.ContainsKey).ToList());
+		ValueTask.FromResult<IReadOnlyList<bool>>(ids.Select(Touch).ToList());
+
+	private bool Touch(ObjectId id)
+	{
+		while (trees.TryGetValue(id, out var entry))
+		{
+			if (trees.TryUpdate(id, (entry.Tree, Clock()), entry))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
 
 	public Task<IReadOnlyDictionary<ObjectId, Tree>> GetManyAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default) =>
 		Task.FromResult<IReadOnlyDictionary<ObjectId, Tree>>(ids.Distinct().Where(trees.ContainsKey).ToDictionary(id => id, id => trees[id].Tree));
@@ -189,7 +207,10 @@ public sealed class MemoryTreeStore : ITreeStore, ITreeStoreMaintenance
 	{
 		foreach (var (id, tree) in items)
 		{
-			trees.TryAdd(id, (tree, Clock()));
+			if (!trees.TryAdd(id, (tree, Clock())))
+			{
+				Touch(id); // a tree put again is in use
+			}
 		}
 
 		return Task.CompletedTask;
@@ -233,14 +254,19 @@ public sealed class MemoryTreeStore : ITreeStore, ITreeStoreMaintenance
 		await Task.CompletedTask;
 	}
 
-	public Task DeleteAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	public Task<int> DeleteAsync(IReadOnlyList<ObjectId> ids, DateTimeOffset? olderThan = null, CancellationToken ct = default)
 	{
+		var deleted = 0;
 		foreach (var id in ids)
 		{
-			trees.TryRemove(id, out _);
+			if (trees.TryGetValue(id, out var entry) && (olderThan is null || entry.Written < olderThan)
+				&& trees.TryRemove(new KeyValuePair<ObjectId, (Tree Tree, DateTimeOffset Written)>(id, entry)))
+			{
+				deleted++;
+			}
 		}
 
-		return Task.CompletedTask;
+		return Task.FromResult(deleted);
 	}
 
 	/// <summary>Every tree held, for tests that compare two stores.</summary>

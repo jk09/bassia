@@ -62,7 +62,8 @@ public sealed class PostgresTreeStore : ITreeStore, ITreeStoreMaintenance, IAsyn
 		var found = new HashSet<ObjectId>();
 		foreach (var part in ids.Distinct().Chunk(5000))
 		{
-			await using var command = source.CreateCommand("SELECT id FROM bassia_trees WHERE id = ANY($1)");
+			// Asking counts as use: a tree a client was just told is here is not swept by a collection that chose it before.
+			await using var command = source.CreateCommand("UPDATE bassia_trees SET written = now() WHERE id = ANY($1) RETURNING id");
 			command.Parameters.Add(new NpgsqlParameter { Value = part.Select(id => id.ToBytes()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea });
 			await using var reader = await command.ExecuteReaderAsync(ct);
 			while (await reader.ReadAsync(ct))
@@ -171,13 +172,19 @@ public sealed class PostgresTreeStore : ITreeStore, ITreeStoreMaintenance, IAsyn
 
 			// Only trees this call inserts get entries; a tree stored before (or by a concurrent call) already has its own.
 			var inserted = new List<byte[]>();
-			await using (var insert = new NpgsqlCommand("INSERT INTO bassia_trees (id) SELECT unnest($1::bytea[]) ON CONFLICT DO NOTHING RETURNING id", connection, transaction))
+			// A tree put again is touched (it is in use); xmax = 0 marks the rows this statement inserted. The ids are sorted so
+			// that two calls putting the same trees take their row locks in one order.
+			await using (var insert = new NpgsqlCommand(
+				"INSERT INTO bassia_trees (id) SELECT id FROM unnest($1::bytea[]) AS t(id) ORDER BY id ON CONFLICT (id) DO UPDATE SET written = now() RETURNING id, (xmax = 0)", connection, transaction))
 			{
 				insert.Parameters.Add(new NpgsqlParameter { Value = batch.Select(item => item.Id.ToBytes()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea });
 				await using var reader = await insert.ExecuteReaderAsync(ct);
 				while (await reader.ReadAsync(ct))
 				{
-					inserted.Add((byte[])reader[0]);
+					if (reader.GetBoolean(1))
+					{
+						inserted.Add((byte[])reader[0]);
+					}
 				}
 			}
 
@@ -276,27 +283,39 @@ public sealed class PostgresTreeStore : ITreeStore, ITreeStoreMaintenance, IAsyn
 		}
 	}
 
-	public async Task DeleteAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	public async Task<int> DeleteAsync(IReadOnlyList<ObjectId> ids, DateTimeOffset? olderThan = null, CancellationToken ct = default)
 	{
+		var deleted = 0;
 		foreach (var part in ids.Chunk(2000))
 		{
 			await using var connection = await source.OpenConnectionAsync(ct);
 			await using var transaction = await connection.BeginTransactionAsync(ct);
-			var bytes = new NpgsqlParameter { Value = part.Select(id => id.ToBytes()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea };
-			await using (var entries = new NpgsqlCommand("DELETE FROM bassia_tree_entries WHERE tree_id = ANY($1)", connection, transaction))
+
+			// The tree rows go first, and only those not used since the cutoff; their entries follow in the same transaction.
+			var gone = new List<byte[]>();
+			await using (var trees = new NpgsqlCommand("DELETE FROM bassia_trees WHERE id = ANY($1) AND ($2::timestamptz IS NULL OR written < $2) RETURNING id", connection, transaction))
 			{
-				entries.Parameters.Add(bytes);
+				trees.Parameters.Add(new NpgsqlParameter { Value = part.Select(id => id.ToBytes()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea });
+				trees.Parameters.Add(new NpgsqlParameter { Value = olderThan is { } time ? time.UtcDateTime : DBNull.Value, NpgsqlDbType = NpgsqlDbType.TimestampTz });
+				await using var reader = await trees.ExecuteReaderAsync(ct);
+				while (await reader.ReadAsync(ct))
+				{
+					gone.Add((byte[])reader[0]);
+				}
+			}
+
+			if (gone.Count > 0)
+			{
+				await using var entries = new NpgsqlCommand("DELETE FROM bassia_tree_entries WHERE tree_id = ANY($1)", connection, transaction);
+				entries.Parameters.Add(new NpgsqlParameter { Value = gone.ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea });
 				await entries.ExecuteNonQueryAsync(ct);
 			}
 
-			await using (var trees = new NpgsqlCommand("DELETE FROM bassia_trees WHERE id = ANY($1)", connection, transaction))
-			{
-				trees.Parameters.Add(new NpgsqlParameter { Value = bytes.Value, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea });
-				await trees.ExecuteNonQueryAsync(ct);
-			}
-
 			await transaction.CommitAsync(ct);
+			deleted += gone.Count;
 		}
+
+		return deleted;
 	}
 
 	public ValueTask DisposeAsync() => source.DisposeAsync();

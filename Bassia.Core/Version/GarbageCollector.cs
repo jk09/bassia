@@ -105,15 +105,32 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 			doomed.Add(blob);
 		}
 
-		foreach (var blob in doomed)
+		if (!dryRun && maintenance is IObjectSweeper sweeper)
 		{
-			if (!dryRun)
+			// In batches, each deleted only if not used since the cutoff: an object a client was told the store has, after
+			// this collection marked, is left for the next one.
+			var sizes = doomed.ToDictionary(blob => blob.Id, blob => blob.Length);
+			foreach (var part in doomed.Chunk(1000))
 			{
-				await maintenance.DeleteAsync(blob.Id, ct);
+				foreach (var id in await sweeper.SweepAsync(part.Select(blob => blob.Id).ToList(), now - grace, ct))
+				{
+					swept++;
+					sweptBytes += sizes[id];
+				}
 			}
+		}
+		else
+		{
+			foreach (var blob in doomed)
+			{
+				if (!dryRun)
+				{
+					await maintenance.DeleteAsync(blob.Id, ct);
+				}
 
-			swept++;
-			sweptBytes += blob.Length;
+				swept++;
+				sweptBytes += blob.Length;
+			}
 		}
 
 		var treesSwept = 0;
@@ -128,15 +145,15 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 				}
 			}
 
+			treesSwept = doomedTrees.Count;
 			if (!dryRun)
 			{
+				treesSwept = 0;
 				foreach (var part in doomedTrees.Chunk(1000))
 				{
-					await treeMaintenance.DeleteAsync(part, ct);
+					treesSwept += await treeMaintenance.DeleteAsync(part, now - grace, ct);
 				}
 			}
-
-			treesSwept = doomedTrees.Count;
 		}
 
 		return new GcReport(roots.Count, live.Count, blobs, swept, sweptBytes, young, pruned, dryRun, treesSwept, reached.Count);

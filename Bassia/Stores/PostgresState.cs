@@ -8,7 +8,7 @@ using Npgsql;
 using NpgsqlTypes;
 
 /// <summary>The server's mutable state: heads, mainline's path index and leases, in one store.</summary>
-public interface IServerState : IViewStore, IPathIndex, ILeaseStore, IWorkspaceIndex;
+public interface IServerState : IViewStore, IPathIndex, ILeaseStore, IWorkspaceIndex, IObjectCatalog;
 
 /// <summary>
 /// The mutable state on PostgreSQL (Azure Database for PostgreSQL flexible server, or any PostgreSQL 13+): one row per
@@ -58,6 +58,10 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 		new SchemaMigration(3, "mainline index: the landing at every seq", """
 			CREATE TABLE bassia_mainline (seq bigint PRIMARY KEY, op text NOT NULL, view text NOT NULL, commit text NOT NULL, tree text NOT NULL,
 				workspace text, time timestamptz NOT NULL, task_spec text);
+			"""),
+		// The object catalog (bassia-2e6c8766): which blobs the store holds; derived from the bucket, filled as objects pass. Adds only.
+		new SchemaMigration(4, "object catalog: the blobs the store holds", """
+			CREATE TABLE bassia_objects (id bytea PRIMARY KEY, size bigint NOT NULL, state smallint NOT NULL, touched timestamptz NOT NULL);
 			"""),
 	]);
 
@@ -756,6 +760,209 @@ public sealed class PostgresState : IServerState, IAsyncDisposable
 				WHERE w.candidate IS NOT NULL AND NOT EXISTS (SELECT 1 FROM bassia_heads h WHERE h.name = 'rc/' || w.id) RETURNING id)
 			DELETE FROM bassia_workspace_paths t USING gone WHERE t.workspace = gone.id
 			""", null, ct);
+	}
+
+	// ----- object catalog -----
+
+	/// <summary>The advisory lock between a collection's deletes (exclusive) and reliance on blobs the catalog does not vouch for (shared).</summary>
+	private const long SweepLock = 0x6261737369615357; // "bassiaSW"
+
+	private static NpgsqlParameter Ids(string name, IEnumerable<ObjectId> ids) =>
+		new(name, NpgsqlDbType.Array | NpgsqlDbType.Bytea) { Value = ids.Select(id => id.ToBytes()).ToArray() };
+
+	public async Task<IReadOnlyList<CatalogState>> TouchAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		var states = new Dictionary<ObjectId, CatalogState>();
+		await using var connection = await source.OpenConnectionAsync(ct);
+		foreach (var part in ids.Distinct().Chunk(5000))
+		{
+			await using var command = new NpgsqlCommand("""
+				WITH touched AS (UPDATE bassia_objects SET touched = now() WHERE id = ANY(@ids) AND state = 2 RETURNING id)
+				SELECT id, 2::smallint FROM touched
+				UNION ALL SELECT id, state FROM bassia_objects WHERE id = ANY(@ids) AND state <> 2
+				""", connection);
+			command.Parameters.Add(Ids("ids", part));
+			await using var reader = await command.ExecuteReaderAsync(ct);
+			while (await reader.ReadAsync(ct))
+			{
+				states[ObjectId.FromBytes((byte[])reader[0])] = (CatalogState)reader.GetInt16(1);
+			}
+		}
+
+		return ids.Select(id => states.GetValueOrDefault(id, CatalogState.Absent)).ToList();
+	}
+
+	public async Task<IReadOnlySet<ObjectId>> BeginAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct = default)
+	{
+		var stored = new HashSet<ObjectId>();
+		await using var connection = await source.OpenConnectionAsync(ct);
+		async Task<List<ObjectId>> AnnounceAsync(IReadOnlyList<ObjectId> announced, bool takeBack)
+		{
+			// A new id becomes pending; a stored one is touched; a doomed one is taken back only on the second pass.
+			var doomed = new List<ObjectId>();
+			foreach (var part in announced.Chunk(5000))
+			{
+				await using var command = new NpgsqlCommand($"""
+					INSERT INTO bassia_objects (id, size, state, touched) SELECT unnest(@ids), 0, 1, now()
+					ON CONFLICT (id) DO UPDATE SET touched = now(){(takeBack ? ", state = CASE WHEN bassia_objects.state = 3 THEN 1 ELSE bassia_objects.state END" : "")}
+					RETURNING id, state
+					""", connection);
+				command.Parameters.Add(Ids("ids", part));
+				await using var reader = await command.ExecuteReaderAsync(ct);
+				while (await reader.ReadAsync(ct))
+				{
+					var id = ObjectId.FromBytes((byte[])reader[0]);
+					switch ((CatalogState)reader.GetInt16(1))
+					{
+						case CatalogState.Stored:
+							stored.Add(id);
+							break;
+						case CatalogState.Doomed:
+							doomed.Add(id);
+							break;
+					}
+				}
+			}
+
+			return doomed;
+		}
+
+		var waiting = await AnnounceAsync(ids.Distinct().ToList(), false);
+		if (waiting.Count > 0)
+		{
+			// The collection that doomed them finishes its deletes first; then the rows are gone, or left by one that stopped half way.
+			await using (await SweepLockAsync(false, ct))
+			{
+			}
+
+			await AnnounceAsync(waiting, true);
+		}
+
+		return stored;
+	}
+
+	public async Task<IReadOnlySet<ObjectId>> ConfirmAsync(IReadOnlyList<(ObjectId Id, long Size)> objects, CancellationToken ct = default)
+	{
+		var confirmed = new HashSet<ObjectId>();
+		await using var connection = await source.OpenConnectionAsync(ct);
+		foreach (var part in objects.DistinctBy(item => item.Id).Chunk(5000))
+		{
+			await using var command = new NpgsqlCommand("""
+				INSERT INTO bassia_objects (id, size, state, touched) SELECT *, 2, now() FROM unnest(@ids, @sizes)
+				ON CONFLICT (id) DO UPDATE SET size = EXCLUDED.size, state = 2, touched = now() WHERE bassia_objects.state <> 3
+				RETURNING id
+				""", connection);
+			command.Parameters.Add(Ids("ids", part.Select(item => item.Id)));
+			command.Parameters.Add(new NpgsqlParameter("sizes", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = part.Select(item => item.Size).ToArray() });
+			await using var reader = await command.ExecuteReaderAsync(ct);
+			while (await reader.ReadAsync(ct))
+			{
+				confirmed.Add(ObjectId.FromBytes((byte[])reader[0]));
+			}
+		}
+
+		return confirmed;
+	}
+
+	public async Task RecordAsync(IReadOnlyList<BlobInfo> blobs, CancellationToken ct = default)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		foreach (var part in blobs.DistinctBy(blob => blob.Id).Chunk(5000))
+		{
+			await using var command = new NpgsqlCommand(
+				"INSERT INTO bassia_objects (id, size, touched, state) SELECT b.id, b.size, b.touched, 2 FROM unnest(@ids, @sizes, @times) AS b(id, size, touched) ON CONFLICT (id) DO NOTHING", connection);
+			command.Parameters.Add(Ids("ids", part.Select(blob => blob.Id)));
+			command.Parameters.Add(new NpgsqlParameter("sizes", NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = part.Select(blob => blob.Length).ToArray() });
+			command.Parameters.Add(new NpgsqlParameter("times", NpgsqlDbType.Array | NpgsqlDbType.TimestampTz) { Value = part.Select(blob => blob.Written.UtcDateTime).ToArray() });
+			await command.ExecuteNonQueryAsync(ct);
+		}
+	}
+
+	public async Task<IReadOnlyList<ObjectId>> DoomAsync(IReadOnlyList<ObjectId> ids, DateTimeOffset olderThan, CancellationToken ct = default)
+	{
+		var doomed = new List<ObjectId>();
+		await using var connection = await source.OpenConnectionAsync(ct);
+		foreach (var part in ids.Distinct().Chunk(5000))
+		{
+			await using var command = new NpgsqlCommand(
+				"UPDATE bassia_objects SET state = 3 WHERE id = ANY(@ids) AND (state = 3 OR touched < @older) RETURNING id", connection);
+			command.Parameters.Add(Ids("ids", part));
+			command.Parameters.AddWithValue("older", olderThan == DateTimeOffset.MaxValue ? DateTime.MaxValue : olderThan.UtcDateTime);
+			await using var reader = await command.ExecuteReaderAsync(ct);
+			while (await reader.ReadAsync(ct))
+			{
+				doomed.Add(ObjectId.FromBytes((byte[])reader[0]));
+			}
+		}
+
+		return doomed;
+	}
+
+	async Task IObjectCatalog.RemoveAsync(IReadOnlyList<ObjectId> ids, CancellationToken ct)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		foreach (var part in ids.Chunk(5000))
+		{
+			await using var command = new NpgsqlCommand("DELETE FROM bassia_objects WHERE id = ANY(@ids) AND state = 3", connection);
+			command.Parameters.Add(Ids("ids", part));
+			await command.ExecuteNonQueryAsync(ct);
+		}
+	}
+
+	/// <summary>A session advisory lock on a connection of its own, released (and the connection returned) on dispose.</summary>
+	private sealed class AdvisoryLock(NpgsqlConnection connection, string unlock) : IAsyncDisposable
+	{
+		public async ValueTask DisposeAsync()
+		{
+			try
+			{
+				await using var command = new NpgsqlCommand(unlock, connection);
+				await command.ExecuteNonQueryAsync();
+			}
+			finally
+			{
+				await connection.DisposeAsync();
+			}
+		}
+	}
+
+	public async Task<IAsyncDisposable> SweepLockAsync(bool exclusive, CancellationToken ct = default)
+	{
+		var connection = await source.OpenConnectionAsync(ct);
+		try
+		{
+			await using var command = new NpgsqlCommand($"SELECT pg_advisory_lock{(exclusive ? "" : "_shared")}({SweepLock})", connection);
+			await command.ExecuteNonQueryAsync(ct);
+			return new AdvisoryLock(connection, $"SELECT pg_advisory_unlock{(exclusive ? "" : "_shared")}({SweepLock})");
+		}
+		catch
+		{
+			await connection.DisposeAsync();
+			throw;
+		}
+	}
+
+	async IAsyncEnumerable<BlobInfo> IObjectCatalog.ListAsync([EnumeratorCancellation] CancellationToken ct)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		await using var command = new NpgsqlCommand("SELECT id, size, touched FROM bassia_objects", connection);
+		await using var reader = await command.ExecuteReaderAsync(ct);
+		while (await reader.ReadAsync(ct))
+		{
+			yield return new BlobInfo(ObjectId.FromBytes((byte[])reader[0]), reader.GetInt64(1), reader.GetFieldValue<DateTimeOffset>(2));
+		}
+	}
+
+	public async ValueTask<bool> IsCompleteAsync(CancellationToken ct = default)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		return await ScalarAsync(connection, "SELECT value FROM bassia_meta WHERE key = 'objects_cataloged'", null, ct) is long and > 0;
+	}
+
+	public async ValueTask MarkCompleteAsync(CancellationToken ct = default)
+	{
+		await using var connection = await source.OpenConnectionAsync(ct);
+		await ExecuteAsync(connection, "INSERT INTO bassia_meta (key, value) VALUES ('objects_cataloged', 1) ON CONFLICT (key) DO UPDATE SET value = 1", null, ct);
 	}
 
 	public ValueTask DisposeAsync() => source.DisposeAsync();

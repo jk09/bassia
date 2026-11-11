@@ -111,7 +111,7 @@ public sealed class TreeStoreTests
 		Assert.Equal(2, reach.Leaves.Count);
 		Assert.Equal(3, await maintenance.ListAsync().CountAsync());
 
-		await maintenance.DeleteAsync([stray.Id]);
+		Assert.Equal(1, await maintenance.DeleteAsync([stray.Id]));
 		Assert.Equal([true, false], await store.HasAsync([kept.Id, stray.Id]));
 		Assert.Equal(2, (await maintenance.ListAsync().ToListAsync()).Count);
 		Assert.Empty((await store.GetManyAsync([stray.Id])));
