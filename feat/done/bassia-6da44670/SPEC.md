@@ -1,6 +1,6 @@
 # Wide directories: store a tree in pages, so a change rewrites a page
 
-Status: blocked - on whether tree ids may change (see Decisions). Third scalability step; measured with the load harness (`bassia-1def6a48`).
+Status: done - closed without implementation, by the user's decision to keep tree ids constant (see Decisions). Kept for its measurements. Third scalability step; measured with the load harness (`bassia-1def6a48`).
 
 ## Outcome
 
@@ -30,16 +30,8 @@ Tree ids, and so every commit, clone, git import and export, stay exactly as the
 
 ## Acceptance criteria
 
-- [ ] A tree's id and canonical encoding are unchanged: every existing test that compares ids, scrub, git export and a
-      clone of a server pass without change.
-- [ ] Writing a new version of a directory with 20,000 entries after changing one file inserts rows in proportion to
-      one page of entries (a few hundred), not 20,000 (a test counts rows).
-- [ ] Path lookup, subtree walk, diff and garbage collection's reachability return what they return today, each still
-      in a bounded number of queries.
-- [ ] Existing databases are migrated in place, in batches, resumably, with old and new nodes working during a rolling
-      deploy; a clone's tree cache is rebuilt instead.
-- [ ] Harness: the `-fanout` sweep above no longer marks snapshot and landing as growing; at 20 and 200 entries
-      nothing gets slower.
+None is met, and none will be: the outcome above needs a tree format whose id covers pages, which the user ruled out.
+What was measured stays below, for whoever reopens the question.
 
 ## Approach
 
@@ -75,18 +67,24 @@ Taken unattended, as the user asked (the recommended options):
   on the current format)?** Until it is answered, nothing is implemented; directories of a few hundred entries -
   the common case - cost nothing measurable today.
 
-Open questions:
+- **Decided by the user: tree ids stay constant.** No tree format change, for any directory size. That leaves only
+  storage-only paging, which removes the row insert - about a quarter of a snapshot at 20,000 entries - and nothing
+  else, at the price of migrating trees that exist nowhere but PostgreSQL. Not worth it: the record is closed without
+  implementation. Directories of a few hundred entries, the common case, cost nothing measurable.
+- **If large directories become common**, cheaper steps that keep ids constant come first: sending a tree as its base
+  and the changed entries, with the server rebuilding the encoding and checking the id (saves the upload, not the
+  encoding or the insert), and copying unchanged rows inside PostgreSQL instead of sending them.
 
-0. The one that blocks: may tree ids change for large directories (above)?
+Questions this record had open (moot now):
+
+0. May tree ids change for large directories? No (the user).
 1. Page size target (proposed: about 256 entries) and whether small trees (under one page) keep today's layout.
 2. Whether the migration may run online in the background, as the mainline index's backfill does, or as a step of
    `bassia-server migrate`.
 
 ## Progress
 
-- [ ] Page layout and store
-- [ ] Migration
-- [ ] Harness sweep before and after
+- [x] Measured (`-fanout` sweep, tree store probe); closed by decision, nothing implemented
 
 ## Validation
 
