@@ -48,6 +48,24 @@ public sealed class ObjectCacheTests
 	}
 
 	[Fact]
+	public async Task TheCache_EvictsWhileOtherThreadsAdd()
+	{
+		// Eviction looks at every entry while other requests keep adding: the bound is passed over and over, by many threads.
+		var one = ObjectCache.SizeOf(TreeOf(0, 10));
+		var cache = new ObjectCache(50 * one);
+		await Task.WhenAll(Enumerable.Range(0, 8).Select(thread => Task.Run(() =>
+		{
+			for (var index = 0; index < 20_000; index++)
+			{
+				cache.Add(ObjectId.Of([(byte)thread, (byte)index, (byte)(index >> 8), (byte)(index >> 16)]), TreeOf(index % 250, 10));
+				cache.TryGet(ObjectId.Of([(byte)thread, 0, 0, 0]), out _);
+			}
+		})));
+
+		Assert.InRange(cache.Bytes, 0, 50 * one + 8 * one);
+	}
+
+	[Fact]
 	public void LargeObjects_CountForWhatTheyHold()
 	{
 		Assert.True(ObjectCache.SizeOf(TreeOf(0, 10_000)) > 100 * ObjectCache.SizeOf(TreeOf(0, 50)));

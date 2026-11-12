@@ -161,6 +161,9 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 
 	private ITreeStoreMaintenance? treeMaintenance => repo.Objects.TreeStore as ITreeStoreMaintenance;
 
+	/// <summary>File objects read at once ahead of the marking walk.</summary>
+	private const int ReadAhead = 16;
+
 	/// <summary>
 	/// Marks mainline from the mainline index when it holds every seq: each landing's operation, view, commit and task
 	/// spec are live and its tree is a root - what walking the log finds, without reading one object of it. The walk
@@ -221,6 +224,21 @@ public sealed class GarbageCollector(Repository repo, IObjectStoreMaintenance ma
 			var reach = await maintenance.ReachAsync(roots, ct);
 			reached.UnionWith(reach.Trees);
 			reached.UnionWith(roots);
+
+			// The walk below opens every chunked file's object to find its chunks, one after another: they are read
+			// ahead here, several at a time, so the walk finds them decoded.
+			var files = reach.Leaves.Where(leaf => leaf.Kind == EntryKind.Chunked && !live.Contains(leaf.Id)).Select(leaf => leaf.Id).Distinct().ToList();
+			await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = ReadAhead, CancellationToken = ct }, async (id, token) =>
+			{
+				try
+				{
+					await repo.Objects.ReadAsync<FileObject>(id, token);
+				}
+				catch (MissingObjectException)
+				{
+					// The walk reports it, as it would have.
+				}
+			});
 			await WalkAsync(reach.Leaves.Select(LeafItem), live, treeRoots, ct);
 		}
 

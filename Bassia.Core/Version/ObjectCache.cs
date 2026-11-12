@@ -79,8 +79,12 @@ public sealed class ObjectCache(long limitBytes)
 				return; // another thread made room
 			}
 
+			// ToArray is the dictionary's own snapshot, taken under its locks. Sorting the dictionary itself would copy it
+			// by a count read beforehand, and fail when another request adds an entry in between.
 			var target = LimitBytes - LimitBytes / 5;
-			foreach (var (id, entry) in entries.OrderBy(pair => Volatile.Read(ref pair.Value.Used)).ToList())
+			var snapshot = entries.ToArray();
+			Array.Sort(snapshot, (a, b) => Volatile.Read(ref a.Value.Used).CompareTo(Volatile.Read(ref b.Value.Used)));
+			foreach (var (id, entry) in snapshot)
 			{
 				if (Bytes <= target)
 				{

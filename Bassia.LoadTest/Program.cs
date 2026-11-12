@@ -46,8 +46,9 @@ internal static class Program
 				_ => throw new ArgumentException($"Unknown command '{args[0]}'.")
 			};
 		}
-		catch (ArgumentException ex)
+		catch (ArgumentException ex) when (ex.TargetSite?.DeclaringType?.Assembly == typeof(Program).Assembly)
 		{
+			// A bad switch or parameter, found by the harness itself; an ArgumentException from anywhere else is a defect and keeps its stack trace.
 			Console.Error.WriteLine($"bassia-loadtest: {ex.Message}\n{Usage}");
 			return 2;
 		}
