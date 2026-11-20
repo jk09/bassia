@@ -11,6 +11,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Bassia.Tests" />
     <InternalsVisibleTo Include="bassia-server" />
+    <InternalsVisibleTo Include="Bassia.Scenarios" />
   </ItemGroup>
 
   <ItemGroup>

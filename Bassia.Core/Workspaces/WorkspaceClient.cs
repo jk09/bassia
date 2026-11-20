@@ -177,9 +177,10 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 	/// </summary>
 	public Task<SnapshotResult> SnapshotAsync(WorkspaceState state, string? run = null, CancellationToken ct = default) =>
 		// Changed files' chunks, the rebuilt trees, the commit, the view and the operation go up together.
-		repo.Objects.BatchAsync(() => SnapshotOnceAsync(state, run, ct));
+		repo.Objects.BatchAsync(() => SnapshotOnceAsync(state, run, null, ct));
 
-	private async Task<SnapshotResult> SnapshotOnceAsync(WorkspaceState state, string? run, CancellationToken ct)
+	/// <param name="boundary">The context-spec changes must stay inside; by default the record's.</param>
+	private async Task<SnapshotResult> SnapshotOnceAsync(WorkspaceState state, string? run, ContextSpec? boundary, CancellationToken ct)
 	{
 		if (Local(state) is not { } local || !state.IsOpen)
 		{
@@ -194,7 +195,7 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 			await lazyFolders!.MountAsync(local, ct);
 		}
 
-		var scan = await (local.Scanner ?? local.Provider).ScanAsync(local.State, policy, true, ct, ContextSpec.Of(state.Record.Context));
+		var scan = await (local.Scanner ?? local.Provider).ScanAsync(local.State, policy, true, ct, boundary ?? ContextSpec.Of(state.Record.Context));
 		var diskTree = scan.Changes.Count == 0 ? local.State.Tree : await repo.Trees.EditAsync(local.State.Tree, scan.Changes, ct);
 		var current = state;
 		var working = await repo.Objects.ReadCommitAsync(current.Record.Working, ct);
@@ -231,7 +232,18 @@ public sealed class WorkspaceClient(Repository repo, ILanding landing, string st
 	/// </summary>
 	public async Task<(WorkspaceState State, ContextResult? Result)> SetContextAsync(WorkspaceState state, ContextSpec context, CancellationToken ct = default)
 	{
-		state = (await SnapshotAsync(state, null, ct)).Workspace;
+		try
+		{
+			state = (await SnapshotAsync(state, null, ct)).Workspace;
+		}
+		catch (ContextBoundaryException outside) when (outside.Paths.All(context.Contains))
+		{
+			// The folder holds changes outside the current spec that the new one takes in: widening the context is how
+			// such changes are accepted, so they are snapshotted within the new spec.
+			var widened = state;
+			state = (await repo.Objects.BatchAsync(() => SnapshotOnceAsync(widened, null, context, ct))).Workspace;
+		}
+
 		state = await Service.SetContextAsync(state.Id, context, agent, ct);
 		return (state, await UpdateDirectoryAsync(state, ct));
 	}

@@ -29,6 +29,8 @@ BLAKE3 (`Blake3` package) and canonical CBOR (`System.Formats.Cbor`) define obje
 needed only for `bassia import` and `bassia export`; weave's `weave-driver` is the default semantic merge driver.
 Tests (xUnit) run without a network or a cloud account but need a local PostgreSQL (`BASSIA_TEST_POSTGRES`):
 local monorepos, `bassia-server` and the tree store keep their state there.
+`Bassia.Scenarios` drives the `bassia` command line by user scenario (trait `Scenario`) against a server on memory blobs
+and PostgreSQL; its tests use only the documented CLI contract (see `Bassia.Scenarios/README.md`).
 
 ## Agentic workflow
 

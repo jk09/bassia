@@ -135,7 +135,9 @@ public sealed class LandingPlanner(Repository repo, IMergeDriver? semantic = nul
 
 		if (conflicts.Count > 0)
 		{
-			var replay = conflicts.Any(conflict => conflict.Policy is ConflictPolicy.Replay or ConflictPolicy.Semantic or "strict");
+			// A text merge that is not clean falls back to replay, like a semantic merge: text is never merged behind an
+			// agent's back. Only the conflict policy stores conflicts to resolve by hand.
+			var replay = conflicts.Any(conflict => conflict.Policy is ConflictPolicy.Replay or ConflictPolicy.Semantic or ConflictPolicy.TextMerge or "strict");
 			return Refused(replay ? LandOutcome.NeedsReplay : LandOutcome.Conflict,
 				replay
 					? $"{conflicts.Count} path(s) changed on mainline since seq {record.BaseSeq}; replay the task on seq {main.Seq} ('bassia agent replay') or sync and resolve."

@@ -27,7 +27,7 @@ internal sealed record ServerOptions
 	/// <summary>Browser origins (scheme, host and port) allowed to call the API across origins (CORS); none: no CORS headers at all.</summary>
 	public IReadOnlyList<string> CorsOrigins { get; init; } = [];
 
-	/// <summary><c>disk</c> (the local-disk stand-in for cloud blobs), <c>s3</c> or <c>azure</c>.</summary>
+	/// <summary><c>disk</c> (the local-disk stand-in for cloud blobs), <c>memory</c> (a mock kept in this process, for tests), <c>s3</c> or <c>azure</c>.</summary>
 	public string Storage { get; init; } = "disk";
 
 	public string? Bucket { get; init; }

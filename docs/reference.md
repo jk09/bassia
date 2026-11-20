@@ -160,7 +160,7 @@ The commands removed with the component graph (`component`, `graph`, `tag`, `bra
 | --- | --- |
 | Monorepo | `init [-path <dir>] [-postgres <connection>]`, `clone -from <url> [-path <dir>] [-token <t>] [-postgres <connection>]`, `status`, `version`, `help` |
 | Configuration | `config list`, `config get -key <k>`, `config set -key <k> -value <v>`, `config unset -key <k>` |
-| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>] [-materialize full\|lazy]`, `workspace clone -from <w> -name <n> [-context <rules>] [-materialize ...]`, `workspace checkout <w> [-materialize ...]`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace mount [<w>]`, `workspace unmount [<w>]`, `workspace list [-all [-limit <n>]]`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
+| Workspaces | `workspace create <name> [-path <dir>] [-on <workspace>] [-intent <text>] [-context <rules>] [-materialize full\|lazy]`, `workspace clone -from <w> -name <n> [-context <rules>] [-materialize ...]`, `workspace checkout <w> [-materialize ...]`, `workspace context [<w>] [-set\|-add\|-remove <rules>]`, `workspace mount [<w>]`, `workspace unmount [<w>]`, `workspace list [-all [-limit <n>]]`, `workspace conflicts`, `workspace show`, `workspace status`, `workspace diff [-patch] [-path <p>]`, `workspace snapshot`, `workspace describe -intent <text>`, `workspace check [-strict -reads <p>,...] [-lease-token <id:token>,...]`, `workspace land [-keep] [-strict -reads ...] [-lease-token ...]`, `workspace sync`, `workspace undo`, `workspace restore -op <op>`, `workspace log [-limit <n>]`, `workspace close [-abandon] [-remove]` |
 | Mainline | `mainline log [-limit <n>] [-path <p>]`, `mainline show [-seq <n>] [-patch]`, `mainline ls [<path>] [-seq <n>]`, `mainline cat <path> [-seq <n>]`, `mainline changed -since <seq> [-prefix <p>]`, `mainline restore -seq <n>` |
 | Leases | `lease list [-prefix <p>]`, `lease acquire <prefix> [-workspace <w>] [-mode exclusive\|intent] [-ttl <s>] [-wait <s>]`, `lease renew -id <id> -token <n>`, `lease release -id <id> -token <n>` |
 | Agentic runs | `agent start (-prompt <text> \| -run <command...>) [-workspace <w>] [-name <n>] [-on <w>] [-model <m>] [-land] [-keep] [-lease <p>,...] [-lease-wait <s>] [-detach]`, `agent list [-status <s>]`, `agent show`, `agent logs [-tail <n>]`, `agent wait [-timeout <s>]`, `agent stop`, `agent replay <run\|workspace> [-land]`, `agent job` (in a container: clone, then start or replay from `BASSIA_JOB_ARGS`) |
@@ -240,7 +240,8 @@ bassia workspace context api-fix                                                
 - **The boundary.** A snapshot that finds a path outside the context created, changed or deleted fails, names the
   paths and snapshots nothing; `status`, `check`, `land` and every other command that snapshots fail the same way, and
   so do Studio's edits. A run whose agent changed such a path fails, and nothing of its last edits is taken. Widen the
-  context (`workspace context -add <rule>`) or undo those changes. A run sees its spec in `BASSIA_CONTEXT`.
+  context (`workspace context -add <rule>`, or a `-set` that takes the paths in: the change is then snapshotted within
+  the new spec) or undo those changes. A run sees its spec in `BASSIA_CONTEXT`.
 - **What is outside stays as it is.** The workspace's tree still holds everything: sync and landing carry paths
   outside the context along unchanged. A directory outside the context shows as an empty folder, so an agent sees the
   monorepo's shape; files outside it at in-context levels are not shown.
@@ -361,9 +362,11 @@ done ahead of time, as the workspace changes, so that landing it costs little mo
   used only on the very seq it was validated on; a `-strict` landing never uses one. Otherwise the landing plans as
   above. The outcome is the same either way; `reconciled = true` in the result (and the `reconciled` tag of the
   landing metric) says the fast path was taken.
-- **The conflict overview** (`GET /api/v1/conflicts`) reads the candidates: every open workspace with what a landing
-  would do now, whether its candidate is current, the **overlaps** - paths two or more open workspaces change, so
-  whichever lands second will meet the first - and the **hot paths**. Studio's conflict page shows
+- **The conflict overview** (`GET /api/v1/conflicts`, `bassia workspace conflicts`) reads the candidates: every open
+  workspace with what a landing would do now, whether its candidate is current, the **overlaps** - paths two or more
+  open workspaces change, so whichever lands second will meet the first - and the **hot paths**. The command lists them
+  as `[[workspace]]` (with `outcome`, `current`, `touched`, `overlaps` and its `[[workspace.conflict]]`), `[[overlap]]`
+  and `[[hot_path]]`, with `main_seq`, `can_land` and `blocked`. Studio's conflict page shows
   it and refresh on the `reconciled` watch event. A local monorepo runs nothing in the background: it reconciles stale
   candidates when the overview is read.
 
@@ -526,7 +529,9 @@ the server is checked against its id before it is cached.
 The state - heads, path index, leases and trees - lives in PostgreSQL only (local monorepos made by `bassia init` keep
 theirs in a local PostgreSQL too); `-state postgres` is still accepted, any other `-state` is refused. The data folder holds the key that signs blob URLs
 and, with the default `-storage disk`, the blob container `objects/` - a local-disk stand-in for cloud blob storage,
-laid out by hash prefix, so a server and its tests run without a cloud account. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
+laid out by hash prefix, so a server and its tests run without a cloud account. `-storage memory` keeps the blobs in the
+server process's memory instead, gone when it stops: a mock of cloud blob storage for tests and demos (the scenario
+tests run on it), with signed blob URLs served from memory like the disk container's. Every switch can also come from a `BASSIA_SERVER_<NAME>` environment variable.
 
 **Several nodes.** Nodes that share a database and a blob store behave as one server. What a node publishes on its
 watch stream it also announces to the others through PostgreSQL (`LISTEN`/`NOTIFY`, on channels of the database
@@ -774,6 +779,9 @@ Bassia has five projects; each depends only on the ones before it.
 4. **`Bassia.Tests`** - unit tests of the core (property tests over the tree algebra, landing, leases, workspaces on
    disk, garbage collection), the store contract over memory and PostgreSQL, the CLI in-process on local monorepos, the
    server in-process with clients over HTTP (on PostgreSQL), and git interop.
+6. **`Bassia.Scenarios`** - scenario tests: the command line driven as people and agents use it, grouped by user
+   scenario, against a `bassia-server` on memory blobs and PostgreSQL (see "Test"). `Bassia.Scenarios.Agent` is the
+   deterministic stand-in for Claude Code that its agent scenarios run.
 5. **`Bassia.LoadTest`** - `bassia-loadtest`, the load harness: it hosts a `bassia-server`, seeds a synthetic monorepo
    and measures what each operation costs under many agents (see "Load harness").
 
@@ -900,7 +908,19 @@ release when a `v<semver>` tag is pushed. Build one locally with `./packaging/Ne
 dotnet test
 ```
 
-Everything runs without a network or a cloud account; the tests that start a server need a PostgreSQL. `Bassia.Tests/Core` tests the version core on the in-memory
+Everything runs without a network or a cloud account; the tests that start a server need a PostgreSQL.
+
+`Bassia.Scenarios` evaluates Bassia from the outside: every test drives `bassia` through its documented command line
+(arguments in, TOML result and exit code out) against a `bassia-server -storage memory` (blob storage mocked in memory,
+state and trees in PostgreSQL - `BASSIA_TEST_POSTGRES`, or a throw-away Docker container), and is tagged with its user
+scenario (`dotnet test Bassia.Scenarios --filter Scenario=Merge`): monorepo setup, git import (also of real GitHub
+repositories), workspaces, landing, merge and conflict policies, leases, context-specs, lazy folders, agentic runs
+(a deterministic stand-in agent; the real Claude Code with `BASSIA_SCENARIO_CLAUDE=1`), collaboration between
+clients, git export and maintenance. Each test records a transcript of its commands and results. The CLI and server run
+in-process for debugging, or installed builds with `BASSIA_SCENARIO_CLI` / `BASSIA_SCENARIO_SERVER`. See
+[Bassia.Scenarios/README.md](../Bassia.Scenarios/README.md).
+
+ `Bassia.Tests/Core` tests the version core on the in-memory
 stores: encoding and ids, chunking, property tests over the tree algebra (diff then apply reproduces the tree, merge
 identities, equal-subtree pruning), every landing case and conflict policy, strict mode, stacked workspaces, sync,
 undo and restore, the path index and its rebuild from the operation log, leases and fencing, a swarm of concurrent

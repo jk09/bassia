@@ -256,6 +256,7 @@ Ask Claude Code to `/bassia-install` in a checkout of this repository, or build 
 ```sh
 dotnet build
 dotnet test
+dotnet test Bassia.Scenarios --filter Scenario=AgentRuns   # one user scenario, driven through the CLI
 dotnet run --project Bassia -- help
 ```
 

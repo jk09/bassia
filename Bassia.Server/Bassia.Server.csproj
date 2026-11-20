@@ -12,6 +12,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Bassia.Tests" />
     <InternalsVisibleTo Include="bassia-loadtest" />
+    <InternalsVisibleTo Include="Bassia.Scenarios" />
   </ItemGroup>
 
   <ItemGroup>

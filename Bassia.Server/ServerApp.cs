@@ -64,13 +64,25 @@ internal sealed class ServerApp : IAsyncDisposable
 			Maintenance = s3;
 			S3 = s3;
 		}
-		else
+		else if (options.Storage.Equals("memory", StringComparison.OrdinalIgnoreCase))
+		{
+			// Blobs in this process's memory, gone when it stops: a mock of cloud blob storage for tests and demos.
+			var memory = new MemoryObjectStore();
+			Blobs = memory;
+			Maintenance = memory;
+			Memory = memory;
+		}
+		else if (options.Storage.Equals("disk", StringComparison.OrdinalIgnoreCase))
 		{
 			var disk = new DiskObjectStore(Path.Combine(options.Data, "objects"));
 			disk.UploadUrls = (id, _) => new UploadTicket(id, SignedUrl(id, "put"), DateTimeOffset.UtcNow + UrlLifetime);
 			Blobs = disk;
 			Maintenance = disk;
 			Disk = disk;
+		}
+		else
+		{
+			throw new ArgumentException($"-storage '{options.Storage}' is not supported: use disk (the default), memory, s3 or azure.");
 		}
 
 		Trees = new PostgresTreeStore(options.Postgres, options.Migrate);
@@ -115,6 +127,9 @@ internal sealed class ServerApp : IAsyncDisposable
 	public IObjectStoreMaintenance Maintenance { get; }
 
 	public DiskObjectStore? Disk { get; }
+
+	/// <summary>The in-memory blob store of <c>-storage memory</c>.</summary>
+	public MemoryObjectStore? Memory { get; }
 
 	public S3ObjectStore? S3 { get; }
 
@@ -817,20 +832,27 @@ internal sealed class ServerApp : IAsyncDisposable
 		// The live conflict overview: every open workspace reconciled with mainline, their overlaps and the hot paths.
 		api.MapGet("/conflicts", async () => Json(await Landing.Reconciler.OverviewAsync()));
 
-		// Signed blob access: the disk store's stand-in for presigned cloud URLs.
+		// Signed blob access: the disk (and memory) store's stand-in for presigned cloud URLs.
 		web.MapGet("/blobs/{id}", async (string id, HttpRequest request, HttpResponse response) =>
 		{
-			if (Disk is null || !TryId(id, out var objectId) || !Verify(objectId, "get", request))
+			if ((Disk is null && Memory is null) || !TryId(id, out var objectId) || !Verify(objectId, "get", request))
 			{
 				return Error(StatusCodes.Status403Forbidden, "The signature is invalid or expired.");
 			}
 
-			var path = Disk.PathOf(objectId);
+			if (Memory is not null)
+			{
+				return await Memory.ReadAsync(objectId) is { } bytes
+					? Results.File(bytes.ToArray(), "application/octet-stream", enableRangeProcessing: true)
+					: Error(404, $"No object {id}.");
+			}
+
+			var path = Disk!.PathOf(objectId);
 			return File.Exists(path) ? Results.File(path, "application/octet-stream", enableRangeProcessing: true) : Error(404, $"No object {id}.");
 		});
 		web.MapPut("/blobs/{id}", async (string id, HttpRequest request) =>
 		{
-			if (Disk is null || !TryId(id, out var objectId) || !Verify(objectId, "put", request))
+			if ((Disk is null && Memory is null) || !TryId(id, out var objectId) || !Verify(objectId, "put", request))
 			{
 				return Error(StatusCodes.Status403Forbidden, "The signature is invalid or expired.");
 			}
@@ -841,7 +863,7 @@ internal sealed class ServerApp : IAsyncDisposable
 				return Error(StatusCodes.Status400BadRequest, "The bytes do not hash to the object's id.");
 			}
 
-			await Disk.PutAsync(objectId, bytes);
+			await ((IObjectStore?)Disk ?? Memory!).PutAsync(objectId, bytes);
 			await State.ConfirmAsync([(objectId, bytes.Length)]);
 			ObjectsStored.Add(1);
 			return Results.NoContent();
