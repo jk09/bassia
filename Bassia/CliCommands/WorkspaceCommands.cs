@@ -169,6 +169,65 @@ internal static class WorkspaceCommands
 		return Ok(invocation, $"{workspaces.Count} {(all ? "" : "open ")}workspace(s).{more}", data);
 	}
 
+	/// <summary>
+	/// <c>bassia workspace conflicts</c>: the live conflict overview - every open workspace with what a landing would do
+	/// now, the paths two or more open workspaces change (whoever lands second meets the first) and the hot paths. The
+	/// server's on a clone; reconciled on read in a local monorepo.
+	/// </summary>
+	public static async Task<int> ConflictsAsync(Invocation invocation)
+	{
+		using var monorepo = Monorepo.Current();
+		var overview = await monorepo.Overview.OverviewAsync();
+		var data = new Dictionary<string, object?>
+		{
+			["main_seq"] = overview.MainSeq,
+			["can_land"] = overview.CanLand,
+			["blocked"] = overview.Blocked,
+			["table"] = Table(["NAME", "OUTCOME", "BASE", "TOUCHED", "CONFLICTS", "OVERLAPS", "CURRENT"], overview.Workspaces.Select(workspace => (IReadOnlyList<string>)
+			[
+				workspace.Name, workspace.Outcome, $"seq {workspace.BaseSeq}", workspace.Touched.ToString(), workspace.Conflicts.Count.ToString(),
+				workspace.Overlaps.Count.ToString(), workspace.Current ? "yes" : "no"
+			])),
+			["workspace"] = overview.Workspaces.Select(workspace => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+			{
+				["name"] = workspace.Name,
+				["id"] = workspace.Workspace,
+				["owner"] = workspace.Owner,
+				["status"] = workspace.Status,
+				["base_seq"] = workspace.BaseSeq,
+				["running"] = workspace.Running,
+				["outcome"] = workspace.Outcome,
+				["message"] = workspace.Message,
+				["reconciled_seq"] = workspace.ReconciledSeq,
+				["current"] = workspace.Current,
+				["touched"] = workspace.Touched,
+				["merged"] = workspace.Merged.ToList(),
+				["overlaps"] = workspace.Overlaps.ToList(),
+				["conflict"] = workspace.Conflicts.Select(conflict => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+				{
+					["path"] = conflict.Path,
+					["case"] = conflict.Case,
+					["policy"] = conflict.Policy,
+					["detail"] = conflict.Detail
+				}).ToList()
+			}).ToList(),
+			["overlap"] = overview.Overlaps.Select(overlap => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+			{
+				["path"] = overlap.Path,
+				["workspaces"] = overlap.Workspaces.ToList()
+			}).ToList(),
+			["hot_path"] = overview.HotPaths.Select(hot => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>
+			{
+				["path"] = hot.Path,
+				["workspaces"] = hot.Workspaces,
+				["conflicts"] = hot.Conflicts,
+				["refused"] = hot.Refused
+			}).ToList()
+		};
+		return Ok(invocation, $"{overview.Workspaces.Count} open workspace(s) on mainline seq {overview.MainSeq}: {overview.CanLand} can land, " +
+			$"{overview.Blocked} blocked; {overview.Overlaps.Count} path(s) changed by more than one.", data);
+	}
+
 	public static async Task<int> ShowAsync(Invocation invocation)
 	{
 		using var monorepo = Monorepo.Current();

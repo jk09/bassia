@@ -130,6 +130,10 @@ internal static class CommandTable
 				[Flag("all", "Also landed, closed, replaced and abandoned workspaces: the newest 100 of them."), Value("limit", "n", "With -all: the newest n closed workspaces.")],
 				["bassia workspace list", "bassia workspace list -all -human", "bassia workspace list -all -limit 500"],
 				WorkspaceCommands.ListAsync),
+			Cmd("conflicts", "The live conflict overview: what landing each open workspace would do now, the paths several open workspaces change, and the hot paths.",
+				[], ["bassia workspace conflicts", "bassia workspace conflicts -human"], WorkspaceCommands.ConflictsAsync,
+				Details: "Read from the server's reconciled candidates on a clone; a local monorepo reconciles stale workspaces when this is read. " +
+					"Outcomes are those of 'workspace check'; an overlap is a path two or more open workspaces change, so whichever lands second meets the first."),
 			Cmd("show", "One workspace in full: its record, run and last landing, and a summary of its changes.", [WorkspaceSwitch()],
 				["bassia workspace show fix-login"], WorkspaceCommands.ShowAsync, Positional: "workspace"),
 			Cmd("status", "Snapshot a workspace and list what it changed against its base, conflicts included.", [WorkspaceSwitch()],

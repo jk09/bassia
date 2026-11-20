@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Scenario tests: Bassia driven through its command line the way people and agents use it, grouped by user scenario
+       (the Scenario trait). See README.md. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Bassia.Scenarios</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.17.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The harness hosts the CLI and the server in-process (so breakpoints work); the scenarios themselves use only the
+         command line. -->
+    <ProjectReference Include="..\Bassia\Bassia.csproj" />
+    <ProjectReference Include="..\Bassia.Server\Bassia.Server.csproj" />
+    <ProjectReference Include="..\Bassia.Scenarios.Agent\Bassia.Scenarios.Agent.csproj" />
+  </ItemGroup>
+
+</Project>

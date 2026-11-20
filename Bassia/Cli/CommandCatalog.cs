@@ -14,7 +14,7 @@ internal static class CommandCatalog
 	public static readonly IReadOnlySet<string> ReadOnlyCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
 	{
 		"status", "version", "help", "config list", "config get",
-		"workspace list", "workspace show", "workspace status", "workspace diff", "workspace check", "workspace log",
+		"workspace list", "workspace conflicts", "workspace show", "workspace status", "workspace diff", "workspace check", "workspace log",
 		"mainline log", "mainline show", "mainline ls", "mainline cat", "mainline changed",
 		"lease list", "devdrive status", "agent list", "agent show", "agent logs", "agent wait", "scrub"
 	};

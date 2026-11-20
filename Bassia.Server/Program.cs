@@ -7,7 +7,7 @@ using Bassia.Stores;
 /// <c>bassia-server</c>: runs the server (a Web API for Bassia Studio, <c>bassia</c> clients and other clients), or a maintenance job over its data.
 /// <code>
 /// bassia-server -data <folder> [-url http://0.0.0.0:8080] [-public-url <url>] [-token <t> | -no-auth] [-cors-origin <origins>]
-///             -postgres <connection string> [-storage disk|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
+///             -postgres <connection string> [-storage disk|memory|s3|azure ...] [-semantic-driver <cmd>|off] [-validate <cmd>]
 /// bassia-server gc -data <folder> -postgres <connection string> [-grace-hours 24] [-retention-days 14] [-dry-run]
 /// bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]
 /// bassia-server migrate -postgres <connection string> [-check]
@@ -19,7 +19,7 @@ internal static class Program
 	private const string Usage = """
 		Usage:
 		  bassia-server -data <folder> -postgres <connection string> [-url <url>] [-public-url <url>] [-token <token> | -no-auth]
-		                [-storage disk | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
+		                [-storage disk | -storage memory | -storage s3 -bucket <b> [-region <r>] | -storage azure (-azure-connection <string> | -azure-url <container url>)]
 		                [-cors-origin <origin>[,<origin>...]] [-semantic-driver <command>|off] [-validate <command>]        run the server
 		  bassia-server gc -data <folder> -postgres <connection string> [-grace-hours <n>] [-retention-days <n>] [-dry-run] [-reconcile]   collect unreferenced blobs
 		  bassia-server scrub -data <folder> -postgres <connection string> [-sample <n>]                                      re-hash stored blobs and trees
