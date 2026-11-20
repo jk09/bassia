@@ -918,7 +918,9 @@ repositories), workspaces, landing, merge and conflict policies, leases, context
 (a deterministic stand-in agent; the real Claude Code with `BASSIA_SCENARIO_CLAUDE=1`), collaboration between
 clients, git export and maintenance. Each test records a transcript of its commands and results. The CLI and server run
 in-process for debugging, or installed builds with `BASSIA_SCENARIO_CLI` / `BASSIA_SCENARIO_SERVER`. See
-[Bassia.Scenarios/README.md](../Bassia.Scenarios/README.md).
+[Bassia.Scenarios/README.md](../Bassia.Scenarios/README.md). CI runs them on Linux (with the real Claude Code when the
+`ANTHROPIC_API_KEY` repository secret is set) and on Windows, with `BASSIA_SCENARIO_REQUIRE` so that a prerequisite
+the job provides is never skipped.
 
  `Bassia.Tests/Core` tests the version core on the in-memory
 stores: encoding and ids, chunking, property tests over the tree algebra (diff then apply reproduces the tree, merge

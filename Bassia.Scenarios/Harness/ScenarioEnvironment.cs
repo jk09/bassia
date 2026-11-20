@@ -76,6 +76,10 @@ internal static class ScenarioEnvironment
 			File.Exists(Path.Combine(directory, "weave-driver")) || File.Exists(Path.Combine(directory, "weave-driver.exe"))) == true
 			? null : "Needs weave's weave-driver on PATH (packaging/Get-Weave.ps1 fetches the pinned build).");
 
+	/// <summary>Whether <c>BASSIA_SCENARIO_REQUIRE</c> (comma-separated: postgres, git, network, claude, lazy, semantic, or all) names a prerequisite.</summary>
+	public static bool Required(string prerequisite) => Variable("BASSIA_SCENARIO_REQUIRE")?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+		.Any(item => item.Equals("all", StringComparison.OrdinalIgnoreCase) || item.Equals(prerequisite, StringComparison.OrdinalIgnoreCase)) == true;
+
 	public static string? Variable(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : null;
 
 	/// <summary>Whether a program runs and exits 0 within the time given.</summary>
@@ -134,13 +138,20 @@ public sealed class ScenarioFactAttribute : FactAttribute
 	}
 
 	internal static string? SkipReason(Needs needs) =>
-		ScenarioEnvironment.PostgresSkip
-		?? (needs.HasFlag(Needs.Git) ? ScenarioEnvironment.GitSkip : null)
-		?? (needs.HasFlag(Needs.Network) ? ScenarioEnvironment.NetworkSkip : null)
-		?? (needs.HasFlag(Needs.Claude) ? ScenarioEnvironment.ClaudeSkip : null)
-		?? (needs.HasFlag(Needs.Lazy) ? ScenarioEnvironment.LazySkip : null)
+		Unless("postgres", ScenarioEnvironment.PostgresSkip)
+		?? (needs.HasFlag(Needs.Git) ? Unless("git", ScenarioEnvironment.GitSkip) : null)
+		?? (needs.HasFlag(Needs.Network) ? Unless("network", ScenarioEnvironment.NetworkSkip) : null)
+		?? (needs.HasFlag(Needs.Claude) ? Unless("claude", ScenarioEnvironment.ClaudeSkip) : null)
+		?? (needs.HasFlag(Needs.Lazy) ? Unless("lazy", ScenarioEnvironment.LazySkip) : null)
 		?? (needs.HasFlag(Needs.Unix) && OperatingSystem.IsWindows() ? "Needs a Unix file system." : null)
-		?? (needs.HasFlag(Needs.Semantic) ? ScenarioEnvironment.SemanticSkip : null);
+		?? (needs.HasFlag(Needs.Semantic) ? Unless("semantic", ScenarioEnvironment.SemanticSkip) : null);
+
+	/// <summary>
+	/// The skip reason, unless <c>BASSIA_SCENARIO_REQUIRE</c> names the prerequisite (or is <c>all</c>): then the test
+	/// runs anyway and fails on what is missing, so a CI job never passes by skipping what it is meant to check.
+	/// </summary>
+	private static string? Unless(string prerequisite, string? reason) =>
+		reason is not null && ScenarioEnvironment.Required(prerequisite) ? null : reason;
 }
 
 /// <summary>A scenario theory; see <see cref="ScenarioFactAttribute"/>.</summary>

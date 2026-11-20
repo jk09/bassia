@@ -52,6 +52,10 @@ what works. They rely only on the documented command-line contract, so they keep
       outcomes an agent cannot get wrong by phrasing (the file the prompt asks for exists, the run succeeded and landed).
       *(Stand-in runs verified; the real Claude Code run is still to be verified on a signed-in machine: the record
       stays active until then.)*
+- [ ] Every test is part of GitHub CI: the Linux Test job runs all of `Bassia.Tests` and `Bassia.Scenarios`, the
+      real Claude Code scenarios included whenever the `ANTHROPIC_API_KEY` secret is set (with a notice when it is
+      not); a Windows job runs `Bassia.Scenarios` (cmd.exe agents, ProjFS lazy folders). Prerequisites a job provides
+      are required (`BASSIA_SCENARIO_REQUIRE`): their tests fail instead of being skipped.
 - [x] `Bassia.Scenarios/README.md` explains how to run and debug the scenarios locally (PostgreSQL in Docker, filters,
       the environment variables) and lists the scenarios.
 
@@ -73,6 +77,8 @@ what works. They rely only on the documented command-line contract, so they keep
 - Scenarios run against a server and clones, the main topology; a local monorepo (`bassia init`) is covered by its own
   small scenario, since its blobs are on local disk by design.
 - (User) Real Claude Code runs are opt-in (`BASSIA_SCENARIO_CLAUDE=1`): they cost tokens and are not deterministic.
+- (User, follow-up) Make all tests part of GitHub CI: the Claude Code scenarios run on every push and PR where the
+  `ANTHROPIC_API_KEY` secret exists; the scenario suite also runs on Windows (not macOS, not in installed-binary mode).
 - (User) GitHub imports use small public repositories: `octocat/Hello-World`, `octocat/Spoon-Knife` and
   `sindresorhus/slugify` (real history); overridable with `BASSIA_SCENARIO_REPOS`.
 
