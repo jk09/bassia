@@ -62,6 +62,7 @@ outcome = "needs-replay"
 | `BASSIA_SCENARIO_SERVER=<path>` | Run an installed `bassia-server` as a process (still `-storage memory`) instead of the in-process server. |
 | `BASSIA_SCENARIO_REPOS=<url>,...` | The git repositories the GitHub import scenarios use (default: `octocat/Hello-World`, `octocat/Spoon-Knife`, `sindresorhus/slugify`; the last one is imported with history). |
 | `BASSIA_SCENARIO_OFFLINE=1` | Skip the scenarios that need GitHub. |
+| `BASSIA_SCENARIO_REQUIRE=<list>` | Prerequisites that must be there (`postgres`, `git`, `network`, `claude`, `lazy`, `semantic`, or `all`): their tests run and fail instead of being skipped. CI sets it so nothing passes by skipping. |
 | `BASSIA_SCENARIO_CLAUDE=1` | Also run the agent scenarios with the real Claude Code (`claude` on PATH, signed in). Costs tokens and is not deterministic. |
 
 Scenarios that need something else say so when skipped: git, the network, FUSE 3 (`fusermount3`, Linux) or ProjFS

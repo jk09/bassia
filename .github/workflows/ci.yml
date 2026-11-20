@@ -48,6 +48,10 @@ jobs:
       BASSIA_TEST_REQUIRE_AZURITE: '1'
       # LazyFolderTests mount real FUSE file systems, and fail instead of checking nothing when FUSE is missing.
       BASSIA_TEST_REQUIRE_LAZY: '1'
+      # Bassia.Scenarios: what must be there runs and fails instead of being skipped. The real Claude Code scenarios run
+      # whenever the ANTHROPIC_API_KEY secret is set (not on fork PRs, which get no secrets).
+      BASSIA_SCENARIO_CLAUDE: ${{ secrets.ANTHROPIC_API_KEY != '' && '1' || '0' }}
+      BASSIA_SCENARIO_REQUIRE: ${{ secrets.ANTHROPIC_API_KEY != '' && 'postgres,git,network,lazy,semantic,claude' || 'postgres,git,network,lazy,semantic' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -78,6 +82,16 @@ jobs:
           ./packaging/Get-Weave.ps1 -Rid linux-x64 -Destination "$env:RUNNER_TEMP/weave"
           "$env:RUNNER_TEMP/weave" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
+      - name: Install Claude Code (agent scenarios)
+        if: env.BASSIA_SCENARIO_CLAUDE == '1'
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Note the skipped Claude Code scenarios
+        if: env.BASSIA_SCENARIO_CLAUDE != '1'
+        run: echo "::notice title=Claude Code scenarios skipped::Add the ANTHROPIC_API_KEY repository secret to run the real Claude Code agent scenarios."
+
       - name: Start Azurite
         run: |
           mkdir -p "$RUNNER_TEMP/azurite"
@@ -103,6 +117,8 @@ jobs:
         run: dotnet test --configuration Release --no-build --filter Category=Azurite --logger "console;verbosity=normal"
 
       - name: Test
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: dotnet test --configuration Release --no-build --filter "Category!=Azurite" --logger "console;verbosity=normal"
 
       # The load harness on its smallest scenario: it fails when the harness breaks, never on how fast the runner is.
@@ -177,6 +193,52 @@ jobs:
         env:
           BASSIA_TEST_REQUIRE_LAZY: '1'
         run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName~LazyFolder" --logger "console;verbosity=normal"
+
+  scenarios-windows:
+    name: Scenarios (Windows)
+    # Bassia.Scenarios on Windows: the command line, cmd.exe agent commands, ProjFS lazy folders and Windows paths.
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      BASSIA_SCENARIO_REQUIRE: postgres,git,network,lazy,semantic
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the .NET SDK (Windows)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = ((Invoke-RestMethod "$env:DOTNET_FEED/Sdk/$env:DOTNET_CHANNEL/latest.version" -MaximumRetryCount 3) -split "`n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Last 1)
+          $zip = Join-Path $env:RUNNER_TEMP 'dotnet-sdk.zip'
+          Invoke-WebRequest "$env:DOTNET_FEED/Sdk/$version/dotnet-sdk-$version-win-x64.zip" -OutFile $zip -MaximumRetryCount 3
+          $dir = Join-Path $env:USERPROFILE '.dotnet'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          & (Join-Path $dir 'dotnet.exe') --version
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Put the pinned weave-driver on PATH
+        shell: pwsh
+        run: |
+          ./packaging/Get-Weave.ps1 -Rid win-x64 -Destination "$env:RUNNER_TEMP\weave"
+          "$env:RUNNER_TEMP\weave" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Enable ProjFS (lazy folders)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart -All | Format-List
+
+      - name: Start a local PostgreSQL
+        shell: pwsh
+        run: ./scripts/Start-CiPostgres.ps1
+
+      - name: Build
+        run: dotnet build Bassia.Scenarios --configuration Release
+
+      - name: Scenario tests
+        run: dotnet test Bassia.Scenarios --configuration Release --no-build --logger "console;verbosity=normal"
 
   local-cloud:
     name: Local cloud (${{ matrix.mode }}, ${{ matrix.os }})
